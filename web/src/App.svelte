@@ -2,6 +2,7 @@
   // 应用外壳：顶栏 + 视图切换（练习场 / 题库）。
   import { theme, toggleTheme } from './lib/theme.svelte';
   import { app, setViewName } from './lib/store.svelte';
+  import { t, toggleLang, i18n } from './lib/i18n.svelte';
   import TopoCanvas from './components/TopoCanvas.svelte';
   import LeftPanel from './components/LeftPanel.svelte';
   import TerminalPanel from './components/TerminalPanel.svelte';
@@ -17,34 +18,42 @@
 
 <div class="shell">
   <header>
-    <div class="brand">网工模拟器</div>
+    <div class="brand">{t('app.brand')}</div>
     <nav>
       <span class="nav-item" class:active={app.viewName === 'lab'} onclick={() => nav('lab')}>
-        练习场
+        {t('nav.lab')}
       </span>
       <span class="nav-item" class:active={app.viewName === 'quiz'} onclick={() => nav('quiz')}>
-        题库
+        {t('nav.quiz')}
       </span>
       <span
         class="nav-item"
         class:active={app.viewName === 'course'}
         onclick={() => nav('course')}
       >
-        课程
+        {t('nav.course')}
       </span>
       <span
         class="nav-item"
         class:active={app.viewName === 'notes'}
         onclick={() => nav('notes')}
       >
-        笔记
+        {t('nav.notes')}
       </span>
     </nav>
     <button
       class="theme-toggle"
+      onclick={toggleLang}
+      title={t('lang.toggle')}
+      aria-label={t('lang.toggle')}
+    >
+      {i18n.lang === 'zh' ? 'EN' : '中'}
+    </button>
+    <button
+      class="theme-toggle"
       onclick={toggleTheme}
-      title={theme.name === 'dark' ? '切换到亮色（工程图纸）' : '切换到暗色（机房夜航）'}
-      aria-label={theme.name === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}
+      title={theme.name === 'dark' ? t('theme.title.light') : t('theme.title.dark')}
+      aria-label={theme.name === 'dark' ? t('theme.title.light') : t('theme.title.dark')}
     >
       {theme.name === 'dark' ? '☀︎' : '☾'}
     </button>

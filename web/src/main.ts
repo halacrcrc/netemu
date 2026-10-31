@@ -5,7 +5,18 @@ import { mount } from 'svelte';
 import App from './App.svelte';
 import { loadSim, dumpSummary } from './lib/sim';
 import { app, refreshFrom } from './lib/store.svelte';
-import { loadWorkspace, markDirty } from './lib/persistence';
+import { currentWorkspace, loadWorkspace, markDirty, type Workspace } from './lib/persistence';
+import { buildShareUrl, decodeWorkspace } from './lib/share';
+
+function applyEditor(ws: Workspace) {
+  for (const [id, pos] of Object.entries(ws.editor.positions ?? {})) {
+    app.positions[Number(id)] = pos;
+  }
+  app.pan = ws.editor.pan ?? app.pan;
+  app.zoom = ws.editor.zoom ?? 1;
+  app.tabs = (ws.editor.tabs ?? []).filter((id) => ws.net.devices.some((d) => d.id === id));
+  app.activeTab = app.tabs[0] ?? null;
+}
 
 declare global {
   interface Window {
@@ -13,13 +24,27 @@ declare global {
       exec: (dev: number, line: string) => string;
       sim: unknown;
       dump: () => string;
+      shareUrl: () => Promise<string>;
     };
   }
 }
 
 async function boot() {
   const sim = await loadSim();
-  const ws = loadWorkspace();
+  let loaded = false;
+  // 分享链接优先：URL hash 中的拓扑覆盖本地工作区
+  const hash = location.hash;
+  if (hash.startsWith('#topo=')) {
+    try {
+      const ws = await decodeWorkspace(hash.slice('#topo='.length));
+      sim.load(JSON.stringify(ws.net));
+      applyEditor(ws);
+      loaded = true;
+    } catch (e) {
+      console.warn('分享链接解析失败，已忽略', e);
+    }
+  }
+  const ws = loaded ? null : loadWorkspace();
   if (ws) {
     try {
       sim.load(JSON.stringify(ws.net));
@@ -29,15 +54,7 @@ async function boot() {
       localStorage.removeItem('netemu.workspace.v1');
       sim.reset();
     }
-    for (const [id, pos] of Object.entries(ws.editor.positions ?? {})) {
-      app.positions[Number(id)] = pos;
-    }
-    app.pan = ws.editor.pan ?? app.pan;
-    app.zoom = ws.editor.zoom ?? 1;
-    app.tabs = (ws.editor.tabs ?? []).filter((id) =>
-      ws.net.devices.some((d) => d.id === id)
-    );
-    app.activeTab = app.tabs[0] ?? null;
+    applyEditor(ws);
   }
   const s = dumpSummary(sim);
   refreshFrom(s.devices, s.links);
@@ -49,6 +66,7 @@ async function boot() {
   window.__netemu = {
     sim,
     dump: () => JSON.stringify(dumpSummary(sim)),
+    shareUrl: () => buildShareUrl(currentWorkspace()),
     exec: (dev: number, line: string) => {
       const out = sim.exec_command(dev, line);
       const s2 = dumpSummary(sim);

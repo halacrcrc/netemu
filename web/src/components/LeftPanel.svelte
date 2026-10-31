@@ -1,9 +1,11 @@
 <script lang="ts">
   // 左侧面板：设备库、属性编辑、链路抓包、实验卡、示例任务卡。
   import { getSim, dumpSummary } from '../lib/sim';
-  import { app, deviceById, refreshFrom, openTerminal, setLabTitle, setLabChecks, markLabPassed } from '../lib/store.svelte';
-  import { markDirty } from '../lib/persistence';
-  import { LABS, applyLab, runLabChecks, type LabDef } from '../lib/labs';
+  import { app, deviceById, refreshFrom, openTerminal, setLabTitle, setLabChecks, markLabPassed, resetPositions, setPosition, setView } from '../lib/store.svelte';
+  import { markDirty, currentWorkspace, exportFile, importFile } from '../lib/persistence';
+  import { buildShareUrl } from '../lib/share';
+  import { LABS, applyLab, runLabChecks, labTitle, labBrief, labTasks, type LabDef } from '../lib/labs';
+  import { t } from '../lib/i18n.svelte';
 
   (window as unknown as { __appComp?: unknown }).__appComp = app;
   let newKind = $state<'Router' | 'Switch' | 'Host'>('Router');
@@ -15,6 +17,9 @@
   let editIp = $state('');
   let editPrefix = $state(24);
   let editGw = $state('');
+  let editIp6 = $state('');
+  let editPrefix6 = $state(64);
+  let editGw6 = $state('');
   let lastEditedId = $state<number | null>(null);
 
   const selectedDev = $derived(
@@ -34,6 +39,9 @@
       editIp = d.ports[0]?.ip ?? '';
       editPrefix = d.ports[0]?.prefix ?? 24;
       editGw = d.gw ?? '';
+      editIp6 = d.ports[0]?.ipv6 ?? '';
+      editPrefix6 = d.ports[0]?.prefix6 ?? 64;
+      editGw6 = d.gw6 ?? '';
       lastEditedId = d.id;
     }
   });
@@ -75,6 +83,17 @@
     if (!d || d.kind !== 'Host') return;
     try {
       getSim().set_host_config(d.id, editIp.trim(), editPrefix, editGw.trim());
+      refreshFromSim();
+    } catch (err) {
+      alert(String(err));
+    }
+  }
+
+  function applyHostV6() {
+    const d = selectedDev;
+    if (!d || d.kind !== 'Host') return;
+    try {
+      getSim().set_host_v6(d.id, editIp6.trim(), editPrefix6, editGw6.trim());
       refreshFromSim();
     } catch (err) {
       alert(String(err));
@@ -263,79 +282,130 @@
     setLabTitle(null);
     setLabChecks(null);
   }
+
+  // ---------- 拓扑导入 / 分享 ----------
+  let fileInput = $state<HTMLInputElement | null>(null);
+  let topoMsg = $state('');
+
+  async function copyShare() {
+    try {
+      const url = await buildShareUrl(currentWorkspace());
+      try {
+        await navigator.clipboard.writeText(url);
+        topoMsg = `${t('left.shareCopied')} (${url.length})`;
+      } catch {
+        window.prompt(t('left.promptShare'), url);
+        topoMsg = t('left.shareManual');
+      }
+    } catch (e) {
+      topoMsg = `${t('left.shareFail')}: ${String(e)}`;
+    }
+  }
+
+  async function doImport(ev: Event) {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const ws = await importFile(file);
+      getSim().load(JSON.stringify(ws.net));
+      resetPositions();
+      for (const [id, pos] of Object.entries(ws.editor.positions ?? {})) {
+        setPosition(Number(id), pos);
+      }
+      setView(ws.editor.pan ?? { x: 20, y: 30 }, ws.editor.zoom ?? 1);
+      const s = dumpSummary(getSim());
+      refreshFrom(s.devices, s.links);
+      markDirty();
+      topoMsg = t('left.importOk');
+    } catch (e) {
+      topoMsg = `${t('left.importFail')}: ${String(e)}`;
+    }
+  }
 </script>
 
 <div class="left-panel">
   <section class="panel">
-    <h3>设备库</h3>
+    <h3>{t('left.devices')}</h3>
     <div class="pad add-row">
       <select bind:value={newKind}>
-        <option value="Router">路由器</option>
-        <option value="Switch">交换机</option>
-        <option value="Host">PC</option>
+        <option value="Router">{t('left.router')}</option>
+        <option value="Switch">{t('left.switch')}</option>
+        <option value="Host">{t('left.pc')}</option>
       </select>
       {#if newKind !== 'Host'}
         <select bind:value={newDialect}>
-          <option value="Ios">思科 IOS</option>
-          <option value="Vrp">华为 VRP</option>
-          <option value="Comware">华三 Comware</option>
+          <option value="Ios">{t('course.ios')}</option>
+          <option value="Vrp">{t('course.vrp')}</option>
+          <option value="Comware">{t('course.comware')}</option>
         </select>
       {/if}
-      <button class="primary" onclick={addDevice}>＋ 添加</button>
+      <button class="primary" onclick={addDevice}>{t('left.add')}</button>
     </div>
-    <div class="pad hint">拖动设备摆放位置；点「🔌 连线」后依次点击两台设备；双击设备打开终端。</div>
+    <div class="pad hint">{t('left.hint')}</div>
   </section>
 
   <section class="panel">
-    <h3>属性</h3>
+    <h3>{t('left.props')}</h3>
     {#if selectedDev}
       <div class="pad props">
-        <label>名称</label>
+        <label>{t('left.name')}</label>
         <div class="row">
           <input bind:value={editName} onblur={applyRename} onkeydown={(e) => e.key === 'Enter' && applyRename()} />
         </div>
         {#if selectedDev.kind !== 'Host'}
-          <label>命令方言</label>
+          <label>{t('left.dialect')}</label>
           <div class="row">
             <select bind:value={editDialect} onchange={applyDialect}>
-              <option value="Ios">思科 IOS</option>
-              <option value="Vrp">华为 VRP</option>
-              <option value="Comware">华三 Comware</option>
+              <option value="Ios">{t('course.ios')}</option>
+              <option value="Vrp">{t('course.vrp')}</option>
+              <option value="Comware">{t('course.comware')}</option>
             </select>
           </div>
           <div class="ports mono">
             {#each selectedDev.ports as p}
               <div>
-                端口{p.idx}：{p.admin_up ? '开启' : '关闭'}
-                {p.linked ? '·有链路' : ''} {p.ip ?? ''}
+                {t('left.port')}{p.idx}: {p.admin_up ? t('left.on') : t('left.off')}
+                {p.linked ? '·' + t('left.linked') : ''} {p.ip ?? ''}
               </div>
             {/each}
           </div>
         {:else}
           <button class="dhcp-btn" class:on={dhcpOn} onclick={toggleDhcp}>
-            {dhcpOn ? '✓ DHCP 自动获取（点击关闭）' : 'DHCP 自动获取地址'}
+            {dhcpOn ? t('left.dhcpOn') : t('left.dhcpOff')}
           </button>
           {#if !dhcpOn}
-            <label>IP 地址</label>
+            <label>{t('left.ip')}</label>
             <div class="row">
-              <input class="mono" bind:value={editIp} placeholder="如 192.168.1.10" />
+              <input class="mono" bind:value={editIp} placeholder="192.168.1.10" />
               <input class="mono" type="number" min="0" max="32" bind:value={editPrefix} style="width:64px" />
             </div>
-            <label>网关</label>
+            <label>{t('left.gw')}</label>
             <div class="row">
-              <input class="mono" bind:value={editGw} placeholder="如 192.168.1.1" />
-              <button onclick={applyHost}>应用</button>
+              <input class="mono" bind:value={editGw} placeholder="192.168.1.1" />
+              <button onclick={applyHost}>{t('left.apply')}</button>
             </div>
           {/if}
-          <div class="hint">终端里 ipconfig 查看；ipconfig /renew 或 dhcp 重新获取。</div>
+          <label>{t('left.ipv6')}</label>
+          <div class="row">
+            <input class="mono" bind:value={editIp6} placeholder="2001:db8::10" />
+            <input class="mono" type="number" min="0" max="128" bind:value={editPrefix6} style="width:64px" />
+          </div>
+          <label>{t('left.gw6')}</label>
+          <div class="row">
+            <input class="mono" bind:value={editGw6} placeholder="2001:db8::1" />
+            <button onclick={applyHostV6}>{t('left.apply')}</button>
+          </div>
+          <div class="hint">{t('left.hostHint')}</div>
         {/if}
-        <button class="danger" onclick={removeSelected}>删除设备（Del）</button>
+        <button class="danger" onclick={removeSelected}>{t('left.deleteDev')}</button>
       </div>
     {:else if selectedLink}
       <div class="pad props">
-        <div class="hint">链路（点击线条选中，Del 删除）</div>
+        <div class="hint">{t('left.linkHint')}</div>
         {#if captureOn}
-          <button onclick={stopCapture}>⏹ 停止抓包</button>
+          <button onclick={stopCapture}>{t('left.stopCapture')}</button>
           <div class="cap-list mono">
             {#each captureRows as r (r.seq)}
               <div class="cap-row">
@@ -345,28 +415,28 @@
                 <div class="cap-info">{r.info}</div>
               </div>
             {:else}
-              <div class="hint">等待报文…（在终端里 ping 一下）</div>
+              <div class="hint">{t('left.waiting')}</div>
             {/each}
           </div>
         {:else}
-          <button onclick={startCapture}>🔍 开启抓包（看报文怎么走）</button>
+          <button onclick={startCapture}>{t('left.startCapture')}</button>
         {/if}
-        <button class="danger" onclick={removeSelected}>删除链路（Del）</button>
+        <button class="danger" onclick={removeSelected}>{t('left.deleteLink')}</button>
       </div>
     {:else}
-      <div class="pad hint">点击设备或链路查看属性。选中链路可以抓包看每个报文。</div>
+      <div class="pad hint">{t('left.noSelection')}</div>
     {/if}
   </section>
 
   <section class="panel">
-    <h3>实验（M1 · 数通 IA）</h3>
+    <h3>{t('left.labs')}</h3>
     <div class="pad">
       {#if activeLab}
-        <div class="lab-title">{activeLab.title}</div>
-        <div class="hint">{activeLab.brief}</div>
+        <div class="lab-title">{labTitle(activeLab)}</div>
+        <div class="hint">{labBrief(activeLab)}</div>
         <ol class="task">
-          {#each activeLab.tasks as t}
-            <li>{@html t}</li>
+          {#each labTasks(activeLab) as task}
+            <li>{@html task}</li>
           {/each}
         </ol>
         <button
@@ -377,7 +447,7 @@
             markLabPassed(activeLab!.id, r.every((x) => x.passed));
           }}
         >
-          ✓ 检查我的配置
+          {t('left.checkBtn')}
         </button>
         {#if app.labChecks}
           <div class="check mono">
@@ -389,24 +459,24 @@
             {/each}
           </div>
         {/if}
-        <button onclick={() => startLab(activeLab!)}>↻ 重置实验</button>
-        <button class="danger" onclick={exitLab}>退出实验（保留拓扑）</button>
+        <button onclick={() => startLab(activeLab!)}>{t('left.resetLab')}</button>
+        <button class="danger" onclick={exitLab}>{t('left.exitLab')}</button>
       {:else}
         {#each LABS as lab (lab.id)}
           <button class="lab-btn" onclick={() => startLab(lab)}>
-            {lab.title}
+            {labTitle(lab)}
             {#if app.labPassed[lab.id]}<span class="pass-mark">✓</span>{/if}
           </button>
-          <div class="hint">{lab.brief}</div>
+          <div class="hint">{labBrief(lab)}</div>
         {/each}
       {/if}
     </div>
   </section>
 
   <section class="panel">
-    <h3>入门任务（双路由器 · M0）</h3>
+    <h3>{t('left.demoTitle')}</h3>
     <div class="pad">
-      <button onclick={demoTopology}>加载示例拓扑</button>
+      <button onclick={demoTopology}>{t('left.loadDemo')}</button>
       {#if demoReady}
         <ol class="task">
           <li>R1：g0/0 配 <code class="mono">192.168.1.1/24</code>、g0/1 配 <code class="mono">10.0.0.1/24</code>，并 <code class="mono">no shutdown</code></li>
@@ -414,18 +484,39 @@
           <li>R1/R2 各配静态路由到对方网段</li>
           <li>从 PC1 终端 <code class="mono">ping 192.168.2.10</code></li>
         </ol>
-        <button class="primary" onclick={runChecks}>✓ 检查我的配置</button>
+        <button class="primary" onclick={runChecks}>{t('left.checkBtn')}</button>
         {#if checkResult}
           <div class="check mono">
             <div class={checkResult.ping ? 'good' : 'bad'}>
-              {checkResult.ping ? '✓' : '✗'} PC1 → 192.168.2.10 连通
+              {checkResult.ping ? '✓' : '✗'} {t('left.demoPing')}
             </div>
             <div class={checkResult.route ? 'good' : 'bad'}>
-              {checkResult.route ? '✓' : '✗'} R1 存在去往 192.168.2.0/24 的静态路由
+              {checkResult.route ? '✓' : '✗'} {t('left.demoRoute')}
             </div>
           </div>
         {/if}
       {/if}
+    </div>
+  </section>
+
+  <section class="panel">
+    <h3>{t('left.topoTitle')}</h3>
+    <div class="pad">
+      <div class="row">
+        <button onclick={exportFile}>{t('left.export')}</button>
+        <button onclick={() => fileInput?.click()}>{t('left.import')}</button>
+      </div>
+      <div class="row">
+        <button class="primary" onclick={copyShare}>{t('left.share')}</button>
+      </div>
+      <input
+        class="hidden-file"
+        type="file"
+        accept="application/json,.json"
+        bind:this={fileInput}
+        onchange={doImport}
+      />
+      {#if topoMsg}<div class="hint">{topoMsg}</div>{/if}
     </div>
   </section>
 </div>
@@ -435,8 +526,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    padding: 10px;
-    overflow-y: auto;
+    padding: 10px;    overflow-y: auto;
     height: 100%;
   }
   .pad {
@@ -460,6 +550,9 @@
   .row {
     display: flex;
     gap: 6px;
+  }
+  .hidden-file {
+    display: none;
   }
   .row input {
     flex: 1;

@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { getSim, statsOf } from '../lib/sim';
   import { app } from '../lib/store.svelte';
+  import { t } from '../lib/i18n.svelte';
 
   let display = $state({ virtualNs: 0, events: 0, inFlight: 0, dropped: 0 });
 
@@ -25,14 +26,14 @@
 </script>
 
 <div class="statusbar">
-  <span>虚拟时间 <b class="mono">{secs}s</b></span>
-  <span>已处理事件 <b class="mono">{display.events}</b></span>
-  <span>在途报文 <b class="mono">{display.inFlight}</b></span>
-  <span>丢弃 <b class="mono" class:warn={display.dropped > 0}>{display.dropped}</b></span>
+  <span>{t('status.time')} <b class="mono">{secs}s</b></span>
+  <span>{t('status.events')} <b class="mono">{display.events}</b></span>
+  <span>{t('status.flight')} <b class="mono">{display.inFlight}</b></span>
+  <span>{t('status.dropped')} <b class="mono" class:warn={display.dropped > 0}>{display.dropped}</b></span>
   <span class="spacer"></span>
-  <span>设备 <b class="mono">{app.devices.length}</b></span>
-  <span>链路 <b class="mono">{app.links.length}</b></span>
-  <span class="ver">M0 · 逐包仿真内核 + 三方言 CLI</span>
+  <span>{t('status.devices')} <b class="mono">{app.devices.length}</b></span>
+  <span>{t('status.links')} <b class="mono">{app.links.length}</b></span>
+  <span class="ver">{t('status.version')}</span>
 </div>
 
 <style>

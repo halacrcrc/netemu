@@ -8,6 +8,8 @@ export interface PortSummary {
   ip: string | null;
   prefix: number;
   linked: boolean;
+  ipv6?: string | null;
+  prefix6?: number;
 }
 
 export interface StaticRouteSummary {
@@ -26,6 +28,7 @@ export interface DevSummary {
   dialect: Dialect;
   ports: PortSummary[];
   gw: string | null;
+  gw6?: string | null;
   static_routes: StaticRouteSummary[];
   dhcp_enable?: boolean;
 }

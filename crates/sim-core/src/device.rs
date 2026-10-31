@@ -53,6 +53,8 @@ pub enum Dialect {
 pub enum RouteSrc {
     Connected,
     Static,
+    /// OSPF 动态学习
+    Ospf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +72,47 @@ pub struct Route {
 pub struct ArpEntry {
     pub mac: Mac,
     pub port: PortId,
+}
+
+/// IPv6 邻居缓存（NDP）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NdpEntry {
+    pub mac: Mac,
+    pub port: PortId,
+}
+
+/// IPv6 静态路由。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Route6 {
+    pub dst: Ipv6Addr,
+    pub len: u8,
+    pub nexthop: Ipv6Addr,
+    pub src: RouteSrc,
+}
+
+/// 等 NDP 解析后发送的 IPv6 报文。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending6 {
+    pub port: PortId,
+    pub dst_ip: Ipv6Addr,
+    pub src_ip: Ipv6Addr,
+    pub src_mac: Mac,
+    pub pkt: Ipv6Packet,
+}
+
+/// IPv6 ping 会话（简化：5 个探测）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Ping6Session {
+    pub id: u16,
+    pub target: Ipv6Addr,
+    pub sent: u32,
+    pub received: u32,
+    pub done: bool,
+    pub reported: bool,
+}
+
+impl Ping6Session {
+    pub const TOTAL: u32 = 5;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +295,20 @@ pub struct RouterState {
     pub nat_entries: Vec<NatEntry>,
     /// 静态 NAT：inside_ip → outside_ip
     pub nat_static: Vec<(Ipv4Addr, Ipv4Addr)>,
+    /// IPv6 静态路由
+    #[serde(default)]
+    pub static_routes6: Vec<Route6>,
+    /// IPv6 邻居缓存 / 解析中 / 挂起报文 / ping6
+    #[serde(default)]
+    pub ndp: HashMap<(PortId, Ipv6Addr), NdpEntry>,
+    #[serde(default)]
+    pub ndping: std::collections::HashSet<(PortId, Ipv6Addr)>,
+    #[serde(default)]
+    pub pending6: Vec<Pending6>,
+    #[serde(default)]
+    pub pings6: Vec<Ping6Session>,
+    #[serde(default)]
+    pub next_ping6_id: u32,
     /// ARP 表按 (接口, VLAN) 隔离。
     pub arp: HashMap<(PortId, Option<VlanId>, Ipv4Addr), ArpEntry>,
     /// 已发出 ARP 请求、等待解析的 (端口, VLAN, 目标IP)，防止重复请求。
@@ -259,6 +316,41 @@ pub struct RouterState {
     pub pending: Vec<PendingFrame>,
     pub pings: Vec<PingSession>,
     pub next_ping_id: u32,
+    /// OSPF network 语句（网段 + 通配符），区域固定为 0（简化）
+    #[serde(default)]
+    pub ospf_networks: Vec<(Ipv4Addr, Ipv4Addr)>,
+    /// OSPF 计算出的动态路由（瞬态）
+    #[serde(default)]
+    pub ospf_routes: Vec<Route>,
+    /// VRRP 组（主备网关）
+    #[serde(default)]
+    pub vrrp: Vec<VrrpGroup>,
+}
+
+/// VRRP 组成员状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VrrpState {
+    #[default]
+    Init,
+    Master,
+    Backup,
+}
+
+/// VRRP 组：虚拟网关（简化，单 VRRP 实例）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VrrpGroup {
+    pub vrid: u8,
+    pub vip: Ipv4Addr,
+    pub port: PortId,
+    pub priority: u8,
+    pub preempt: bool,
+    pub state: VrrpState,
+    pub last_advert_ns: u64,
+}
+
+/// VRRP 虚拟 MAC：00:00:5e:00:01:{vrid}
+pub fn vrrp_mac(vrid: u8) -> Mac {
+    [0x00, 0x00, 0x5e, 0x00, 0x01, vrid]
 }
 
 /// STP 端口角色。
@@ -283,10 +375,61 @@ pub enum StpSt {
     Forwarding,
 }
 
-/// 单台交换机的 STP 实例（M2a：全网单实例，类 CST；MSTP 后续里程碑）。
+/// STP 工作模式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StpMode {
+    /// 802.1D 经典 STP（30s 收敛）
+    #[default]
+    Dot1d,
+    /// RSTP 快速生成树（本模拟器简化：端口直达转发，故障即时切换）
+    Rstp,
+    /// MSTP 多实例（简化：无域协商，按 instance 独立计算）
+    Mstp,
+}
+
+/// 单个 STP 实例的计算现场（CIST 与 MSTI 共用同一套字段）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StpSnapshot {
+    pub root: sim_packets::BridgeId,
+    pub root_cost: u32,
+    pub root_port: Option<PortId>,
+    pub ports: HashMap<PortId, StpPortSt>,
+    pub port_bpdus: HashMap<PortId, sim_packets::BpduPacket>,
+    pub last_bpdu_ns: HashMap<PortId, u64>,
+    pub epochs: HashMap<PortId, u32>,
+}
+
+impl Default for StpSnapshot {
+    fn default() -> Self {
+        Self {
+            root: sim_packets::BridgeId {
+                priority: 32768,
+                mac: [0xff; 6],
+            },
+            root_cost: 0,
+            root_port: None,
+            ports: HashMap::new(),
+            port_bpdus: HashMap::new(),
+            last_bpdu_ns: HashMap::new(),
+            epochs: HashMap::new(),
+        }
+    }
+}
+
+/// MST 实例（MSTI）：优先级 + 映射的 VLAN + 计算现场。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MstInstance {
+    pub priority: u16,
+    pub vlans: Vec<VlanId>,
+    pub data: StpSnapshot,
+}
+
+/// 单台交换机的 STP 实例（CIST + MSTI；无 MSTP 域协商）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StpInstance {
     pub enabled: bool,
+    #[serde(default)]
+    pub mode: StpMode,
     pub priority: u16,
     /// 当前认知的根桥
     pub root: sim_packets::BridgeId,
@@ -301,6 +444,12 @@ pub struct StpInstance {
     pub last_bpdu_ns: HashMap<PortId, u64>,
     /// 状态推进事件的纪元（角色变化后旧事件作废）
     pub epochs: HashMap<PortId, u32>,
+    /// MSTI 实例（id → 实例），CIST 为 id 0（上面的字段）
+    #[serde(default)]
+    pub mst: HashMap<u16, MstInstance>,
+    /// VLAN → MSTI 实例映射（缺省为 CIST）
+    #[serde(default)]
+    pub vlan_instance: HashMap<VlanId, u16>,
     /// hello 定时器是否已在队列中
     pub hello_pending: bool,
 }
@@ -309,6 +458,7 @@ impl Default for StpInstance {
     fn default() -> Self {
         Self {
             enabled: true,
+            mode: StpMode::Dot1d,
             priority: 32768,
             root: sim_packets::BridgeId {
                 priority: 32768,
@@ -320,6 +470,8 @@ impl Default for StpInstance {
             port_bpdus: HashMap::new(),
             last_bpdu_ns: HashMap::new(),
             epochs: HashMap::new(),
+            mst: HashMap::new(),
+            vlan_instance: HashMap::new(),
             hello_pending: false,
         }
     }
@@ -351,6 +503,45 @@ impl StpInstance {
     pub fn set_port(&mut self, port: PortId, role: StpRole, state: StpSt) {
         self.ports.insert(port, StpPortSt { role, state });
     }
+
+    /// 某 VLAN 使用的 STP 实例（缺省 CIST=0）。
+    pub fn instance_for_vlan(&self, vlan: VlanId) -> u16 {
+        self.vlan_instance.get(&vlan).copied().unwrap_or(0)
+    }
+
+    /// 实例配置（不存在则创建）。
+    pub fn ensure_mst(&mut self, id: u16) -> &mut MstInstance {
+        self.mst.entry(id).or_insert_with(|| MstInstance {
+            priority: 32768,
+            vlans: vec![],
+            data: StpSnapshot::default(),
+        })
+    }
+
+    /// 实例当前端口状态（0 = CIST）。
+    pub fn state_in(&self, instance: u16, port: PortId) -> StpSt {
+        if instance == 0 {
+            self.state_of(port)
+        } else {
+            self.mst
+                .get(&instance)
+                .and_then(|m| m.data.ports.get(&port))
+                .map(|p| p.state)
+                .unwrap_or(StpSt::Blocking)
+        }
+    }
+
+    pub fn role_in(&self, instance: u16, port: PortId) -> StpRole {
+        if instance == 0 {
+            self.role_of(port)
+        } else {
+            self.mst
+                .get(&instance)
+                .and_then(|m| m.data.ports.get(&port))
+                .map(|p| p.role)
+                .unwrap_or(StpRole::Disabled)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,6 +562,9 @@ pub struct SviState {
 pub struct SwitchState {
     /// STP 实例（默认启用）
     pub stp: StpInstance,
+    /// 链路聚合组（id → 组）
+    #[serde(default)]
+    pub lags: HashMap<u16, LagGroup>,
     /// 已创建的 VLAN（1 恒存在）。
     pub vlans: Vec<VlanId>,
     /// (VLAN, MAC) → 学习端口。
@@ -392,6 +586,10 @@ impl SwitchState {
             self.vlans.sort_unstable();
         }
     }
+
+    pub fn ensure_lag(&mut self, id: u16) -> &mut LagGroup {
+        self.lags.entry(id).or_insert_with(|| LagGroup::new(id))
+    }
 }
 
 /// 主机 DHCP 客户端状态。
@@ -404,6 +602,9 @@ pub struct HostDhcp {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HostState {
     pub gw: Option<Ipv4Addr>,
+    /// IPv6 默认网关
+    #[serde(default)]
+    pub gw6: Option<Ipv6Addr>,
     /// DHCP 自动获取：启用后忽略静态配置
     pub dhcp_enable: bool,
     pub dhcp: Option<HostDhcp>,
@@ -412,6 +613,17 @@ pub struct HostState {
     pub pending: Vec<PendingFrame>,
     pub pings: Vec<PingSession>,
     pub next_ping_id: u32,
+    /// IPv6 邻居/解析/挂起/ping6
+    #[serde(default)]
+    pub ndp: HashMap<Ipv6Addr, NdpEntry>,
+    #[serde(default)]
+    pub ndping: std::collections::HashSet<Ipv6Addr>,
+    #[serde(default)]
+    pub pending6: Vec<Pending6>,
+    #[serde(default)]
+    pub pings6: Vec<Ping6Session>,
+    #[serde(default)]
+    pub next_ping6_id: u32,
 }
 
 /// EasyIP 转换表项（ICMP：以 echo id 区分会话）。
@@ -423,6 +635,7 @@ pub struct NatEntry {
     pub outside_id: u16,
 }
 
+#[allow(clippy::large_enum_variant)] // 设备状态按值存放，便于到处直接模式匹配
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DeviceState {
     Router(RouterState),
@@ -456,6 +669,14 @@ pub struct Port {
     pub trunk_allowed: Option<Vec<VlanId>>,
     /// STP 端口成本覆盖；None = 按速率推导（1Gbps → 4）。
     pub stp_cost: Option<u32>,
+    /// 所属链路聚合组 id；None = 未加入聚合组。
+    #[serde(default)]
+    pub lag: Option<u16>,
+    /// IPv6 地址与前缀
+    #[serde(default)]
+    pub ipv6: Option<Ipv6Addr>,
+    #[serde(default)]
+    pub prefix6: u8,
     /// 入方向 ACL（路由器）
     pub acl_in: Option<u32>,
     /// 出方向 ACL（路由器）
@@ -513,6 +734,143 @@ impl Port {
     }
 }
 
+/// 链路聚合组工作模式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LagMode {
+    /// LACP 主动（周期发 LACPDU）
+    #[default]
+    LacpActive,
+    /// LACP 被动（收到 LACPDU 才回应）
+    LacpPassive,
+    /// 静态聚合（不跑 LACP，端口 up 即转发）
+    Static,
+}
+
+/// 成员端口看到的一侧对端 LACP 信息。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LacpPartner {
+    pub system: Mac,
+    pub key: u16,
+    pub port: u16,
+    pub last_ns: u64,
+}
+
+/// 链路聚合组（Eth-Trunk / Port-channel / Bridge-Aggregation）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LagGroup {
+    pub id: u16,
+    pub mode: LagMode,
+    /// 成员端口（升序，最多 8 个）
+    pub members: Vec<PortId>,
+    /// 当前参与转发的成员（LACP 协商选中 / 静态聚合端口 up）
+    pub selected: Vec<PortId>,
+    /// 每成员看到的对端 LACP 信息
+    pub partners: HashMap<PortId, LacpPartner>,
+    /// LACP 周期定时器是否已排队
+    pub timer_pending: bool,
+}
+
+impl Default for LagGroup {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            mode: LagMode::LacpActive,
+            members: vec![],
+            selected: vec![],
+            partners: HashMap::new(),
+            timer_pending: false,
+        }
+    }
+}
+
+impl LagGroup {
+    pub fn new(id: u16) -> Self {
+        Self {
+            id,
+            ..Default::default()
+        }
+    }
+}
+
+/// 远程管理协议。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MgmtProto {
+    Telnet,
+    Ssh,
+}
+
+/// VTY 允许的接入协议。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VtyTransport {
+    #[default]
+    All,
+    Ssh,
+    Telnet,
+    None,
+}
+
+impl VtyTransport {
+    pub fn allows(self, p: MgmtProto) -> bool {
+        matches!(
+            (self, p),
+            (VtyTransport::All, _)
+                | (VtyTransport::Ssh, MgmtProto::Ssh)
+                | (VtyTransport::Telnet, MgmtProto::Telnet)
+        )
+    }
+}
+
+/// 本地管理用户（口令明文存储——仅本地教学数据，不上云）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MgmtUser {
+    pub name: String,
+    pub secret: String,
+    pub privilege: u8,
+    pub telnet: bool,
+    pub ssh: bool,
+}
+
+/// 设备管理面（厂商中立）：本地用户、VTY 认证与接入协议。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MgmtState {
+    pub users: Vec<MgmtUser>,
+    pub enable_secret: Option<String>,
+    /// 本地认证：IOS `login local` / VRP `authentication-mode aaa` / Comware `scheme`
+    pub auth_local: bool,
+    pub transport: VtyTransport,
+}
+
+impl Default for MgmtState {
+    fn default() -> Self {
+        Self {
+            users: vec![],
+            enable_secret: None,
+            auth_local: false,
+            transport: VtyTransport::All,
+        }
+    }
+}
+
+impl MgmtState {
+    pub fn ensure_user(&mut self, name: &str) -> &mut MgmtUser {
+        if let Some(i) = self.users.iter().position(|u| u.name == name) {
+            return &mut self.users[i];
+        }
+        self.users.push(MgmtUser {
+            name: name.to_string(),
+            secret: String::new(),
+            privilege: 1,
+            telnet: true,
+            ssh: true,
+        });
+        self.users.last_mut().unwrap()
+    }
+
+    pub fn find_user(&self, name: &str) -> Option<&MgmtUser> {
+        self.users.iter().find(|u| u.name == name)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Device {
     pub id: DevId,
@@ -521,6 +879,9 @@ pub struct Device {
     pub dialect: Dialect,
     pub ports: Vec<Port>,
     pub state: DeviceState,
+    /// 管理面（远程登录认证）
+    #[serde(default)]
+    pub mgmt: MgmtState,
 }
 
 impl Device {
@@ -539,6 +900,9 @@ impl Device {
                 pvid: DEFAULT_VLAN,
                 trunk_allowed: None,
                 stp_cost: None,
+                lag: None,
+                ipv6: None,
+                prefix6: 64,
                 acl_in: None,
                 acl_out: None,
             })
@@ -558,6 +922,7 @@ impl Device {
             dialect,
             ports,
             state,
+            mgmt: MgmtState::default(),
         }
     }
 
@@ -567,6 +932,11 @@ impl Device {
 
     pub fn port_mut(&mut self, idx: PortId) -> Option<&mut Port> {
         self.ports.get_mut(idx)
+    }
+
+    /// 端口所属聚合组 id。
+    pub fn port_lag(&self, port: PortId) -> Option<u16> {
+        self.ports.get(port).and_then(|p| p.lag)
     }
 
     /// 是否具备三层能力（本模拟器中交换机即三层交换机）。

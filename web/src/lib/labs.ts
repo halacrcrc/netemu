@@ -4,6 +4,8 @@ import type { Sim } from '../wasm/net_sim';
 import { getSim, dumpSummary } from './sim';
 import { refreshFrom, resetPositions, clearTabs, setSelected, setView, setPosition } from './store.svelte';
 import { markDirty } from './persistence';
+import { LABS_EN } from '../content/labs-en';
+import { lang } from './i18n.svelte';
 
 export interface LabCheckDef {
   label: string;
@@ -25,6 +27,19 @@ export interface LabCheckDef {
         roleA: 'Designated' | 'Root' | 'Alternate';
         portB: number;
         roleB: 'Designated' | 'Root' | 'Alternate';
+      }
+    | { type: 'lagMember'; dev: string; group: number; port: number }
+    | { type: 'lagSelected'; dev: string; group: number; count: number }
+    | { type: 'mgmtUser'; dev: string; name: string }
+    | { type: 'vtyTransport'; dev: string; transport: 'all' | 'ssh' | 'telnet' | 'none' }
+    | {
+        type: 'login';
+        from: string;
+        to: string;
+        proto: 'telnet' | 'ssh';
+        user: string;
+        pass: string;
+        expect?: boolean;
       };
 }
 
@@ -35,6 +50,19 @@ export interface LabDef {
   tasks: string[];
   checks: LabCheckDef[];
   build: (sim: Sim) => void;
+  /** 英文界面文案（运行时合并） */
+  en?: { title: string; brief: string; tasks: string[]; checkLabels: string[] };
+}
+
+/** 本地化实验文案（EN 缺省回退中文）。 */
+export function labTitle(lab: LabDef): string {
+  return lang() === 'en' && lab.en ? lab.en.title : lab.title;
+}
+export function labBrief(lab: LabDef): string {
+  return lang() === 'en' && lab.en ? lab.en.brief : lab.brief;
+}
+export function labTasks(lab: LabDef): string[] {
+  return lang() === 'en' && lab.en ? lab.en.tasks : lab.tasks;
 }
 
 /** 重置并搭建实验拓扑。 */
@@ -110,6 +138,42 @@ export function runLabChecks(lab: LabDef): { label: string; passed: boolean; det
           passed: r1.passed || r2.passed,
           detail: `${r1.detail} / ${r2.detail}`,
         });
+      } else if (ck.kind.type === 'lagMember') {
+        const r = JSON.parse(sim.check_lag_member(need(ck.kind.dev), ck.kind.group, ck.kind.port)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'lagSelected') {
+        const r = JSON.parse(sim.check_lag_selected(need(ck.kind.dev), ck.kind.group, ck.kind.count)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'mgmtUser') {
+        const r = JSON.parse(sim.check_mgmt_user(need(ck.kind.dev), ck.kind.name)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'vtyTransport') {
+        const r = JSON.parse(sim.check_vty_transport(need(ck.kind.dev), ck.kind.transport)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'login') {
+        const r = JSON.parse(
+          sim.check_login(
+            need(ck.kind.from),
+            ck.kind.to,
+            ck.kind.proto,
+            ck.kind.user,
+            ck.kind.pass,
+            ck.kind.expect !== false
+          )
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
       } else if (ck.kind.type === 'portRole') {
         const r = JSON.parse(sim.check_port_role(need(ck.kind.dev), ck.kind.port, ck.kind.role)) as {
           passed: boolean;
@@ -139,7 +203,10 @@ export function runLabChecks(lab: LabDef): { label: string; passed: boolean; det
       out.push({ label: ck.label, passed: false, detail: String(e) });
     }
   }
-  return out;
+  return out.map((r, i) => ({
+    ...r,
+    label: lang() === 'en' && lab.en?.checkLabels[i] ? lab.en.checkLabels[i] : r.label,
+  }));
 }
 
 // ---------- 实验一：二层办公网（VLAN 隔离） ----------
@@ -322,4 +389,102 @@ export const lab4: LabDef = {
   },
 };
 
-export const LABS: LabDef[] = [lab1, lab2, lab3, lab4];
+// ---------- 实验五：链路聚合与带宽冗余 ----------
+
+export const lab5: LabDef = {
+  id: 'lag-redundancy',
+  title: '实验五 · 链路聚合与带宽冗余',
+  brief:
+    '两台交换机之间拉两条链路，用 LACP 聚合成一个逻辑链路 Eth-Trunk1。STP 只看到一个端口，两条链路同时转发；断一条业务不中断。',
+  tasks: [
+    'SW1/SW2：system-view → vlan batch 10',
+    'SW1 G0/0/1 接 PC1 → port link-type access + port default vlan 10（SW2 的 G0/0/3 接 PC2 同理）',
+    '互联口（SW1 G0/0/2、G0/0/3；SW2 G0/0/1、G0/0/2）→ port link-type trunk + port trunk allow-pass vlan 10',
+    'SW1/SW2：interface Eth-Trunk 1 创建聚合口；再进两个成员口执行 eth-trunk 1',
+    'display eth-trunk 1：应看到 2 个成员状态 Up；PC1 ping 192.168.10.12',
+    '选做：成员口 shutdown 一个，再 ping —— 业务不中断，这就是带宽冗余',
+  ],
+  checks: [
+    { label: 'SW1 成员口 G0/0/2 已加入聚合组 1', kind: { type: 'lagMember', dev: 'SW1', group: 1, port: 1 } },
+    { label: 'SW1 成员口 G0/0/3 已加入聚合组 1', kind: { type: 'lagMember', dev: 'SW1', group: 1, port: 2 } },
+    { label: 'SW1 聚合组 1 两个成员均已选中（LACP Up）', kind: { type: 'lagSelected', dev: 'SW1', group: 1, count: 2 } },
+    { label: 'SW2 成员口 G0/0/1 已加入聚合组 1', kind: { type: 'lagMember', dev: 'SW2', group: 1, port: 0 } },
+    { label: 'SW2 成员口 G0/0/2 已加入聚合组 1', kind: { type: 'lagMember', dev: 'SW2', group: 1, port: 1 } },
+    { label: 'SW2 聚合组 1 两个成员均已选中（LACP Up）', kind: { type: 'lagSelected', dev: 'SW2', group: 1, count: 2 } },
+    { label: 'PC1 → PC2 经聚合链路连通', kind: { type: 'ping', from: 'PC1', to: '192.168.10.12' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const sw1 = sim.add_device('Switch', 'Vrp');
+    const sw2 = sim.add_device('Switch', 'Vrp');
+    const pc2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(sw1, 'SW1');
+    sim.rename_device(sw2, 'SW2');
+    sim.rename_device(pc2, 'PC2');
+    sim.add_link(pc1, sw1); // SW1 p0
+    sim.add_link(sw1, sw2); // SW1 p1 — SW2 p0
+    sim.add_link(sw1, sw2); // SW1 p2 — SW2 p1
+    sim.add_link(sw2, pc2); // SW2 p2
+    sim.set_host_config(pc1, '192.168.10.11', 24, '');
+    sim.set_host_config(pc2, '192.168.10.12', 24, '');
+    setPosition(pc1, { x: 40, y: 40 });
+    setPosition(sw1, { x: 250, y: 40 });
+    setPosition(sw2, { x: 460, y: 40 });
+    setPosition(pc2, { x: 670, y: 40 });
+  },
+};
+
+// ---------- 实验六：设备管理面加固（SSH / Telnet） ----------
+
+export const lab6: LabDef = {
+  id: 'mgmt-ssh',
+  title: '实验六 · 设备管理面加固（SSH/Telnet）',
+  brief:
+    '给路由器配置本地管理员与 VTY 登录，只允许 SSH 接入。从 PC 用 SSH 登录成功；Telnet 被拒绝——管理面加固的第一课。',
+  tasks: [
+    'R1：enable → configure terminal → interface g0/0 → ip address 192.168.1.1 255.255.255.0 → no shutdown → exit',
+    'R1：username admin privilege 15 secret Cisco@123',
+    'R1：line vty 0 4 → login local → transport input ssh → exit',
+    'PC1 终端：ssh 192.168.1.1 → 用户名 admin、口令 Cisco@123 → 看到 R1# 说明登录成功',
+    '登录后执行 show ip interface brief 查看 R1 接口，再 exit 断开',
+    'PC1 终端：telnet 192.168.1.1 —— 应提示连接被拒绝（VTY 只开了 SSH）',
+  ],
+  checks: [
+    { label: 'R1 存在本地用户 admin', kind: { type: 'mgmtUser', dev: 'R1', name: 'admin' } },
+    { label: 'R1 VTY 仅允许 SSH 接入', kind: { type: 'vtyTransport', dev: 'R1', transport: 'ssh' } },
+    {
+      label: 'PC1 用 SSH 登录 R1 成功',
+      kind: { type: 'login', from: 'PC1', to: '192.168.1.1', proto: 'ssh', user: 'admin', pass: 'Cisco@123' },
+    },
+    {
+      label: 'PC1 的 Telnet 登录被拒绝',
+      kind: {
+        type: 'login',
+        from: 'PC1',
+        to: '192.168.1.1',
+        proto: 'telnet',
+        user: 'admin',
+        pass: 'Cisco@123',
+        expect: false,
+      },
+    },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const r1 = sim.add_device('Router', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(r1, 'R1');
+    sim.add_link(pc1, r1); // R1 g0/0
+    sim.set_host_config(pc1, '192.168.1.10', 24, '192.168.1.1');
+    setPosition(pc1, { x: 80, y: 90 });
+    setPosition(r1, { x: 400, y: 90 });
+  },
+};
+
+export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6];
+
+// 合并英文文案
+for (const l of LABS) {
+  l.en = LABS_EN[l.id];
+}

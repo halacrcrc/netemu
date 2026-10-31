@@ -1,13 +1,13 @@
 //! 主机（PC）的简易命令行：与方言无关的迷你 shell。
 
-use cli_engine::tokenize;
-use sim_core::device::{ArpEntry, DevId, DeviceKind, DeviceState};
+use cli_engine::{tokenize, LoginFlow, LoginStep, Session};
+use sim_core::device::{ArpEntry, DevId, DeviceKind, DeviceState, Dialect, MgmtProto};
 use sim_core::engine::Engine;
-use sim_packets::ipv4_str;
+use sim_packets::{ipv4_str, Ipv4Addr};
 
 use crate::ipv4_from_str;
 
-pub fn exec(eng: &mut Engine, dev: DevId, line: &str) -> String {
+pub fn exec(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> String {
     let toks = tokenize(line.trim());
     if toks.is_empty() {
         return String::new();
@@ -23,6 +23,30 @@ pub fn exec(eng: &mut Engine, dev: DevId, line: &str) -> String {
             };
             eng.start_ping(dev, target);
             String::new() // 结果在引擎静默后由 render_ping_generic 输出
+        }
+        "ping6" => {
+            if toks.len() < 2 {
+                return "用法: ping6 <IPv6地址>".into();
+            }
+            let Some(target) = sim_packets::ipv6_from_str(&toks[1].0) else {
+                return format!("无效的 IPv6 地址: {}", toks[1].0);
+            };
+            eng.start_ping6(dev, target);
+            String::new()
+        }
+        "telnet" | "ssh" => {
+            if toks.len() < 2 {
+                return "用法: telnet <IP地址> 或 ssh <IP地址>".into();
+            }
+            let Some(target_ip) = ipv4_from_str(&toks[1].0) else {
+                return format!("无效的 IP 地址: {}", toks[1].0);
+            };
+            let proto = if cmd.eq_ignore_ascii_case("ssh") {
+                MgmtProto::Ssh
+            } else {
+                MgmtProto::Telnet
+            };
+            start_login(eng, sess, dev, target_ip, proto)
         }
         "ipconfig" => {
             // ipconfig /renew：重新发起 DHCP
@@ -40,9 +64,31 @@ pub fn exec(eng: &mut Engine, dev: DevId, line: &str) -> String {
         }
         "arp" => arp_table(eng, dev),
         "help" | "?" => {
-            "可用命令:\n  ping <IP>       测试到目标 IP 的连通性\n  ipconfig        查看本机网络配置\n  ipconfig /renew 重新发起 DHCP 获取（或输入 dhcp）\n  arp             查看本机 ARP 缓存\n  help            显示本帮助".into()
+            "可用命令:\n  ping <IP>       测试到目标 IP 的连通性\n  ping6 <IPv6>    测试 IPv6 连通性\n  telnet <IP>     用 Telnet 登录网络设备\n  ssh <IP>        用 SSH 登录网络设备\n  ipconfig        查看本机网络配置\n  ipconfig /renew 重新发起 DHCP 获取（或输入 dhcp）\n  arp             查看本机 ARP 缓存\n  help            显示本帮助".into()
         }
         other => format!("未知命令: {}（输入 help 查看可用命令）", other),
+    }
+}
+
+fn start_login(
+    eng: &mut Engine,
+    sess: &mut Session,
+    dev: DevId,
+    target_ip: Ipv4Addr,
+    proto: MgmtProto,
+) -> String {
+    match eng.login_target(dev, target_ip, proto) {
+        Ok(target) => {
+            sess.login = Some(LoginFlow {
+                target,
+                target_ip,
+                proto,
+                step: LoginStep::Username,
+                user: String::new(),
+            });
+            format!("Trying {} ...", ipv4_str(target_ip))
+        }
+        Err(e) => crate::login_error_text(DeviceKind::Host, Dialect::Ios, e),
     }
 }
 
@@ -67,6 +113,22 @@ fn ipconfig(eng: &Engine, dev: DevId) -> String {
     match gw {
         Some(gw) => out.push_str(&ipv4_str(gw)),
         None => out.push_str("未配置"),
+    }
+    if let Some(ip6) = p.ipv6 {
+        out.push_str(&format!(
+            "\n  IPv6 地址 . . . . : {}/{}",
+            sim_packets::ipv6_str(&ip6),
+            p.prefix6
+        ));
+        let gw6 = match &d.state {
+            DeviceState::Host(h) => h.gw6,
+            _ => None,
+        };
+        out.push_str("\n  IPv6 默认网关 . . : ");
+        match gw6 {
+            Some(g) => out.push_str(&sim_packets::ipv6_str(&g)),
+            None => out.push_str("未配置"),
+        }
     }
     out.push_str("\n  状态 . . . . . . : ");
     if p.admin_up && p.link.is_some() {

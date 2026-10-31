@@ -8,11 +8,30 @@
 
 use sim_core::device::{DeviceKind, Dialect, VlanId};
 
-/// 接口引用：物理口或 SVI。
+/// 接口引用：物理口、SVI 或链路聚合口。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IfRef {
     Physical(usize),
     Svi(VlanId),
+    Lag(u16),
+}
+
+/// 聚合口的完整名称。
+pub fn lag_canonical(dialect: Dialect, id: u16) -> String {
+    match dialect {
+        Dialect::Ios => format!("Port-channel{}", id),
+        Dialect::Vrp => format!("Eth-Trunk{}", id),
+        Dialect::Comware => format!("Bridge-Aggregation{}", id),
+    }
+}
+
+/// 聚合口的短名（表格用）。
+pub fn lag_short(dialect: Dialect, id: u16) -> String {
+    match dialect {
+        Dialect::Ios => format!("Po{}", id),
+        Dialect::Vrp => format!("Eth-Trunk{}", id),
+        Dialect::Comware => format!("BAGG{}", id),
+    }
 }
 
 /// SVI 的完整名称。
@@ -33,7 +52,7 @@ pub fn svi_short(dialect: Dialect, vlan: VlanId) -> String {
     }
 }
 
-/// 解析接口名为 IfRef（物理口 / SVI）。SVI 仅三层交换机支持。
+/// 解析接口名为 IfRef（物理口 / SVI / 聚合口）。SVI 与聚合口仅交换机支持。
 pub fn resolve_if(dialect: Dialect, kind: DeviceKind, s: &str) -> Option<IfRef> {
     let lower = s.to_lowercase();
     // SVI 命名
@@ -51,6 +70,26 @@ pub fn resolve_if(dialect: Dialect, kind: DeviceKind, s: &str) -> Option<IfRef> 
             return None;
         }
         return Some(IfRef::Svi(vlan));
+    }
+    // 聚合口命名（单 token 形式：Port-channel1 / Eth-Trunk1 / Bridge-Aggregation1）
+    if kind == DeviceKind::Switch {
+        let lag_prefixes: &[&str] = match dialect {
+            Dialect::Ios => &["port-channel", "portchannel", "po"],
+            Dialect::Vrp => &["eth-trunk"],
+            Dialect::Comware => &["bridge-aggregation", "bagg"],
+        };
+        for p in lag_prefixes {
+            if let Some(rest) = lower.strip_prefix(p) {
+                if rest.is_empty() {
+                    continue;
+                }
+                if let Ok(id) = rest.parse::<u16>() {
+                    if (1..=128).contains(&id) {
+                        return Some(IfRef::Lag(id));
+                    }
+                }
+            }
+        }
     }
     resolve(dialect, kind, s).map(IfRef::Physical)
 }

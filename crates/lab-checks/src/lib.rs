@@ -2,7 +2,7 @@
 //!
 //! 检查项由实验文件（M1 起为 TOML）声明；这里提供通用执行器。
 
-use sim_core::device::{DevId, RouteSrc};
+use sim_core::device::{DevId, MgmtProto, RouteSrc, VtyTransport};
 use sim_core::engine::{Engine, PING_HORIZON_NS};
 use sim_packets::{ipv4_from_str, ipv4_str, Ipv4Addr};
 
@@ -50,6 +50,27 @@ pub enum CheckKind {
         dev: DevId,
         port: usize,
         state: sim_core::device::StpSt,
+    },
+    /// 检查端口已加入指定聚合组。
+    LagMember { dev: DevId, group: u16, port: usize },
+    /// 检查聚合组已选中的成员数（LACP 协商完成）。
+    LagSelected {
+        dev: DevId,
+        group: u16,
+        count: usize,
+    },
+    /// 检查设备上存在本地用户。
+    MgmtUser { dev: DevId, name: String },
+    /// 检查 VTY 允许的接入协议。
+    VtyTransport { dev: DevId, transport: VtyTransport },
+    /// 检查一次远程登录尝试的结果是否符合预期。
+    LoginAttempt {
+        from: DevId,
+        to: Ipv4Addr,
+        proto: MgmtProto,
+        user: String,
+        pass: String,
+        expect: bool,
     },
 }
 
@@ -236,6 +257,88 @@ fn run_one(eng: &mut Engine, c: &Check) -> CheckResult {
                 Some(actual) => (actual == *state, format!("端口 STP 状态 = {:?}", actual)),
                 None => (false, "端口不存在".into()),
             }
+        }
+        CheckKind::LagMember { dev, group, port } => {
+            let actual = eng
+                .net
+                .device(*dev)
+                .and_then(|d| d.port(*port))
+                .map(|p| p.lag);
+            (
+                actual == Some(Some(*group)),
+                match actual {
+                    Some(Some(g)) => format!("端口属于聚合组 {}", g),
+                    Some(None) => "端口未加入聚合组".into(),
+                    None => "端口不存在".into(),
+                },
+            )
+        }
+        CheckKind::LagSelected { dev, group, count } => {
+            let got = eng.net.device(*dev).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Switch(sw) => {
+                    sw.lags.get(group).map(|g| g.selected.len())
+                }
+                _ => None,
+            });
+            match got {
+                Some(n) => (n >= *count, format!("聚合组已选中 {} 个成员", n)),
+                None => (false, "聚合组不存在".into()),
+            }
+        }
+        CheckKind::MgmtUser { dev, name } => {
+            let has = eng
+                .net
+                .device(*dev)
+                .map(|d| d.mgmt.find_user(name).is_some());
+            (
+                has == Some(true),
+                match has {
+                    Some(true) => format!("本地用户 {} 存在", name),
+                    Some(false) => format!("本地用户 {} 不存在", name),
+                    None => "设备不存在".into(),
+                },
+            )
+        }
+        CheckKind::VtyTransport { dev, transport } => {
+            let got = eng.net.device(*dev).map(|d| d.mgmt.transport);
+            let ok = got == Some(*transport);
+            let label = match transport {
+                VtyTransport::All => "all",
+                VtyTransport::Ssh => "ssh",
+                VtyTransport::Telnet => "telnet",
+                VtyTransport::None => "none",
+            };
+            (
+                ok,
+                if ok {
+                    format!("VTY 仅允许 {} 接入", label)
+                } else {
+                    format!("VTY 接入协议不符合预期（期望 {}）", label)
+                },
+            )
+        }
+        CheckKind::LoginAttempt {
+            from,
+            to,
+            proto,
+            user,
+            pass,
+            expect,
+        } => {
+            let r = eng.try_login(*from, *to, *proto, user, pass);
+            let ok = r.is_ok();
+            let name = match proto {
+                MgmtProto::Telnet => "Telnet",
+                MgmtProto::Ssh => "SSH",
+            };
+            (
+                ok == *expect,
+                if ok {
+                    format!("{} 登录成功", name)
+                } else {
+                    format!("{} 登录被拒绝（{:?}）", name, r.err())
+                },
+            )
         }
         CheckKind::SviIp { dev, vlan, ip } => {
             let got = eng.net.device(*dev).and_then(|d| match &d.state {

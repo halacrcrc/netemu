@@ -3,7 +3,7 @@
 //! 方言（IOS/VRP/Comware）在 cli-dialects 中把命令树"数据"建出来，
 //! 本 crate 负责解析、前缀缩写、`?` 帮助与 Tab 补全的通用机制。
 
-use sim_core::device::{DevId, DeviceKind, Dialect, PortId, VlanId};
+use sim_core::device::{DevId, DeviceKind, Dialect, MgmtProto, PortId, VlanId};
 use sim_core::engine::Engine;
 
 /// 参数取值
@@ -17,6 +17,8 @@ pub enum Val {
     /// VLAN 列表（已展开为编号集合）
     VlanList(Vec<u16>),
     Word(String),
+    /// 空格分隔的多词列表（贪婪到行尾）
+    WordList(Vec<String>),
     /// 接口名原始串（方言层解析为端口号）
     Raw(String),
 }
@@ -40,6 +42,8 @@ pub enum ParamKind {
     /// VLAN 列表（"10,20" / "10 20" / "10-12"）
     VlanList,
     Word,
+    /// 空格分隔的多词列表（贪婪到行尾）
+    WordList,
     /// 接口名（由方言层解析）
     IfName,
 }
@@ -97,15 +101,43 @@ pub enum IfCtx {
     Physical(PortId),
     /// 三层交换机 SVI
     Svi(VlanId),
+    /// 链路聚合逻辑接口
+    Lag(u16),
 }
 
-/// 当前进入的子视图上下文（地址池 / ACL）。
+/// 当前进入的子视图上下文（地址池 / ACL / AAA 用户）。
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SubCtx {
     /// 地址池名（Pool 模式）
     pub pool: Option<String>,
     /// ACL 编号（Acl 模式）；basic = 1-199 中的基础段
     pub acl: Option<(u32, bool /*advanced*/)>,
+    /// AAA 视图中正在配置的本地用户
+    pub aaa_user: Option<String>,
+}
+
+/// 远程登录输入流程。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginFlow {
+    /// 目标设备（仅用于展示；认证时按 target_ip 重新定位）
+    pub target: DevId,
+    pub target_ip: u32,
+    pub proto: MgmtProto,
+    pub step: LoginStep,
+    pub user: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginStep {
+    Username,
+    Password,
+}
+
+/// 已建立的远程会话（命令转发到目标设备）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteSession {
+    pub dev: DevId,
+    pub inner: Box<Session>,
 }
 
 /// CLI 会话状态（每设备一份，由前端持有）。
@@ -114,6 +146,17 @@ pub struct Session {
     pub mode: Mode,
     pub cur_if: Option<IfCtx>,
     pub sub: SubCtx,
+    /// 正在等待用户名/口令的登录流程
+    pub login: Option<LoginFlow>,
+    /// 已建立、尚未断开的远程会话
+    pub remote: Option<RemoteSession>,
+}
+
+impl Session {
+    /// 当前实际接收命令的设备（远程会话时是目标设备）。
+    pub fn effective_dev(&self, local: DevId) -> DevId {
+        self.remote.as_ref().map(|r| r.dev).unwrap_or(local)
+    }
 }
 
 /// 模式编号三方言共用：IOS 用满四层；VRP/Comware 用 Exec(用户视图)/Config(系统视图)/If。
@@ -131,6 +174,16 @@ pub enum Mode {
     Pool,
     /// VRP、Comware `acl` 视图
     Acl,
+    /// VTY 线路视图
+    Line,
+    /// AAA / 本地用户视图
+    Aaa,
+    /// MSTP 域配置视图
+    Mst,
+    /// OSPF 进程视图
+    Ospf,
+    /// OSPF 区域视图（VRP/Comware）
+    OspfArea,
 }
 
 #[derive(Debug)]
@@ -196,6 +249,13 @@ impl Ctx<'_> {
     pub fn vlan_list(&self, name: &str) -> Option<Vec<u16>> {
         match self.val(name) {
             Some(Val::VlanList(v)) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn word_list(&self, name: &str) -> Option<Vec<String>> {
+        match self.val(name) {
+            Some(Val::WordList(v)) => Some(v.clone()),
             _ => None,
         }
     }
@@ -268,6 +328,9 @@ fn parse_param(kind: ParamKind, word: &str) -> Option<Val> {
         ParamKind::Number => word.parse::<u32>().ok().map(Val::Number),
         ParamKind::VlanList => parse_vlan_list(word).map(Val::VlanList),
         ParamKind::Word => Some(Val::Word(word.to_string())),
+        ParamKind::WordList => Some(Val::WordList(
+            word.split_whitespace().map(|s| s.to_string()).collect(),
+        )),
         ParamKind::IfName => Some(Val::Raw(word.to_string())),
     }
 }
@@ -314,7 +377,7 @@ fn match_token<'a>(kids: &'a [CNode], word: &str) -> Result<(&'a CNode, Option<V
     for n in kids {
         match &n.tok {
             Tok::Lit(w) => {
-                if w == word {
+                if w.eq_ignore_ascii_case(word) {
                     exact = Some(n);
                 } else if word.len() < w.len() && w.to_lowercase().starts_with(&word.to_lowercase())
                 {
@@ -372,12 +435,17 @@ pub fn parse(root: &[CNode], line: &str) -> Result<Option<Parsed>, CliError> {
         match match_token(kids, word) {
             Ok((node, v)) => {
                 if let (Some(v), Tok::Param { name, .. }) = (v, &node.tok) {
-                    // VlanList 参数天然贪婪：吞掉行内剩余 token（空格分隔列表）
-                    let v = if matches!(v, Val::VlanList(_)) && i + 1 < n_toks {
+                    // VlanList / WordList 参数天然贪婪：吞掉行内剩余 token
+                    let greedy = matches!(v, Val::VlanList(_) | Val::WordList(_)) && i + 1 < n_toks;
+                    let v = if greedy {
                         let rest: Vec<String> =
                             toks[i + 1..].iter().map(|(w, _)| w.clone()).collect();
                         let joined = format!("{} {}", word, rest.join(" "));
-                        match parse_param(ParamKind::VlanList, &joined) {
+                        let kind = match v {
+                            Val::VlanList(_) => ParamKind::VlanList,
+                            _ => ParamKind::WordList,
+                        };
+                        match parse_param(kind, &joined) {
                             Some(v2) => {
                                 // 以贪婪消费后的位置作为结束
                                 let end_char = toks
@@ -607,6 +675,8 @@ pub mod placeholder {
             (ParamKind::VlanList, _) => "<vlans>",
             (ParamKind::Word, Dialect::Ios) => "WORD",
             (ParamKind::Word, _) => "<name>",
+            (ParamKind::WordList, Dialect::Ios) => "WORD...",
+            (ParamKind::WordList, _) => "<word-list>",
             (ParamKind::IfName, Dialect::Ios) => "INTERFACE",
             (ParamKind::IfName, _) => "<interface>",
         }

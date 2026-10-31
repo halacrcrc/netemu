@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::device::*;
-use sim_packets::{EthernetFrame, Ipv4Addr};
+use sim_packets::{EthernetFrame, Ipv4Addr, Ipv6Addr};
 
 /// 抓包记录（开启抓包的链路上逐帧记录，环形缓冲）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,8 +187,50 @@ impl Net {
         true
     }
 
-    /// 最长前缀匹配（连接路由 + 静态路由）。
-    /// 同长度时连接路由优先；同前缀长度的静态路由要求下一跳落在某连接网段内才可用。
+    /// IPv6 最长前缀匹配：连接路由 + 静态路由（下一跳需落在连接网段内）。
+    pub fn lookup_route6(&self, dev: DevId, dst: Ipv6Addr) -> Option<(PortId, Ipv6Addr)> {
+        let d = self.device(dev)?;
+        let connected: Vec<(PortId, Ipv6Addr, u8)> = d
+            .ports
+            .iter()
+            .filter_map(|p| p.ipv6.map(|ip| (p.idx, ip, p.prefix6)))
+            .collect();
+        let mut best: Option<(u8, u8, PortId, Ipv6Addr)> = None;
+        let mut consider = |len: u8, rank: u8, port: PortId, nh: Ipv6Addr| {
+            let better = match best {
+                None => true,
+                Some((blen, brank, _, _)) => len > blen || (len == blen && rank > brank),
+            };
+            if better {
+                best = Some((len, rank, port, nh));
+            }
+        };
+        for (port, ip, len) in &connected {
+            if sim_packets::ipv6_in_prefix(&dst, ip, *len) {
+                consider(*len, 3, *port, dst);
+            }
+        }
+        let statics: &[Route6] = match &d.state {
+            DeviceState::Router(rs) => &rs.static_routes6,
+            _ => &[],
+        };
+        for r in statics {
+            if !sim_packets::ipv6_in_prefix(&dst, &r.dst, r.len) {
+                continue;
+            }
+            if let Some((port, _, len)) = connected
+                .iter()
+                .find(|(_, ip, len)| sim_packets::ipv6_in_prefix(&r.nexthop, ip, *len))
+            {
+                let _ = len;
+                consider(r.len, 2, *port, r.nexthop);
+            }
+        }
+        best.map(|(_, _, port, nh)| (port, nh))
+    }
+
+    /// 最长前缀匹配（连接路由 + 静态路由 + OSPF）。
+    /// 同长度优先连接 > 静态 > OSPF；静态/OSPF 的下一跳需落在某连接网段内。
     /// 返回 (出端口, 下一跳, 出 VLAN)。
     pub fn lookup_route(
         &self,
@@ -197,44 +239,41 @@ impl Net {
     ) -> Option<(PortId, Ipv4Addr, Option<VlanId>)> {
         let d = self.device(dev)?;
         let connected = d.connected_routes();
-        let mut best: Option<(u8, PortId, Ipv4Addr, Option<VlanId>, bool)> = None;
-        let mut consider = |len: u8,
-                            port: PortId,
-                            nexthop: Ipv4Addr,
-                            vlan: Option<VlanId>,
-                            connected_src: bool| {
-            let better = match best {
-                None => true,
-                Some((blen, _, _, _, bconn)) => {
-                    len > blen || (len == blen && connected_src && !bconn)
+        // (前缀长度, 来源优先级, 端口, 下一跳, VLAN)
+        let mut best: Option<(u8, u8, PortId, Ipv4Addr, Option<VlanId>)> = None;
+        let mut consider =
+            |len: u8, rank: u8, port: PortId, nexthop: Ipv4Addr, vlan: Option<VlanId>| {
+                let better = match best {
+                    None => true,
+                    Some((blen, brank, _, _, _)) => len > blen || (len == blen && rank > brank),
+                };
+                if better {
+                    best = Some((len, rank, port, nexthop, vlan));
                 }
             };
-            if better {
-                best = Some((len, port, nexthop, vlan, connected_src));
-            }
-        };
         for r in &connected {
             if (dst & sim_packets::mask_from_prefix(r.len)) == r.dst {
-                consider(r.len, r.port, dst, r.vlan, true);
+                consider(r.len, 3, r.port, dst, r.vlan);
             }
         }
-        let statics: &[Route] = match &d.state {
-            DeviceState::Router(rs) => &rs.static_routes,
-            DeviceState::Switch(sw) => &sw.static_routes,
-            _ => &[],
+        let (statics, ospf): (&[Route], &[Route]) = match &d.state {
+            DeviceState::Router(rs) => (&rs.static_routes, &rs.ospf_routes),
+            DeviceState::Switch(sw) => (&sw.static_routes, &[]),
+            _ => (&[], &[]),
         };
-        for r in statics {
-            if (dst & sim_packets::mask_from_prefix(r.len)) != r.dst {
-                continue;
-            }
-            // 解析静态路由的出接口：下一跳所在连接网段（出 VLAN 沿用该连接路由）
-            if let Some(c) = connected
-                .iter()
-                .find(|c| (r.nexthop & sim_packets::mask_from_prefix(c.len)) == c.dst)
-            {
-                consider(r.len, c.port, r.nexthop, c.vlan, false);
+        for (routes, rank) in [(statics, 2u8), (ospf, 1u8)] {
+            for r in routes {
+                if (dst & sim_packets::mask_from_prefix(r.len)) != r.dst {
+                    continue;
+                }
+                if let Some(c) = connected
+                    .iter()
+                    .find(|c| (r.nexthop & sim_packets::mask_from_prefix(c.len)) == c.dst)
+                {
+                    consider(r.len, rank, c.port, r.nexthop, c.vlan);
+                }
             }
         }
-        best.map(|(_, port, nh, vlan, _)| (port, nh, vlan))
+        best.map(|(_, _, port, nh, vlan)| (port, nh, vlan))
     }
 }

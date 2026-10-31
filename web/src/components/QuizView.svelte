@@ -1,6 +1,7 @@
 <script lang="ts">
   // 题库视图：练习 / 错题本 / 统计 三个标签页。
-  import { QUESTIONS, TOPICS, type TopicId } from '../content/questions';
+  import { QUESTIONS, TOPICS, type TopicId, type Question } from '../content/questions';
+  import { t, i18n } from '../lib/i18n.svelte';
   import {
     quiz,
     session,
@@ -19,15 +20,33 @@
   const overall = $derived(overallStats());
 
   function labelOf(t: TopicId): string {
-    return TOPICS.find((x) => x.id === t)?.name ?? t;
+    const x = TOPICS.find((y) => y.id === t);
+    if (!x) return t;
+    return i18n.lang === 'en' ? x.nameEn : x.name;
+  }
+
+  function topicName(x: (typeof TOPICS)[number]): string {
+    return i18n.lang === 'en' ? x.nameEn : x.name;
+  }
+
+  function qText(q: Question): string {
+    return i18n.lang === 'en' && q.en ? q.en.q : q.q;
+  }
+
+  function qOptions(q: Question): string[] {
+    return i18n.lang === 'en' && q.en ? q.en.options : q.options;
+  }
+
+  function qExplain(q: Question): string {
+    return i18n.lang === 'en' && q.en ? q.en.explain : q.explain;
   }
 </script>
 
 <div class="quiz-view">
   <div class="tabs">
-    <button class:active={tab === 'practice'} onclick={() => (tab = 'practice')}>练习</button>
+    <button class:active={tab === 'practice'} onclick={() => (tab = 'practice')}>{t('quiz.practice')}</button>
     <button class:active={tab === 'stats'} onclick={() => (tab = 'stats')}>
-      统计 <span class="badge">{overall.answered}/{overall.total}</span>
+      {t('quiz.stats')} <span class="badge">{overall.answered}/{overall.total}</span>
     </button>
   </div>
 
@@ -37,7 +56,7 @@
         <!-- 未开始 / 已完成：选题入口 -->
         {#if finished}
           <section class="panel done-card">
-            <h3>本轮完成</h3>
+            <h3>{t('quiz.roundDone')}</h3>
             <div class="pad">
               <div class="score">
                 {session.right} / {session.done}
@@ -47,34 +66,34 @@
               </div>
               <div class="hint">
                 {#if session.right === session.done}
-                  全对！可以换个主题继续，或去错题本巩固。
+                  {t('quiz.allCorrect')}
                 {:else}
-                  错题已进入错题本，建议从"错题重做"再过一遍。
+                  {t('quiz.wrongHint')}
                 {/if}
               </div>
             </div>
           </section>
         {/if}
         <section class="panel">
-          <h3>选择练习范围</h3>
+          <h3>{t('quiz.scope')}</h3>
           <div class="pad topic-grid">
             <button class="topic" onclick={() => startPractice('all')}>
-              全部题目<span class="count">{QUESTIONS.length} 题</span>
+              {t('quiz.allQuestions')}<span class="count">{QUESTIONS.length}</span>
             </button>
-            {#each TOPICS as t (t.id)}
-              {@const st = topicStats(t.id)}
-              <button class="topic" onclick={() => startPractice(t.id)}>
-                {t.name}
+            {#each TOPICS as topic (topic.id)}
+              {@const st = topicStats(topic.id)}
+              <button class="topic" onclick={() => startPractice(topic.id)}>
+                {topicName(topic)}
                 <span class="count">
                   {st.attempted}/{st.total}
                   {#if st.attempted > 0}
-                    · {Math.round((st.correct / st.attempted) * 100)}%正确
+                    · {Math.round((st.correct / st.attempted) * 100)}%
                   {/if}
                 </span>
               </button>
             {/each}
             <button class="topic wrong" disabled={overall.wrongBook === 0} onclick={() => startPractice('wrong')}>
-              错题重做<span class="count">{overall.wrongBook} 题待巩固</span>
+              {t('quiz.wrongBook')}<span class="count">{overall.wrongBook} {t('quiz.pending')}</span>
             </button>
           </div>
         </section>
@@ -84,11 +103,11 @@
           <div class="q-head">
             <span class="tag">{labelOf(current.topic)}</span>
             <span class="pos">{session.idx + 1} / {session.queue.length}</span>
-            <span class="score-inline">本轮 {session.right}/{session.done}</span>
+            <span class="score-inline">{t('quiz.session')} {session.right}/{session.done}</span>
           </div>
-          <div class="q-text">{current.q}</div>
+          <div class="q-text">{qText(current)}</div>
           <div class="options">
-            {#each current.options as opt, i (i)}
+            {#each qOptions(current) as opt, i (i)}
               {@const picked = session.chosen === i}
               {@const isAnswer = i === current.answer}
               {@const revealed = session.chosen !== null}
@@ -108,10 +127,10 @@
           {#if session.chosen !== null}
             {@const ok = session.chosen === current.answer}
             <div class="explain" class:good={ok} class:bad={!ok}>
-              <b>{ok ? '✓ 回答正确' : '✗ 回答错误'}</b>
-              <p>{current.explain}</p>
+              <b>{ok ? t('quiz.correct') : t('quiz.incorrect')}</b>
+              <p>{qExplain(current)}</p>
               <button class="primary" onclick={nextQuestion}>
-                {session.idx < session.queue.length - 1 ? '下一题' : '完成本轮'}
+                {session.idx < session.queue.length - 1 ? t('quiz.next') : t('quiz.finish')}
               </button>
             </div>
           {/if}
@@ -121,37 +140,37 @@
   {:else}
     <div class="body">
       <section class="panel">
-        <h3>总体进度</h3>
+        <h3>{t('quiz.overall')}</h3>
         <div class="pad stats-grid">
           <div class="stat">
             <div class="num">{overall.answered}<span class="of">/{overall.total}</span></div>
-            <div class="lbl">已作答题目</div>
+            <div class="lbl">{t('quiz.answered')}</div>
           </div>
           <div class="stat">
             <div class="num">{overall.wrongBook}</div>
-            <div class="lbl">错题本待巩固</div>
+            <div class="lbl">{t('quiz.wrongPending')}</div>
           </div>
           <div class="stat">
             <div class="num">
               {overall.answered ? Math.round((overall.correct / overall.answered) * 100) : 0}%
             </div>
-            <div class="lbl">最近正确率</div>
+            <div class="lbl">{t('quiz.recentRate')}</div>
           </div>
         </div>
         <div class="pad">
-          <button class="danger" onclick={() => { if (confirm('清空全部答题记录与错题本？')) clearRecords(); }}>
-            清空答题记录
+          <button class="danger" onclick={() => { if (confirm(t('quiz.clearConfirm'))) clearRecords(); }}>
+            {t('quiz.clear')}
           </button>
         </div>
       </section>
       <section class="panel">
-        <h3>分主题掌握度</h3>
+        <h3>{t('quiz.mastery')}</h3>
         <div class="pad">
-          {#each TOPICS as t (t.id)}
+          {#each TOPICS as topic (topic.id)}
             {@const st = topicStats(t.id)}
             {@const pct = st.attempted ? Math.round((st.correct / st.attempted) * 100) : 0}
             <div class="topic-row">
-              <span class="tname">{t.name}</span>
+              <span class="tname">{topicName(topic)}</span>
               <div class="bar">
                 <div class="fill" style={`width:${pct}%`}></div>
               </div>

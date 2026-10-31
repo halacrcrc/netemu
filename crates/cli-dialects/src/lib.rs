@@ -15,8 +15,8 @@ pub mod show;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use cli_engine::{CliError, Ctx, HelpList, Mode, Session};
-use sim_core::device::{DevId, DeviceKind, DeviceState, Dialect};
+use cli_engine::{CliError, Ctx, HelpList, LoginFlow, LoginStep, Mode, RemoteSession, Session};
+use sim_core::device::{DevId, DeviceKind, DeviceState, Dialect, MgmtProto, VtyTransport};
 use sim_core::engine::Engine;
 
 /// 供 pc.rs 复用的 IPv4 工具重导出。
@@ -29,6 +29,11 @@ pub struct Trees {
     pub if_: Vec<cli_engine::CNode>,
     pub pool: Vec<cli_engine::CNode>,
     pub acl: Vec<cli_engine::CNode>,
+    pub line: Vec<cli_engine::CNode>,
+    pub aaa: Vec<cli_engine::CNode>,
+    pub mst: Vec<cli_engine::CNode>,
+    pub ospf: Vec<cli_engine::CNode>,
+    pub ospf_area: Vec<cli_engine::CNode>,
 }
 
 impl Trees {
@@ -40,6 +45,11 @@ impl Trees {
             Mode::If => &self.if_,
             Mode::Pool => &self.pool,
             Mode::Acl => &self.acl,
+            Mode::Line => &self.line,
+            Mode::Aaa => &self.aaa,
+            Mode::Mst => &self.mst,
+            Mode::Ospf => &self.ospf,
+            Mode::OspfArea => &self.ospf_area,
         }
     }
 }
@@ -87,6 +97,7 @@ pub mod cmd {
                 c.sess.cur_if = Some(match ifref {
                     ifname::IfRef::Physical(idx) => IfCtx::Physical(idx),
                     ifname::IfRef::Svi(v) => IfCtx::Svi(v),
+                    ifname::IfRef::Lag(id) => IfCtx::Lag(id),
                 });
                 Ok(String::new())
             }
@@ -118,6 +129,102 @@ pub mod cmd {
         Ok(String::new())
     }
 
+    /// `interface Port-channel1` / `interface Eth-Trunk 1` / `interface Bridge-Aggregation 1`
+    pub fn interface_lag(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        let id = c
+            .number("lag")
+            .filter(|n| (1..=128).contains(n))
+            .ok_or_else(|| CliError::Custom("Invalid aggregation group number".into()))?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Switch(sw) = &mut d.state {
+                sw.ensure_lag(id as u16);
+            }
+        }
+        c.sess.mode = Mode::If;
+        c.sess.cur_if = Some(IfCtx::Lag(id as u16));
+        Ok(String::new())
+    }
+
+    fn bind_lag(
+        c: &mut Ctx,
+        gid: u32,
+        mode: sim_core::device::LagMode,
+    ) -> Result<String, CliError> {
+        require_switch(c)?;
+        if !(1..=128).contains(&gid) {
+            return Err(CliError::Custom("Invalid aggregation group number".into()));
+        }
+        let Some(IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom(
+                "Aggregation can only be configured on physical interfaces".into(),
+            ));
+        };
+        if c.eng.net.lag_bind(c.dev, port, gid as u16, mode) {
+            c.eng.lacp_config_changed(c.dev);
+        }
+        Ok(String::new())
+    }
+
+    /// IOS：`channel-group <n> mode active|passive|on`（省略 mode 等价 on）。
+    pub fn lag_bind_ios(c: &mut Ctx) -> Result<String, CliError> {
+        let gid = c.number("group").unwrap_or(0);
+        let mode = match c.word("mode").to_lowercase().as_str() {
+            "active" => sim_core::device::LagMode::LacpActive,
+            "passive" => sim_core::device::LagMode::LacpPassive,
+            "on" | "" => sim_core::device::LagMode::Static,
+            _ => return Err(CliError::Custom("Invalid channel-group mode".into())),
+        };
+        bind_lag(c, gid, mode)
+    }
+
+    /// VRP：成员口 `eth-trunk <n>` / Comware：`port link-aggregation group <n>`（动态聚合）。
+    pub fn lag_bind_dynamic(c: &mut Ctx) -> Result<String, CliError> {
+        let gid = c.number("group").unwrap_or(0);
+        bind_lag(c, gid, sim_core::device::LagMode::LacpActive)
+    }
+
+    /// 聚合口视图：切换工作模式（LACP 主动 / 静态）。
+    pub fn lag_mode_lacp(c: &mut Ctx) -> Result<String, CliError> {
+        lag_set_mode(c, sim_core::device::LagMode::LacpActive)
+    }
+
+    pub fn lag_mode_static(c: &mut Ctx) -> Result<String, CliError> {
+        lag_set_mode(c, sim_core::device::LagMode::Static)
+    }
+
+    fn lag_set_mode(c: &mut Ctx, mode: sim_core::device::LagMode) -> Result<String, CliError> {
+        require_switch(c)?;
+        let Some(IfCtx::Lag(gid)) = c.sess.cur_if else {
+            return Err(CliError::Custom(
+                "This command is only valid in an aggregation interface view".into(),
+            ));
+        };
+        if c.eng.net.set_lag_mode(c.dev, gid, mode) {
+            c.eng.lacp_config_changed(c.dev);
+        }
+        Ok(String::new())
+    }
+
+    /// 成员口退出聚合组（`no channel-group` / `undo eth-trunk` / `undo port link-aggregation group`）。
+    pub fn lag_unbind(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        let Some(IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom(
+                "This command is only valid on physical interfaces".into(),
+            ));
+        };
+        if c.eng.net.lag_unbind(c.dev, port).is_some() {
+            c.eng.lacp_config_changed(c.dev);
+        }
+        Ok(String::new())
+    }
+
+    pub fn show_lag(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        Ok(show::lag_table(c.eng, c.dev, c.dialect))
+    }
+
     fn require_if(c: &Ctx) -> Result<IfCtx, CliError> {
         c.sess
             .cur_if
@@ -147,6 +254,11 @@ pub mod cmd {
                     ));
                 }
             }
+            IfCtx::Lag(_) => {
+                return Err(CliError::Custom(
+                    "This command is not supported on Layer 2 interfaces".into(),
+                ));
+            }
         }
         Ok(String::new())
     }
@@ -158,6 +270,7 @@ pub mod cmd {
             IfCtx::Svi(vlan) => {
                 c.eng.net.set_svi(c.dev, vlan, None, 24);
             }
+            IfCtx::Lag(_) => {}
         }
         Ok(String::new())
     }
@@ -167,9 +280,25 @@ pub mod cmd {
         match ifc {
             IfCtx::Physical(port) => {
                 c.eng.net.set_port_admin(c.dev, port, up);
+                c.eng.stp_topology_changed();
             }
             IfCtx::Svi(vlan) => {
                 c.eng.net.set_svi_admin(c.dev, vlan, up);
+            }
+            IfCtx::Lag(gid) => {
+                let members = c
+                    .eng
+                    .net
+                    .device(c.dev)
+                    .and_then(|d| match &d.state {
+                        DeviceState::Switch(sw) => sw.lags.get(&gid).map(|g| g.members.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                for m in members {
+                    c.eng.net.set_port_admin(c.dev, m, up);
+                }
+                c.eng.lacp_config_changed(c.dev);
             }
         }
         Ok(String::new())
@@ -353,10 +482,87 @@ pub mod cmd {
         Ok(String::new())
     }
 
-    /// VRP/Comware `stp enable|disable`；IOS `spanning-tree vlan <n>` / `no spanning-tree vlan <n>`
+    /// IOS `spanning-tree vlan <n>` / VRP、Comware `stp enable`
     pub fn stp_enable(c: &mut Ctx, up: bool) -> Result<String, CliError> {
         stp_of(c)?.enabled = up;
         c.eng.stp_topology_changed();
+        Ok(String::new())
+    }
+
+    fn stp_set_mode(c: &mut Ctx, mode: sim_core::device::StpMode) -> Result<String, CliError> {
+        stp_of(c)?.mode = mode;
+        c.eng.stp_topology_changed();
+        Ok(String::new())
+    }
+
+    /// IOS `spanning-tree mode rapid-pvst`
+    pub fn stp_mode_rstp(c: &mut Ctx) -> Result<String, CliError> {
+        stp_set_mode(c, sim_core::device::StpMode::Rstp)
+    }
+
+    /// IOS `spanning-tree mode pvst` / VRP `stp mode stp`
+    pub fn stp_mode_stp(c: &mut Ctx) -> Result<String, CliError> {
+        stp_set_mode(c, sim_core::device::StpMode::Dot1d)
+    }
+
+    /// IOS `spanning-tree mode mst` / VRP `stp mode mstp`
+    pub fn stp_mode_mst(c: &mut Ctx) -> Result<String, CliError> {
+        stp_set_mode(c, sim_core::device::StpMode::Mstp)
+    }
+
+    /// 进入 MSTP 域配置视图（`spanning-tree mst configuration` / `stp region-configuration`）
+    pub fn stp_enter_mst(c: &mut Ctx) -> Result<String, CliError> {
+        stp_of(c)?;
+        c.sess.mode = Mode::Mst;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    /// 实例优先级：`spanning-tree mst 1 priority 4096` / `stp instance 1 priority 4096`
+    pub fn stp_mst_priority(c: &mut Ctx) -> Result<String, CliError> {
+        let id = c.number("id").unwrap_or(0);
+        if !(1..=4094).contains(&id) {
+            return Err(CliError::Custom("Invalid MST instance id".into()));
+        }
+        let p = c.number("priority").unwrap_or(32768);
+        if p > 61440 || !p.is_multiple_of(4096) {
+            return Err(CliError::Custom(
+                "Priority must be a multiple of 4096, 0-61440".into(),
+            ));
+        }
+        stp_of(c)?.ensure_mst(id as u16).priority = p as u16;
+        c.eng.stp_topology_changed();
+        Ok(String::new())
+    }
+
+    /// 实例映射 VLAN：`instance 1 vlan 10 20`
+    pub fn stp_mst_instance_vlan(c: &mut Ctx) -> Result<String, CliError> {
+        let id = c.number("id").unwrap_or(0);
+        if !(1..=4094).contains(&id) {
+            return Err(CliError::Custom("Invalid MST instance id".into()));
+        }
+        let vlans = c
+            .vlan_list("vlans")
+            .ok_or_else(|| CliError::Custom("Invalid VLAN list".into()))?;
+        let stp = stp_of(c)?;
+        // 同一 VLAN 只能属于一个实例：先从其它实例摘除
+        for m in stp.mst.values_mut() {
+            m.vlans.retain(|v| !vlans.contains(v));
+        }
+        for v in &vlans {
+            stp.vlan_instance.insert(*v, id as u16);
+        }
+        let m = stp.ensure_mst(id as u16);
+        m.vlans = vlans;
+        m.vlans.sort_unstable();
+        m.vlans.dedup();
+        stp.mode = sim_core::device::StpMode::Mstp;
+        c.eng.stp_topology_changed();
+        Ok(String::new())
+    }
+
+    /// MSTP 域名/修订号等仅接受不落库（无域协商）。
+    pub fn stp_mst_noop(_c: &mut Ctx) -> Result<String, CliError> {
         Ok(String::new())
     }
 
@@ -714,6 +920,473 @@ pub mod cmd {
         Ok(String::new())
     }
 
+    // ---------- 管理面（本地用户 / VTY / 远程登录） ----------
+
+    fn require_mgmt_device(c: &Ctx) -> Result<(), CliError> {
+        if matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Switch) {
+            Ok(())
+        } else {
+            Err(CliError::Custom(
+                "Command is only available on network devices".into(),
+            ))
+        }
+    }
+
+    /// IOS：`username <name> [privilege <0-15>] secret <pw>`
+    pub fn mgmt_username(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let name = c.word("name");
+        let secret = c.word("secret");
+        if name.is_empty() || secret.is_empty() {
+            return Err(CliError::Custom("Invalid username or secret".into()));
+        }
+        let privilege = c.number("privilege").unwrap_or(1).min(15) as u8;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            let u = d.mgmt.ensure_user(&name);
+            u.secret = secret;
+            u.privilege = privilege;
+        }
+        Ok(String::new())
+    }
+
+    /// IOS：`enable secret <pw>`
+    pub fn mgmt_enable_secret(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let secret = c.word("secret");
+        if secret.is_empty() {
+            return Err(CliError::Custom("Invalid secret".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.mgmt.enable_secret = Some(secret);
+        }
+        Ok(String::new())
+    }
+
+    /// `line vty 0 4` / `user-interface vty 0 4` → Line 视图。
+    pub fn mgmt_enter_line(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        c.sess.mode = Mode::Line;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    /// IOS：`login local`（启用本地用户认证）
+    pub fn mgmt_login_local(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.mgmt.auth_local = true;
+        }
+        Ok(String::new())
+    }
+
+    fn parse_transport(list: &[String]) -> Option<VtyTransport> {
+        let words: Vec<String> = list.iter().map(|s| s.to_lowercase()).collect();
+        if words.iter().any(|w| w == "none") {
+            return Some(VtyTransport::None);
+        }
+        let ssh = words
+            .iter()
+            .any(|w| w == "ssh" || w == "all" || w == "ssh-only");
+        let telnet = words.iter().any(|w| w == "telnet" || w == "all");
+        match (ssh, telnet) {
+            (true, true) => Some(VtyTransport::All),
+            (true, false) => Some(VtyTransport::Ssh),
+            (false, true) => Some(VtyTransport::Telnet),
+            (false, false) => None,
+        }
+    }
+
+    /// `transport input ssh|telnet|all|none` / `protocol inbound ...`
+    pub fn mgmt_transport(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let list = c.word_list("protos").unwrap_or_default();
+        let transport = parse_transport(&list)
+            .ok_or_else(|| CliError::Custom("Invalid transport protocol".into()))?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.mgmt.transport = transport;
+        }
+        Ok(String::new())
+    }
+
+    /// VRP：`aaa` → AAA 视图
+    pub fn mgmt_enter_aaa(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        c.sess.mode = Mode::Aaa;
+        c.sess.cur_if = None;
+        c.sess.sub.aaa_user = None;
+        Ok(String::new())
+    }
+
+    /// Comware：`local-user <name> class manage` → AAA 用户视图
+    pub fn mgmt_local_user_enter(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let name = c.word("name");
+        if name.is_empty() {
+            return Err(CliError::Custom("Invalid username".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.mgmt.ensure_user(&name);
+        }
+        c.sess.mode = Mode::Aaa;
+        c.sess.cur_if = None;
+        c.sess.sub.aaa_user = Some(name);
+        Ok(String::new())
+    }
+
+    /// AAA 视图中定位用户：命令带 name 参数，否则用当前视图用户。
+    fn aaa_user_name(c: &Ctx) -> Option<String> {
+        let n = c.word("name");
+        if !n.is_empty() {
+            Some(n)
+        } else {
+            c.sess.sub.aaa_user.clone()
+        }
+    }
+
+    /// `local-user <name> password cipher|simple <pw>` / AAA 视图 `password ...`
+    pub fn mgmt_user_password(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let Some(name) = aaa_user_name(c) else {
+            return Err(CliError::Custom("No local user selected".into()));
+        };
+        let secret = c.word("secret");
+        if secret.is_empty() {
+            return Err(CliError::Custom("Invalid password".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.mgmt.ensure_user(&name).secret = secret;
+        }
+        Ok(String::new())
+    }
+
+    /// `local-user <name> privilege level <n>` / `authorization-attribute user-role ...`
+    pub fn mgmt_user_privilege(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let Some(name) = aaa_user_name(c) else {
+            return Err(CliError::Custom("No local user selected".into()));
+        };
+        let level = c.number("privilege").unwrap_or(1).min(15) as u8;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.mgmt.ensure_user(&name).privilege = level;
+        }
+        Ok(String::new())
+    }
+
+    /// `authorization-attribute user-role network-admin|network-operator`（Comware）
+    pub fn mgmt_user_role(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let Some(name) = aaa_user_name(c) else {
+            return Err(CliError::Custom("No local user selected".into()));
+        };
+        let role = c.word("role").to_lowercase();
+        let level = if role == "network-admin" { 15 } else { 1 };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.mgmt.ensure_user(&name).privilege = level;
+        }
+        Ok(String::new())
+    }
+
+    /// `service-type telnet ssh` / `service-type ssh`
+    pub fn mgmt_user_service(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let Some(name) = aaa_user_name(c) else {
+            return Err(CliError::Custom("No local user selected".into()));
+        };
+        let words: Vec<String> = c
+            .word_list("services")
+            .unwrap_or_default()
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        let all = words.iter().any(|w| w == "all");
+        let telnet = all || words.iter().any(|w| w == "telnet");
+        let ssh = all || words.iter().any(|w| w == "ssh");
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            let u = d.mgmt.ensure_user(&name);
+            u.telnet = telnet;
+            u.ssh = ssh;
+        }
+        Ok(String::new())
+    }
+
+    /// Line 视图：`authentication-mode aaa|scheme|password|none`
+    pub fn mgmt_auth_mode(c: &mut Ctx) -> Result<String, CliError> {
+        require_mgmt_device(c)?;
+        let mode = c.word("mode").to_lowercase();
+        let local = matches!(mode.as_str(), "aaa" | "scheme");
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.mgmt.auth_local = local;
+        }
+        Ok(String::new())
+    }
+
+    fn login_start(c: &mut Ctx, proto: MgmtProto) -> Result<String, CliError> {
+        let ip = c.ipv4("target");
+        if ip == 0 {
+            return Err(CliError::Custom("Invalid IP address".into()));
+        }
+        match c.eng.login_target(c.dev, ip, proto) {
+            Ok(target) => {
+                c.sess.login = Some(LoginFlow {
+                    target,
+                    target_ip: ip,
+                    proto,
+                    step: LoginStep::Username,
+                    user: String::new(),
+                });
+                Ok(match (c.dialect, proto) {
+                    (Dialect::Ios, MgmtProto::Telnet) => {
+                        format!("Trying {} ... Open", ipv4_str(ip))
+                    }
+                    (Dialect::Ios, MgmtProto::Ssh) => format!("Connecting to {} ...", ipv4_str(ip)),
+                    (_, _) => format!("  Trying {} ...", ipv4_str(ip)),
+                })
+            }
+            Err(e) => Ok(login_error_text(c.device_kind(), c.dialect, e)),
+        }
+    }
+
+    pub fn telnet_login(c: &mut Ctx) -> Result<String, CliError> {
+        login_start(c, MgmtProto::Telnet)
+    }
+
+    pub fn ssh_login(c: &mut Ctx) -> Result<String, CliError> {
+        login_start(c, MgmtProto::Ssh)
+    }
+
+    // ---------- OSPF（简化） ----------
+
+    /// `router ospf 1` / `ospf 1`
+    pub fn ospf_enter(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        c.sess.mode = Mode::Ospf;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    /// VRP/Comware 区域视图：`area 0` / `area 0.0.0.0`
+    pub fn ospf_area_enter(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        c.sess.mode = Mode::OspfArea;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    /// `network A.B.C.D wildcard [area 0]`：加入 OSPF。
+    pub fn ospf_network(c: &mut Ctx) -> Result<String, CliError> {
+        let net = c.ipv4("net");
+        if net == 0 {
+            return Err(CliError::Custom("Invalid network".into()));
+        }
+        let wc = match c.val("wildcard") {
+            Some(cli_engine::Val::Ip(w)) => *w,
+            _ => 0,
+        };
+        let area = match c.val("area") {
+            Some(cli_engine::Val::Number(n)) => *n,
+            Some(cli_engine::Val::Word(w)) => w.replace('.', "").parse().unwrap_or(0),
+            _ => 0,
+        };
+        if area != 0 {
+            return Err(CliError::Custom(
+                "Only area 0 is supported in this simulator".into(),
+            ));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if !rs.ospf_networks.contains(&(net, wc)) {
+                    rs.ospf_networks.push((net, wc));
+                }
+            }
+        }
+        c.eng.ospf_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn show_ospf_neighbor(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::ospf_neighbors(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_ospf_db(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::ospf_lsdb(c.eng, c.dev, c.dialect))
+    }
+
+    // ---------- VRRP（虚拟网关） ----------
+
+    fn vrrp_if(c: &Ctx) -> Result<(sim_core::device::PortId, sim_packets::Ipv4Addr), CliError> {
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        let ip = c
+            .eng
+            .net
+            .device(c.dev)
+            .and_then(|d| d.port(port))
+            .and_then(|p| p.ip)
+            .ok_or_else(|| {
+                CliError::Custom("VRRP requires an IP address on the interface".into())
+            })?;
+        Ok((port, ip))
+    }
+
+    pub fn vrrp_vip(c: &mut Ctx) -> Result<String, CliError> {
+        let vrid = c.number("vrid").unwrap_or(0);
+        if !(1..=255).contains(&vrid) {
+            return Err(CliError::Custom("VRRP group must be 1-255".into()));
+        }
+        let vip = c.ipv4("vip");
+        if vip == 0 {
+            return Err(CliError::Custom("Invalid virtual IP".into()));
+        }
+        let (port, _) = vrrp_if(c)?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if let Some(g) = rs.vrrp.iter_mut().find(|g| g.vrid == vrid as u8) {
+                    g.vip = vip;
+                    g.port = port;
+                } else {
+                    rs.vrrp.push(sim_core::device::VrrpGroup {
+                        vrid: vrid as u8,
+                        vip,
+                        port,
+                        priority: 100,
+                        preempt: true,
+                        state: sim_core::device::VrrpState::Init,
+                        last_advert_ns: 0,
+                    });
+                }
+            }
+        }
+        c.eng.vrrp_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn vrrp_priority(c: &mut Ctx) -> Result<String, CliError> {
+        let vrid = c.number("vrid").unwrap_or(0);
+        let priority = c.number("priority").unwrap_or(100);
+        if !(1..=254).contains(&priority) {
+            return Err(CliError::Custom("VRRP priority must be 1-254".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if let Some(g) = rs.vrrp.iter_mut().find(|g| g.vrid == vrid as u8) {
+                    g.priority = priority as u8;
+                }
+            }
+        }
+        c.eng.vrrp_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn vrrp_preempt(c: &mut Ctx) -> Result<String, CliError> {
+        let vrid = c.number("vrid").unwrap_or(0);
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if let Some(g) = rs.vrrp.iter_mut().find(|g| g.vrid == vrid as u8) {
+                    g.preempt = true;
+                }
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub fn show_vrrp(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::vrrp_table(c.eng, c.dev, c.dialect))
+    }
+
+    // ---------- IPv6（简化） ----------
+
+    /// `ipv6 address 2001:db8::1/64`
+    pub fn ipv6_address(c: &mut Ctx) -> Result<String, CliError> {
+        let raw = c.word("addr");
+        let (addr, len) = raw.split_once('/').ok_or_else(|| {
+            CliError::Custom("Expected address/prefix, e.g. 2001:db8::1/64".into())
+        })?;
+        let ip = sim_packets::ipv6_from_str(addr)
+            .ok_or_else(|| CliError::Custom("Invalid IPv6 address".into()))?;
+        let prefix: u8 = len
+            .parse()
+            .map_err(|_| CliError::Custom("Invalid prefix length".into()))?;
+        if prefix > 128 {
+            return Err(CliError::Custom("Invalid prefix length".into()));
+        }
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        c.eng.net.set_port_ipv6(c.dev, port, Some(ip), prefix);
+        Ok(String::new())
+    }
+
+    /// IOS `ipv6 route 2001:db8:2::/64 2001:db8:1::2` / VRP `ipv6 route-static ...`
+    pub fn ipv6_route(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let prefix = c.word("prefix");
+        let nh_raw = c.word("nexthop");
+        let (net_s, len): (&str, u8) = match prefix.split_once('/') {
+            Some((n, l)) => (
+                n,
+                l.parse()
+                    .map_err(|_| CliError::Custom("Invalid prefix length".into()))?,
+            ),
+            None => (
+                prefix.as_str(),
+                c.number("len")
+                    .filter(|n| *n <= 128)
+                    .ok_or_else(|| CliError::Custom("Invalid prefix length".into()))?
+                    as u8,
+            ),
+        };
+        let dst = sim_packets::ipv6_from_str(net_s)
+            .ok_or_else(|| CliError::Custom("Invalid IPv6 prefix".into()))?;
+        let nh = sim_packets::ipv6_from_str(&nh_raw)
+            .ok_or_else(|| CliError::Custom("Invalid next hop".into()))?;
+        c.eng.net.add_static_route6(c.dev, dst, len, nh);
+        Ok(String::new())
+    }
+
+    pub fn ping_ipv6(c: &mut Ctx) -> Result<String, CliError> {
+        let raw = c.word("target");
+        let target = sim_packets::ipv6_from_str(&raw)
+            .ok_or_else(|| CliError::Custom("Invalid IPv6 address".into()))?;
+        c.eng.start_ping6(c.dev, target);
+        Ok(String::new())
+    }
+
+    pub fn show_ipv6_brief(c: &mut Ctx) -> Result<String, CliError> {
+        Ok(show::ipv6_int_brief(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_ipv6_route(c: &mut Ctx) -> Result<String, CliError> {
+        Ok(show::ipv6_route_table(c.eng, c.dev, c.dialect))
+    }
+
     // ---------- 显示 ----------
 
     pub fn show_acl(c: &mut Ctx) -> Result<String, CliError> {
@@ -804,11 +1477,19 @@ pub mod cmd {
 
 /// 执行一行命令（不驱动引擎）。空行 / 帮助 / 错误均已格式化。
 pub fn exec_line(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> String {
+    // 登录流程优先：后续输入是用户名/口令
+    if sess.login.is_some() {
+        return login_step(eng, sess, dev, line);
+    }
+    // 远程会话：命令转发给目标设备，exit/logout 断开
+    if sess.remote.is_some() {
+        return remote_step(eng, sess, dev, line);
+    }
     let Some(d) = eng.net.device(dev) else {
         return String::new();
     };
     if d.kind == DeviceKind::Host {
-        return pc::exec(eng, dev, line);
+        return pc::exec(eng, sess, dev, line);
     }
     let dialect = d.dialect;
     let trimmed = line.trim();
@@ -839,9 +1520,119 @@ pub fn exec_line(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -
     }
 }
 
+/// 登录失败提示（按源设备的方言/主机风格渲染）。
+pub fn login_error_text(
+    kind: DeviceKind,
+    dialect: Dialect,
+    e: sim_core::engine::LoginError,
+) -> String {
+    use sim_core::engine::LoginError;
+    if kind == DeviceKind::Host {
+        return match e {
+            LoginError::Unreachable => "connect: Network is unreachable".into(),
+            LoginError::TransportDenied => "connect: Connection refused".into(),
+            LoginError::AuthFailed => "Permission denied".into(),
+        };
+    }
+    match dialect {
+        Dialect::Ios => match e {
+            LoginError::Unreachable => "% Destination unreachable".into(),
+            LoginError::TransportDenied => "% Connection refused by remote host".into(),
+            LoginError::AuthFailed => "% Authentication failed".into(),
+        },
+        Dialect::Vrp => match e {
+            LoginError::Unreachable => "Error: Destination host unreachable.".into(),
+            LoginError::TransportDenied => "Error: The connection was refused.".into(),
+            LoginError::AuthFailed => "Error: Authentication failed.".into(),
+        },
+        Dialect::Comware => match e {
+            LoginError::Unreachable => "% Destination unreachable.".into(),
+            LoginError::TransportDenied => "% Connection refused.".into(),
+            LoginError::AuthFailed => "% Authentication failed.".into(),
+        },
+    }
+}
+
+/// 登录流程：用户名 → 口令 → 建立远程会话。
+fn login_step(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> String {
+    let (kind, dialect) = eng
+        .net
+        .device(dev)
+        .map(|d| (d.kind, d.dialect))
+        .unwrap_or((DeviceKind::Router, Dialect::Ios));
+    let Some(step) = sess.login.as_ref().map(|f| f.step) else {
+        return String::new();
+    };
+    match step {
+        LoginStep::Username => {
+            let user = line.trim().to_string();
+            if user.is_empty() {
+                return String::new();
+            }
+            if let Some(flow) = sess.login.as_mut() {
+                flow.user = user;
+                flow.step = LoginStep::Password;
+            }
+            String::new()
+        }
+        LoginStep::Password => {
+            let Some(flow) = sess.login.take() else {
+                return String::new();
+            };
+            match eng.try_login(dev, flow.target_ip, flow.proto, &flow.user, line.trim()) {
+                Ok((target, privilege)) => {
+                    let target_dialect = eng
+                        .net
+                        .device(target)
+                        .map(|d| d.dialect)
+                        .unwrap_or(Dialect::Ios);
+                    // 权限 15 直接进特权模式（与 SSH 登录真实行为一致）
+                    let mode = if target_dialect == Dialect::Ios && privilege >= 15 {
+                        Mode::Priv
+                    } else {
+                        Mode::Exec
+                    };
+                    sess.remote = Some(RemoteSession {
+                        dev: target,
+                        inner: Box::new(Session {
+                            mode,
+                            ..Default::default()
+                        }),
+                    });
+                    String::new()
+                }
+                Err(e) => login_error_text(kind, dialect, e),
+            }
+        }
+    }
+}
+
+/// 远程会话：转发命令；`exit` / `logout` 断开。
+fn remote_step(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> String {
+    let dialect = eng
+        .net
+        .device(dev)
+        .map(|d| d.dialect)
+        .unwrap_or(Dialect::Ios);
+    let cmd = line.trim().to_lowercase();
+    if cmd == "exit" || cmd == "logout" {
+        sess.remote = None;
+        return match dialect {
+            Dialect::Ios => "\n[Connection closed by foreign host]".into(),
+            _ => "\nInfo: The connection was closed.".into(),
+        };
+    }
+    let Some(remote) = sess.remote.as_mut() else {
+        return String::new();
+    };
+    let target = remote.dev;
+    exec_line(eng, &mut remote.inner, target, line)
+}
+
 /// 执行一行命令并驱动引擎至静默；返回完整输出（含 ping 结果）。
 pub fn exec_and_run(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> String {
-    let kind = eng.net.device(dev).map(|d| d.kind);
+    let eff = sess.effective_dev(dev);
+    let kind = eng.net.device(eff).map(|d| d.kind);
     let out = exec_line(eng, sess, dev, line);
     let horizon = eng.drain_horizon();
     eng.run_to_quiescence(horizon);
@@ -851,10 +1642,10 @@ pub fn exec_and_run(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str
     }
     let dialect = eng
         .net
-        .device(dev)
+        .device(eff)
         .map(|d| d.dialect)
         .unwrap_or(Dialect::Ios);
-    for s in eng.take_unreported_pings(dev) {
+    for s in eng.take_unreported_pings(eff) {
         let text = if kind == Some(DeviceKind::Host) {
             show::render_ping_generic(&s)
         } else {
@@ -862,10 +1653,27 @@ pub fn exec_and_run(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str
         };
         parts.push(text);
     }
+    for s in eng.take_unreported_ping6(eff) {
+        let text = if kind == Some(DeviceKind::Host) {
+            show::render_ping6_generic(&s)
+        } else {
+            show::render_ping6(dialect, &s)
+        };
+        parts.push(text);
+    }
     parts.join("\n")
 }
 
 pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
+    if let Some(flow) = &sess.login {
+        return match flow.step {
+            LoginStep::Username => "Username: ".into(),
+            LoginStep::Password => "Password: ".into(),
+        };
+    }
+    if let Some(remote) = &sess.remote {
+        return prompt(eng, &remote.inner, remote.dev);
+    }
     let Some(d) = eng.net.device(dev) else {
         return "?".into();
     };
@@ -881,6 +1689,10 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
             Mode::If => format!("{}(config-if)#", d.name),
             Mode::Pool => format!("{}(dhcp-config)#", d.name),
             Mode::Acl => format!("{}(config-acl)#", d.name),
+            Mode::Line => format!("{}(config-line)#", d.name),
+            Mode::Aaa => format!("{}(config-aaa)#", d.name),
+            Mode::Mst => format!("{}(config-mst)#", d.name),
+            Mode::Ospf | Mode::OspfArea => format!("{}(config-router)#", d.name),
         },
         Dialect::Vrp | Dialect::Comware => match sess.mode {
             Mode::Exec | Mode::Priv => format!("<{}>", d.name),
@@ -889,6 +1701,7 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
                 let ifn = match sess.cur_if {
                     Some(cli_engine::IfCtx::Svi(v)) => ifname::svi_canonical(dialect, v),
                     Some(cli_engine::IfCtx::Physical(p)) => ifname::canonical(dialect, d.kind, p),
+                    Some(cli_engine::IfCtx::Lag(id)) => ifname::lag_canonical(dialect, id),
                     None => String::new(),
                 };
                 format!("[{}-{}]", d.name, ifn)
@@ -902,6 +1715,21 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
                 Some((n, false)) => format!("[{}-acl-basic-{}]", d.name, n),
                 None => format!("[{}]", d.name),
             },
+            Mode::Line => {
+                let prefix = if dialect == Dialect::Comware {
+                    "line-vty"
+                } else {
+                    "ui-vty"
+                };
+                format!("[{}-{}0-4]", d.name, prefix)
+            }
+            Mode::Aaa => match (dialect, &sess.sub.aaa_user) {
+                (Dialect::Comware, Some(u)) => format!("[{}-luser-manage-{}]", d.name, u),
+                _ => format!("[{}-aaa]", d.name),
+            },
+            Mode::Mst => format!("[{}-mst-region]", d.name),
+            Mode::Ospf => format!("[{}-ospf-1]", d.name),
+            Mode::OspfArea => format!("[{}-ospf-1-area-0.0.0.0]", d.name),
         },
     }
 }
@@ -913,6 +1741,12 @@ pub fn complete_line(
     dev: DevId,
     line: &str,
 ) -> (String, Vec<String>) {
+    if sess.login.is_some() {
+        return (line.to_string(), vec![]);
+    }
+    if let Some(remote) = &sess.remote {
+        return complete_line(eng, &remote.inner, remote.dev, line);
+    }
     let Some(d) = eng.net.device(dev) else {
         return (line.to_string(), vec![]);
     };

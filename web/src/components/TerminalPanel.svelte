@@ -8,6 +8,7 @@
   import { app, deviceName, closeTerminal, refreshFrom } from '../lib/store.svelte';
   import { markDirty } from '../lib/persistence';
   import { theme } from '../lib/theme.svelte';
+  import { t } from '../lib/i18n.svelte';
 
   interface Editor {
     term: Terminal;
@@ -185,7 +186,7 @@
       const ed = editors.get(dev);
       if (ed) handleData(ed, data);
     });
-    term.write('网工模拟器（M0）\r\n双击左侧画布设备可打开更多终端。输入 ? 查看命令，Tab 补全。\r\n');
+    term.write(t('term.welcome'));
     const ed: Editor = { term, fit, buffer: '', history: [], histIdx: 0, dev };
     term.write(promptOf(getSim(), dev));
     return ed;
@@ -253,7 +254,7 @@
       </button>
     {/each}
     {#if !app.tabs.length}
-      <span class="empty">双击画布上的设备打开终端</span>
+      <span class="empty">{t('term.empty')}</span>
     {/if}
   </div>
   <div class="term-body" bind:this={bodyEl}></div>

@@ -3,6 +3,7 @@
   import { getSim, dumpSummary } from '../lib/sim';
   import { app, deviceById, deviceAlive, refreshFrom, openTerminal } from '../lib/store.svelte';
   import { markDirty } from '../lib/persistence';
+  import { t } from '../lib/i18n.svelte';
 
   let svgEl: SVGSVGElement | undefined = $state();
 
@@ -158,9 +159,9 @@
   };
 
   const KIND_TEXT: Record<string, string> = {
-    Router: '路由器',
-    Switch: '交换机',
-    Host: 'PC',
+    Router: 'left.router',
+    Switch: 'left.switch',
+    Host: 'left.pc',
   };
 </script>
 
@@ -269,7 +270,7 @@
           {/if}
           <text x={NODE_W / 2} y={52} text-anchor="middle" fill="var(--text)" font-size="12">
             {dev.name}
-            <tspan fill="var(--text-dim)" font-size="10"> {KIND_TEXT[dev.kind]}</tspan>
+            <tspan fill="var(--text-dim)" font-size="10"> {t(KIND_TEXT[dev.kind])}</tspan>
           </text>
           <circle cx={NODE_W - 9} cy={9} r="4" fill={alive ? 'var(--good)' : 'var(--dot-off)'} />
         </g>
@@ -280,11 +281,11 @@
   <div class="floating">
     {#if app.linkMode}
       <button class="primary" onclick={() => { app.linkMode = false; app.linkFrom = null; }}>
-        {app.linkFrom === null ? '连线：点击起点设备' : '连线：点击目标设备'}（Esc 取消）
+        {app.linkFrom === null ? t('topo.connectStart') : t('topo.connectEnd')}（Esc）
       </button>
     {:else}
       <button onclick={() => { app.linkMode = true; }} disabled={app.devices.length < 1}>
-        🔌 连线
+        {t('topo.connectBtn')}
       </button>
     {/if}
   </div>

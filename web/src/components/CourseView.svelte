@@ -1,15 +1,17 @@
 <script lang="ts">
   // 课程视图：左侧课程列表 + 右侧阅读器 + 三厂商命令对照表（运行时验证）。
-  import { LESSONS } from '../lib/course';
+  import { LESSONS, lessonTitle, lessonMarkdown } from '../lib/course';
+  import { t, i18n } from '../lib/i18n.svelte';
   import { CMDMAP, type CmdRow } from '../content/cmdmap';
   import { renderMarkdown } from '../lib/md';
   import { getSim } from '../lib/sim';
   import { app } from '../lib/store.svelte';
-  import { LABS } from '../lib/labs';
-
+  import { LABS, labTitle } from '../lib/labs';
   let currentId = $state(LESSONS[0]?.id ?? '');
   const current = $derived(LESSONS.find((l) => l.id === currentId) ?? LESSONS[0]);
-  const html = $derived(current ? renderMarkdown(current.md) : '');
+  const html = $derived(
+    current ? renderMarkdown(lessonMarkdown(current, i18n.lang === 'en')) : ''
+  );
 
   // 对照表按当前课程主题过滤
   const rows = $derived(
@@ -48,12 +50,12 @@
 
 <div class="course-view">
   <aside class="list panel">
-    <h3>课程目录</h3>
+    <h3>{t('course.catalog')}</h3>
     <div class="pad lessons">
       {#each LESSONS as l (l.id)}
         <button class="lesson" class:active={l.id === currentId} onclick={() => (currentId = l.id)}>
           <span class="no">{String(l.order).padStart(2, '0')}</span>
-          {l.title}
+          {lessonTitle(l, i18n.lang === 'en')}
         </button>
       {/each}
     </div>
@@ -63,12 +65,12 @@
     {#if current}
       <div class="panel lesson-card">
         <div class="pad">
-          <h1 class="lesson-title">{current.title}</h1>
+          <h1 class="lesson-title">{lessonTitle(current, i18n.lang === 'en')}</h1>
           <div class="md">{@html html}</div>
           {#if current.lab}
             {@const lab = LABS.find((x) => x.id === current.lab)}
             <button class="primary lab-open" onclick={openLab}>
-              ▶ 打开对应实验{lab ? `：${lab.title}` : ''}
+              {t('course.openLab')}{lab ? `: ${labTitle(lab)}` : ''}
             </button>
           {/if}
         </div>
@@ -76,15 +78,15 @@
 
       {#if rows.length}
         <div class="panel">
-          <h3>三厂商命令对照（本课相关 · ✓ = 与模拟器行为已验证一致）</h3>
+          <h3>{t('course.table')}</h3>
           <div class="pad table-wrap">
             <table class="cmd-table mono">
               <thead>
                 <tr>
-                  <th>功能</th>
-                  <th>思科 IOS</th>
-                  <th>华为 VRP</th>
-                  <th>华三 Comware</th>
+                  <th>{t('course.feature')}</th>
+                  <th>{t('course.ios')}</th>
+                  <th>{t('course.vrp')}</th>
+                  <th>{t('course.comware')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -98,7 +100,7 @@
                 {/each}
               </tbody>
             </table>
-            <div class="hint">对照表数据即模拟器的命令树——每条都经过运行时解析验证；本表可作为速查手册使用。</div>
+            <div class="hint">{t('course.tableHint')}</div>
           </div>
         </div>
       {/if}

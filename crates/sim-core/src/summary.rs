@@ -25,6 +25,14 @@ pub struct PortSummary {
     pub acl_in: Option<u32>,
     #[serde(default)]
     pub acl_out: Option<u32>,
+    /// 所属聚合组 id
+    #[serde(default)]
+    pub lag: Option<u16>,
+    /// IPv6 地址（压缩文本）与前缀
+    #[serde(default)]
+    pub ipv6: Option<String>,
+    #[serde(default)]
+    pub prefix6: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,6 +61,47 @@ pub struct DevSummary {
     pub acls: Vec<AclSummary>,
     #[serde(default)]
     pub dhcp_enable: bool,
+    /// 仅交换机：链路聚合组
+    #[serde(default)]
+    pub lags: Vec<LagSummary>,
+    /// 管理面（本地用户 / VTY）
+    #[serde(default)]
+    pub mgmt: MgmtState,
+    /// OSPF network 语句（网段, 通配符）
+    #[serde(default)]
+    pub ospf_networks: Vec<(String, String)>,
+    /// VRRP 组配置
+    #[serde(default)]
+    pub vrrp: Vec<VrrpSummary>,
+    /// 主机 IPv6 网关
+    #[serde(default)]
+    pub gw6: Option<String>,
+    /// IPv6 静态路由
+    #[serde(default)]
+    pub static_routes6: Vec<StaticRoute6Summary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaticRoute6Summary {
+    pub dst: String,
+    pub len: u8,
+    pub nexthop: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VrrpSummary {
+    pub vrid: u8,
+    pub vip: String,
+    pub port: usize,
+    pub priority: u8,
+    pub preempt: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LagSummary {
+    pub id: u16,
+    pub mode: LagMode,
+    pub members: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +183,9 @@ impl Net {
                             trunk_allowed: p.trunk_allowed.clone(),
                             acl_in: p.acl_in,
                             acl_out: p.acl_out,
+                            lag: p.lag,
+                            ipv6: p.ipv6.map(|a| sim_packets::ipv6_str(&a)),
+                            prefix6: p.prefix6,
                         })
                         .collect(),
                     gw: match &d.state {
@@ -217,6 +269,61 @@ impl Net {
                             .collect(),
                         _ => vec![],
                     },
+                    lags: match &d.state {
+                        DeviceState::Switch(sw) => {
+                            let mut v: Vec<LagSummary> = sw
+                                .lags
+                                .values()
+                                .map(|g| LagSummary {
+                                    id: g.id,
+                                    mode: g.mode,
+                                    members: g.members.clone(),
+                                })
+                                .collect();
+                            v.sort_by_key(|g| g.id);
+                            v
+                        }
+                        _ => vec![],
+                    },
+                    mgmt: d.mgmt.clone(),
+                    ospf_networks: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .ospf_networks
+                            .iter()
+                            .map(|(n, w)| (ipv4_str(*n), ipv4_str(*w)))
+                            .collect(),
+                        _ => vec![],
+                    },
+                    vrrp: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .vrrp
+                            .iter()
+                            .map(|g| VrrpSummary {
+                                vrid: g.vrid,
+                                vip: ipv4_str(g.vip),
+                                port: g.port,
+                                priority: g.priority,
+                                preempt: g.preempt,
+                            })
+                            .collect(),
+                        _ => vec![],
+                    },
+                    gw6: match &d.state {
+                        DeviceState::Host(h) => h.gw6.map(|a| sim_packets::ipv6_str(&a)),
+                        _ => None,
+                    },
+                    static_routes6: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .static_routes6
+                            .iter()
+                            .map(|r| StaticRoute6Summary {
+                                dst: sim_packets::ipv6_str(&r.dst),
+                                len: r.len,
+                                nexthop: sim_packets::ipv6_str(&r.nexthop),
+                            })
+                            .collect(),
+                        _ => vec![],
+                    },
                 })
                 .collect(),
             links: self
@@ -244,6 +351,7 @@ impl Net {
             }
             next_dev = next_dev.max(ds.id + 1);
             let d = self.device_mut(id).unwrap();
+            d.mgmt = ds.mgmt.clone();
             for ps in &ds.ports {
                 if let Some(p) = d.port_mut(ps.idx) {
                     p.admin_up = ps.admin_up;
@@ -256,6 +364,11 @@ impl Net {
                     p.trunk_allowed = ps.trunk_allowed.clone();
                     p.acl_in = ps.acl_in;
                     p.acl_out = ps.acl_out;
+                    p.lag = ps.lag;
+                    p.prefix6 = ps.prefix6;
+                    if let Some(txt) = &ps.ipv6 {
+                        p.ipv6 = sim_packets::ipv6_from_str(txt);
+                    }
                 }
             }
             if ds.dhcp_enable {
@@ -267,8 +380,24 @@ impl Net {
             if let (DeviceState::Host(h), Some(gw)) = (&mut d.state, &ds.gw) {
                 h.gw = Some(ipv4_from_str(gw).ok_or("非法网关")?);
             }
+            if let (DeviceState::Host(h), Some(gw6)) = (&mut d.state, &ds.gw6) {
+                h.gw6 = sim_packets::ipv6_from_str(gw6);
+            }
             match &mut d.state {
                 DeviceState::Router(rs) => {
+                    for r in &ds.static_routes6 {
+                        if let (Some(dst), Some(nh)) = (
+                            sim_packets::ipv6_from_str(&r.dst),
+                            sim_packets::ipv6_from_str(&r.nexthop),
+                        ) {
+                            rs.static_routes6.push(Route6 {
+                                dst,
+                                len: r.len,
+                                nexthop: nh,
+                                src: RouteSrc::Static,
+                            });
+                        }
+                    }
                     for r in &ds.static_routes {
                         rs.static_routes.push(static_from(r));
                     }
@@ -283,6 +412,24 @@ impl Net {
                     }
                     rs.nat_inside = ds.nat_inside.clone();
                     rs.nat_outside = ds.nat_outside.clone();
+                    for (n, w) in &ds.ospf_networks {
+                        if let (Some(net), Some(wc)) = (ipv4_from_str(n), ipv4_from_str(w)) {
+                            rs.ospf_networks.push((net, wc));
+                        }
+                    }
+                    for g in &ds.vrrp {
+                        if let Some(vip) = ipv4_from_str(&g.vip) {
+                            rs.vrrp.push(VrrpGroup {
+                                vrid: g.vrid,
+                                vip,
+                                port: g.port,
+                                priority: g.priority,
+                                preempt: g.preempt,
+                                state: VrrpState::Init,
+                                last_advert_ns: 0,
+                            });
+                        }
+                    }
                     for (x, y) in &ds.nat_static {
                         if let (Some(a), Some(b)) = (ipv4_from_str(x), ipv4_from_str(y)) {
                             rs.nat_static.push((a, b));
@@ -338,6 +485,27 @@ impl Net {
                 }
                 _ => {}
             }
+            // 聚合组：模式来自摘要，成员以端口上的 lag 归属为准
+            let lag_ports: Vec<(u16, usize)> = d
+                .ports
+                .iter()
+                .filter_map(|p| p.lag.map(|g| (g, p.idx)))
+                .collect();
+            if let DeviceState::Switch(sw) = &mut d.state {
+                for lg in &ds.lags {
+                    sw.ensure_lag(lg.id).mode = lg.mode;
+                }
+                for (gid, port) in lag_ports {
+                    let g = sw.ensure_lag(gid);
+                    if !g.members.contains(&port) {
+                        g.members.push(port);
+                    }
+                }
+                for g in sw.lags.values_mut() {
+                    g.members.sort_unstable();
+                    g.members.dedup();
+                }
+            }
         }
         for ls in &s.links {
             if self.device(ls.a.0).is_none() || self.device(ls.b.0).is_none() {
@@ -372,14 +540,91 @@ impl Net {
         }
     }
 
-    pub fn set_port_admin(&mut self, dev: DevId, port: PortId, up: bool) {
+    pub fn set_port_ipv6(
+        &mut self,
+        dev: DevId,
+        port: PortId,
+        ip: Option<sim_packets::Ipv6Addr>,
+        prefix: u8,
+    ) {
         if let Some(d) = self.device_mut(dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.ipv6 = ip;
+                p.prefix6 = prefix;
+            }
+        }
+    }
+
+    pub fn add_static_route6(
+        &mut self,
+        dev: DevId,
+        dst: sim_packets::Ipv6Addr,
+        len: u8,
+        nexthop: sim_packets::Ipv6Addr,
+    ) -> bool {
+        let Some(d) = self.device_mut(dev) else {
+            return false;
+        };
+        let DeviceState::Router(rs) = &mut d.state else {
+            return false;
+        };
+        if rs
+            .static_routes6
+            .iter()
+            .any(|r| r.dst == dst && r.len == len && r.nexthop == nexthop)
+        {
+            return true;
+        }
+        rs.static_routes6.push(Route6 {
+            dst,
+            len,
+            nexthop,
+            src: RouteSrc::Static,
+        });
+        true
+    }
+
+    pub fn set_host_v6(
+        &mut self,
+        dev: DevId,
+        ip: Option<sim_packets::Ipv6Addr>,
+        prefix: u8,
+        gw: Option<sim_packets::Ipv6Addr>,
+    ) {
+        let Some(d) = self.device_mut(dev) else {
+            return;
+        };
+        if let Some(p) = d.port_mut(0) {
+            p.ipv6 = ip;
+            p.prefix6 = prefix;
+        }
+        if let DeviceState::Host(h) = &mut d.state {
+            h.gw6 = gw;
+        }
+    }
+
+    pub fn set_port_admin(&mut self, dev: DevId, port: PortId, up: bool) {
+        let link = if let Some(d) = self.device_mut(dev) {
             if let Some(p) = d.port_mut(port) {
                 p.admin_up = up;
             }
             if !up {
                 // 端口关闭：指向它的 MAC 表项立即失效（真实交换机行为）
                 flush_port_macs(d, port);
+            }
+            d.port(port).and_then(|p| p.link)
+        } else {
+            None
+        };
+        // 双端载波检测：本端关闭后，对端也会立刻失效该链路学到的 MAC
+        if !up {
+            if let Some(lid) = link {
+                if let Some(l) = self.link(lid).cloned() {
+                    let peer = if l.a == (dev, port) { l.b } else { l.a };
+                    if let Some(d) = self.device_mut(peer.0) {
+                        flush_port_macs(d, peer.1);
+                    }
+                }
             }
         }
     }
@@ -430,6 +675,70 @@ impl Net {
             for v in vlans {
                 sw.ensure_vlan(*v);
             }
+        }
+    }
+
+    /// 端口加入聚合组（自动从旧组迁出）。返回 false 表示不是交换机。
+    pub fn lag_bind(&mut self, dev: DevId, port: PortId, gid: u16, mode: LagMode) -> bool {
+        let Some(d) = self.device_mut(dev) else {
+            return false;
+        };
+        let old = d.ports.get(port).and_then(|p| p.lag);
+        let DeviceState::Switch(sw) = &mut d.state else {
+            return false;
+        };
+        if let Some(old) = old.filter(|o| *o != gid) {
+            if let Some(g) = sw.lags.get_mut(&old) {
+                g.members.retain(|p| *p != port);
+                g.selected.retain(|p| *p != port);
+                g.partners.remove(&port);
+            }
+        }
+        let g = sw.ensure_lag(gid);
+        g.mode = mode;
+        if !g.members.contains(&port) {
+            g.members.push(port);
+            g.members.sort_unstable();
+        }
+        if let Some(p) = d.port_mut(port) {
+            p.lag = Some(gid);
+        }
+        flush_port_macs(d, port);
+        true
+    }
+
+    /// 端口退出其聚合组，返回原来的组 id。
+    pub fn lag_unbind(&mut self, dev: DevId, port: PortId) -> Option<u16> {
+        let d = self.device_mut(dev)?;
+        let old = d.ports.get(port).and_then(|p| p.lag)?;
+        if let DeviceState::Switch(sw) = &mut d.state {
+            if let Some(g) = sw.lags.get_mut(&old) {
+                g.members.retain(|p| *p != port);
+                g.selected.retain(|p| *p != port);
+                g.partners.remove(&port);
+            }
+        }
+        if let Some(p) = d.port_mut(port) {
+            p.lag = None;
+        }
+        flush_port_macs(d, port);
+        Some(old)
+    }
+
+    /// 设置聚合组工作模式。返回 false 表示不是交换机或组不存在。
+    pub fn set_lag_mode(&mut self, dev: DevId, gid: u16, mode: LagMode) -> bool {
+        let Some(d) = self.device_mut(dev) else {
+            return false;
+        };
+        let DeviceState::Switch(sw) = &mut d.state else {
+            return false;
+        };
+        match sw.lags.get_mut(&gid) {
+            Some(g) => {
+                g.mode = mode;
+                true
+            }
+            None => false,
         }
     }
 

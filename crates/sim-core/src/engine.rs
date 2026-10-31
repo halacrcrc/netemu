@@ -33,6 +33,16 @@ pub const STP_HELLO_NS: u64 = 2_000_000_000;
 pub const STP_FORWARD_DELAY_NS: u64 = 15_000_000_000;
 /// BPDU 老化时间（802.1D Max Age）：超时未收到邻居 BPDU 则淘汰缓存并重算。
 pub const STP_MAX_AGE_NS: u64 = 20_000_000_000;
+/// LACP 周期（快速率 1s；教学场景优先收敛速度）。
+pub const LACP_INTERVAL_NS: u64 = 1_000_000_000;
+/// LACP 邻居超时（3 个周期未收到即失效）。
+pub const LACP_TIMEOUT_NS: u64 = 3_500_000_000;
+/// OSPF Hello 周期与邻居失效时间（简化）。
+pub const OSPF_HELLO_NS: u64 = 2_000_000_000;
+pub const OSPF_DEAD_NS: u64 = 6_000_000_000;
+/// VRRP 通告周期与 Master 失效时间。
+pub const VRRP_ADVERT_NS: u64 = 1_000_000_000;
+pub const VRRP_MASTER_DOWN_NS: u64 = 3_500_000_000;
 
 fn mac_is_broadcast(m: &Mac) -> bool {
     *m == BROADCAST_MAC
@@ -48,6 +58,29 @@ pub struct Stats {
     pub events: u64,
     pub in_flight: usize,
     pub dropped: u64,
+}
+
+/// 远程登录（Telnet/SSH）失败原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginError {
+    /// 目标不可达 / 目标地址不属于任何设备
+    Unreachable,
+    /// VTY 未允许该协议
+    TransportDenied,
+    /// 认证失败（未开启本地认证或用户名/口令/服务类型不匹配）
+    AuthFailed,
+}
+
+/// MSTP 实例换入前的 CIST 现场。
+struct CistSaved {
+    root: BridgeId,
+    root_cost: u32,
+    root_port: Option<PortId>,
+    ports: std::collections::HashMap<PortId, StpPortSt>,
+    port_bpdus: std::collections::HashMap<PortId, BpduPacket>,
+    last_bpdu_ns: std::collections::HashMap<PortId, u64>,
+    epochs: std::collections::HashMap<PortId, u32>,
+    priority: u16,
 }
 
 enum EKind {
@@ -77,6 +110,44 @@ enum EKind {
         to: StpSt,
         epoch: u32,
     },
+    /// LACP 周期定时器（发 LACPDU + 老化对端 + 重选成员）
+    LacpTimer {
+        dev: DevId,
+    },
+    /// OSPF Hello/邻居老化定时器
+    OspfTimer {
+        dev: DevId,
+    },
+    /// VRRP 通告/超时定时器
+    VrrpTimer {
+        dev: DevId,
+    },
+    /// IPv6 ping 发送/结束
+    Ping6Send {
+        dev: DevId,
+        sid: u16,
+        probe: u32,
+    },
+    Ping6Done {
+        dev: DevId,
+        sid: u16,
+    },
+}
+
+/// OSPF 邻居（简化：仅记录存活、首次跳地址与接口）。
+#[derive(Clone, Copy, Debug)]
+struct OspfNeighbor {
+    ip: Ipv4Addr,
+    port: PortId,
+    last_ns: u64,
+}
+
+/// OSPF 进程运行时（LSDB + 邻居），不进摘要。
+#[derive(Default)]
+struct OspfRuntime {
+    lsdb: std::collections::HashMap<Ipv4Addr, OspfLsa>,
+    neighbors: std::collections::HashMap<Ipv4Addr, OspfNeighbor>,
+    timer_pending: bool,
 }
 
 struct QEvent {
@@ -128,6 +199,8 @@ pub struct Engine {
     in_flight: usize,
     pub dropped: u64,
     pub events_processed: u64,
+    ospf: std::collections::HashMap<DevId, OspfRuntime>,
+    vrrp_pending: std::collections::HashSet<DevId>,
 }
 
 impl Engine {
@@ -140,6 +213,8 @@ impl Engine {
             in_flight: 0,
             dropped: 0,
             events_processed: 0,
+            ospf: std::collections::HashMap::new(),
+            vrrp_pending: Default::default(),
         };
         // 启动时初始化 STP：全量重算 + 调度 hello
         eng.stp_recompute_all();
@@ -261,6 +336,11 @@ impl Engine {
                     to,
                     epoch,
                 } => self.on_stp_advance(dev, port, to, epoch),
+                EKind::LacpTimer { dev } => self.on_lacp_timer(dev),
+                EKind::OspfTimer { dev } => self.on_ospf_timer(dev),
+                EKind::VrrpTimer { dev } => self.on_vrrp_timer(dev),
+                EKind::Ping6Send { dev, sid, probe } => self.on_ping6_send(dev, sid, probe),
+                EKind::Ping6Done { dev, sid } => self.on_ping6_done(dev, sid),
             }
         }
         self.stats()
@@ -291,14 +371,34 @@ impl Engine {
         }
     }
 
-    /// 端口能否转发数据帧（STP 启用时仅 Forwarding 状态可转发）。
-    fn can_forward(&self, dev_id: DevId, port: PortId) -> bool {
+    /// 端口能否转发该 VLAN 的数据帧（STP 实例 Forwarding + 聚合成员已选中）。
+    fn can_forward(&self, dev_id: DevId, port: PortId, vlan: VlanId) -> bool {
         let Some(d) = self.net.device(dev_id) else {
             return false;
         };
+        // 聚合成员：未被 LACP 选中的成员不转发数据
+        if let Some(gid) = d.port(port).and_then(|p| p.lag) {
+            let DeviceState::Switch(sw) = &d.state else {
+                return false;
+            };
+            let Some(g) = sw.lags.get(&gid) else {
+                return false;
+            };
+            if !g.selected.contains(&port) {
+                return false;
+            }
+        }
         match &d.state {
             DeviceState::Switch(sw) => {
-                !sw.stp.enabled || sw.stp.state_of(port) == StpSt::Forwarding
+                if !sw.stp.enabled {
+                    return true;
+                }
+                let inst = if sw.stp.mode == StpMode::Mstp {
+                    sw.stp.instance_for_vlan(vlan)
+                } else {
+                    0
+                };
+                sw.stp.state_in(inst, self.logical_port(dev_id, port)) == StpSt::Forwarding
             }
             _ => true,
         }
@@ -311,28 +411,31 @@ impl Engine {
         )
     }
 
-    /// 三层交换机入方向：BPDU 截获 → VLAN 归类 → 学习 → SVI 截获 → 转发/洪泛。
+    /// 三层交换机入方向：LACP/BPDU 截获 → VLAN 归类 → 学习 → SVI 截获 → 转发/洪泛。
     fn switch_ingress(&mut self, dev_id: DevId, in_port: PortId, frame: EthernetFrame) {
+        // 0a. LACP：先于 VLAN/STP 处理（聚合协商与端口状态无关）
+        if frame.ethertype == ETHERTYPE_LACP {
+            if let L3::Lacp(pdu) = frame.payload {
+                self.lacp_on_pdu(dev_id, in_port, pdu);
+            }
+            return;
+        }
         // 0. BPDU：先于 VLAN/端口状态处理（STP 与 VLAN 无关，阻塞端口照常收）
         if frame.ethertype == ETHERTYPE_BPDU {
             if let L3::Bpdu(bpdu) = frame.payload {
+                // 聚合组视为一个逻辑端口：任何成员收到的 BPDU 归到代表端口
+                let logical = self.logical_port(dev_id, in_port);
                 if self.stp_on(dev_id) {
-                    self.stp_on_bpdu(dev_id, in_port, bpdu);
+                    self.stp_on_bpdu(dev_id, logical, bpdu);
                 } else {
                     // STP 关闭：BPDU 当作未知组播洪泛（广播风暴演示的一部分）
-                    let n = self.net.device(dev_id).map(|d| d.ports.len()).unwrap_or(0);
-                    for p in 0..n {
-                        if p != in_port {
+                    for p in self.logical_ports(dev_id) {
+                        if p != logical {
                             self.transmit_frame(dev_id, p, frame);
                         }
                     }
                 }
             }
-            return;
-        }
-        // STP 启用时，非 Forwarding 端口丢弃数据帧（不学习）
-        if self.stp_on(dev_id) && !self.can_forward(dev_id, in_port) {
-            self.dropped += 1;
             return;
         }
         // 1. 入方向 VLAN 归类
@@ -351,15 +454,21 @@ impl Engine {
                 }
             }
         };
-        // 2. 学习 + 查表
-        let (dst_port, svi_ip, port_count) = {
+        // STP 启用时，非 Forwarding 端口（按该 VLAN 的实例）丢弃数据帧（不学习）
+        if self.stp_on(dev_id) && !self.can_forward(dev_id, in_port, vlan) {
+            self.dropped += 1;
+            return;
+        }
+        // 2. 学习 + 查表（学习到聚合组的逻辑端口，避免成员间漂移）
+        let logical_in = self.logical_port(dev_id, in_port);
+        let (dst_port, svi_ip, _port_count) = {
             let Some(d) = self.net.device_mut(dev_id) else {
                 return;
             };
             let DeviceState::Switch(sw) = &mut d.state else {
                 return;
             };
-            sw.mac_table.insert((vlan, frame.src), in_port);
+            sw.mac_table.insert((vlan, frame.src), logical_in);
             let dst_port = if mac_is_broadcast(&frame.dst) || mac_is_multicast(&frame.dst) {
                 None
             } else {
@@ -380,10 +489,12 @@ impl Engine {
         }
         // 4. 二层转发 / 洪泛（出方向过滤非 Forwarding 端口——STP 阻塞的关键）
         let out_ports: Vec<PortId> = match dst_port {
-            Some(p) if p != in_port && self.can_forward(dev_id, p) => vec![p],
+            Some(p) if p != logical_in && self.can_forward(dev_id, p, vlan) => vec![p],
             Some(_) => vec![], // 已知单播但源同端口或不可转发：丢弃
-            None => (0..port_count)
-                .filter(|&p| p != in_port && self.can_forward(dev_id, p))
+            None => self
+                .logical_ports(dev_id)
+                .into_iter()
+                .filter(|&p| p != logical_in && self.can_forward(dev_id, p, vlan))
                 .collect(),
         };
         for p in out_ports {
@@ -393,6 +504,8 @@ impl Engine {
 
     /// 出方向：按端口口型决定加/剥 tag 后发送；不发则静默跳过。
     fn l2_egress(&mut self, dev_id: DevId, port: PortId, vlan: VlanId, mut frame: EthernetFrame) {
+        // 聚合组：按流哈希在选中成员间分担
+        let port = self.egress_member(dev_id, port, &frame);
         let Some(d) = self.net.device(dev_id) else {
             return;
         };
@@ -405,22 +518,57 @@ impl Engine {
         }
     }
 
+    /// 聚合组出方向选成员：同一流（源/目的 MAC）稳定落在同一成员。
+    fn egress_member(&self, dev_id: DevId, port: PortId, frame: &EthernetFrame) -> PortId {
+        let Some(d) = self.net.device(dev_id) else {
+            return port;
+        };
+        let Some(gid) = d.port(port).and_then(|p| p.lag) else {
+            return port;
+        };
+        let DeviceState::Switch(sw) = &d.state else {
+            return port;
+        };
+        let Some(g) = sw.lags.get(&gid) else {
+            return port;
+        };
+        let live: Vec<PortId> = g
+            .selected
+            .iter()
+            .copied()
+            .filter(|m| {
+                d.port(*m)
+                    .map(|p| p.admin_up && p.link.map(|l| self.net.link_up(l)).unwrap_or(false))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if live.is_empty() {
+            return port;
+        }
+        let mut h: u64 = 1469598103934665603;
+        for b in frame.dst.iter().chain(frame.src.iter()) {
+            h ^= *b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        live[(h % live.len() as u64) as usize]
+    }
+
     /// 在指定 VLAN 内把帧送达已知 MAC（查表或洪泛）。
     fn l2_send_in_vlan(&mut self, dev_id: DevId, vlan: VlanId, dst: Mac, frame: EthernetFrame) {
-        let (learned, port_count) = {
+        let learned = {
             let Some(d) = self.net.device(dev_id) else {
                 return;
             };
             let DeviceState::Switch(sw) = &d.state else {
                 return;
             };
-            (sw.mac_table.get(&(vlan, dst)).copied(), d.ports.len())
+            sw.mac_table.get(&(vlan, dst)).copied()
         };
         match learned {
             Some(p) => self.l2_egress(dev_id, p, vlan, frame),
             None => {
-                for p in 0..port_count {
-                    if self.can_forward(dev_id, p) {
+                for p in self.logical_ports(dev_id) {
+                    if self.can_forward(dev_id, p, vlan) {
                         self.l2_egress(dev_id, p, vlan, frame);
                     }
                 }
@@ -429,9 +577,8 @@ impl Engine {
     }
 
     fn flood_in_vlan(&mut self, dev_id: DevId, vlan: VlanId, frame: EthernetFrame) {
-        let n = self.net.device(dev_id).map(|d| d.ports.len()).unwrap_or(0);
-        for p in 0..n {
-            if self.can_forward(dev_id, p) {
+        for p in self.logical_ports(dev_id) {
+            if self.can_forward(dev_id, p, vlan) {
                 self.l2_egress(dev_id, p, vlan, frame);
             }
         }
@@ -507,6 +654,10 @@ impl Engine {
                 }
             }
             L3::Bpdu(_) => {} // BPDU 在二层路径已处理，防御性忽略
+            L3::Lacp(_) => {} // LACP 在二层路径已处理
+            L3::Ospf(_) => {} // SVI 不跑 OSPF（简化）
+            L3::Vrrp(_) => {} // 交换机不做 VRRP
+            L3::Ipv6(_) => {} // IPv6 仅路由器/主机（简化）
             L3::Dhcp(_) => {} // 交换机 SVI 不参与 DHCP（M2b）
         }
     }
@@ -585,6 +736,23 @@ impl Engine {
 
     /// 路由器/主机：仅处理目的 MAC 为本机端口 MAC 或广播的 untagged 帧。
     fn l3_ingress(&mut self, dev_id: DevId, port: PortId, frame: EthernetFrame) {
+        // OSPF/VRRP 使用组播，先于 MAC/单播判断处理
+        if frame.ethertype == ETHERTYPE_OSPF {
+            if let L3::Ospf(pkt) = frame.payload {
+                self.ospf_on_packet(dev_id, port, pkt);
+            }
+            return;
+        }
+        if frame.ethertype == ETHERTYPE_VRRP {
+            if let L3::Vrrp(pkt) = frame.payload {
+                self.vrrp_on_packet(dev_id, pkt);
+            }
+            return;
+        }
+        if frame.ethertype == ETHERTYPE_IPV6 {
+            self.ipv6_on_frame(dev_id, port, frame);
+            return;
+        }
         let (my_mac, my_ip) = {
             let Some(d) = self.net.device(dev_id) else {
                 return;
@@ -594,7 +762,8 @@ impl Engine {
             };
             (p.mac, p.ip)
         };
-        if frame.dst != my_mac && frame.dst != BROADCAST_MAC {
+        let vmac_ok = self.is_vrrp_virtual_mac_on(dev_id, port, &frame.dst);
+        if frame.dst != my_mac && frame.dst != BROADCAST_MAC && !vmac_ok {
             return; // 非本机帧，L3 设备不透明转发（无桥接）
         }
         if frame.vlan.is_some() {
@@ -607,6 +776,10 @@ impl Engine {
             L3::Arp(arp) => self.arp_ingress(dev_id, port, my_mac, my_ip, arp),
             L3::Ipv4(pkt) => self.ipv4_ingress(dev_id, port, my_mac, frame, pkt),
             L3::Bpdu(_) => {} // 主机/路由器不处理 802.1D BPDU
+            L3::Lacp(_) => {} // 主机/路由器不做链路聚合
+            L3::Ospf(_) => {} // OSPF 已在入口处理
+            L3::Vrrp(_) => {} // VRRP 已在入口处理
+            L3::Ipv6(_) => {} // IPv6 已在入口处理
             L3::Dhcp(dhcp) => {
                 // DHCP 广播：主机客户端 / 路由器服务器各自处理
                 match d_kind(&self.net, dev_id) {
@@ -630,6 +803,27 @@ impl Engine {
         if arp.sender_ip != 0 {
             self.arp_learn(dev_id, port, None, arp.sender_ip, arp.sender_mac);
             self.flush_pending(dev_id, port, None, arp.sender_ip, arp.sender_mac);
+        }
+        if arp.op == ArpOp::Request {
+            // VRRP：Master 用虚拟 MAC 应答虚拟网关的 ARP
+            if let Some(vmac) = self.vrrp_vip_owner(dev_id, port, arp.target_ip) {
+                let reply = ArpPacket {
+                    op: ArpOp::Reply,
+                    sender_mac: vmac,
+                    sender_ip: arp.target_ip,
+                    target_mac: arp.sender_mac,
+                    target_ip: arp.sender_ip,
+                };
+                let frame = EthernetFrame {
+                    dst: arp.sender_mac,
+                    src: vmac,
+                    vlan: None,
+                    ethertype: ETHERTYPE_ARP,
+                    payload: L3::Arp(reply),
+                };
+                self.transmit_frame(dev_id, port, frame);
+                return;
+            }
         }
         if arp.op == ArpOp::Request && my_ip == Some(arp.target_ip) {
             let reply = ArpPacket {
@@ -768,7 +962,8 @@ impl Engine {
                 self.router_forward(dev_id, pkt2);
                 return;
             }
-            if Some(pkt.dst) == my_ip {
+            let vip_mac = self.vrrp_vip_owner(dev_id, port, pkt.dst);
+            if Some(pkt.dst) == my_ip || vip_mac.is_some() {
                 if pkt.icmp.is_reply {
                     self.on_ping_reply(dev_id, pkt);
                 } else {
@@ -785,7 +980,7 @@ impl Engine {
                     };
                     let out = EthernetFrame {
                         dst: frame.src,
-                        src: my_mac,
+                        src: vip_mac.unwrap_or(my_mac),
                         vlan: None,
                         ethertype: ETHERTYPE_IPV4,
                         payload: L3::Ipv4(reply),
@@ -1612,40 +1807,1096 @@ impl Engine {
         self.nat_ingress(dev_id, port, pkt)
     }
 
-    /// 端口路径成本：覆盖值优先，否则按速率（1Gbps → 4）。
-    fn port_cost(&self, dev: DevId, port: PortId) -> u32 {
+    // ---------- OSPF（单区域简化：Hello + Router-LSA 泛洪 + SPF） ----------
+
+    /// 配置变化后启动/刷新 OSPF 进程。
+    pub fn ospf_config_changed(&mut self, dev: DevId) {
+        if !self.ospf_enabled(dev) {
+            return;
+        }
+        self.ospf.entry(dev).or_default();
+        let lsa = self.ospf_build_lsa(dev);
+        self.ospf
+            .entry(dev)
+            .or_default()
+            .lsdb
+            .insert(lsa.router_id, lsa);
+        self.ospf_recompute_all();
+        self.ospf_flood(dev, lsa, None);
+        self.ospf_send_hello(dev);
+        self.ospf_schedule(dev);
+    }
+
+    /// 供 show 使用：本机 OSPF Router ID。
+    pub fn ospf_router_id_of(&self, dev: DevId) -> Ipv4Addr {
+        self.ospf_router_id(dev)
+    }
+
+    /// 供 show 使用：存活邻居 (router id, 邻居接口 IP, 本地接口)。
+    pub fn ospf_neighbors_of(&self, dev: DevId) -> Vec<(Ipv4Addr, Ipv4Addr, PortId)> {
+        let now = self.now;
+        let mut v: Vec<(Ipv4Addr, Ipv4Addr, PortId)> = self
+            .ospf
+            .get(&dev)
+            .map(|rt| {
+                rt.neighbors
+                    .iter()
+                    .filter(|(_, nb)| now.saturating_sub(nb.last_ns) <= OSPF_DEAD_NS)
+                    .map(|(rid, nb)| (*rid, nb.ip, nb.port))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_unstable();
+        v
+    }
+
+    /// 供 show 使用：LSDB 摘要 (router id, 网段数, 邻居数)。
+    pub fn ospf_lsdb_of(&self, dev: DevId) -> Vec<(Ipv4Addr, u8, u8)> {
+        let mut v: Vec<(Ipv4Addr, u8, u8)> = self
+            .ospf
+            .get(&dev)
+            .map(|rt| {
+                rt.lsdb
+                    .values()
+                    .map(|l| (l.router_id, l.link_count, l.neighbor_count))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_unstable();
+        v
+    }
+
+    fn ospf_enabled(&self, dev: DevId) -> bool {
+        self.net
+            .device(dev)
+            .map(|d| matches!(&d.state, DeviceState::Router(rs) if !rs.ospf_networks.is_empty()))
+            .unwrap_or(false)
+    }
+
+    fn ospf_port_enabled(&self, dev: DevId, port: PortId) -> bool {
+        let Some(d) = self.net.device(dev) else {
+            return false;
+        };
+        let Some(ip) = d.port(port).and_then(|p| p.ip) else {
+            return false;
+        };
+        let DeviceState::Router(rs) = &d.state else {
+            return false;
+        };
+        rs.ospf_networks
+            .iter()
+            .any(|(net, wc)| (ip & !wc) == (*net & !wc))
+    }
+
+    fn ospf_enabled_ports(&self, dev: DevId) -> Vec<(PortId, Ipv4Addr, u8)> {
+        let Some(d) = self.net.device(dev) else {
+            return vec![];
+        };
+        d.ports
+            .iter()
+            .filter(|p| p.admin_up && p.link.is_some() && p.ip.is_some())
+            .filter(|p| self.ospf_port_enabled(dev, p.idx))
+            .map(|p| (p.idx, p.ip.unwrap(), p.prefix))
+            .collect()
+    }
+
+    fn ospf_router_id(&self, dev: DevId) -> Ipv4Addr {
+        let Some(d) = self.net.device(dev) else {
+            return 1;
+        };
+        let mut best = 0u32;
+        for p in &d.ports {
+            if let Some(ip) = p.ip {
+                best = best.max(ip);
+            }
+            if let DeviceState::Switch(sw) = &d.state {
+                for s in sw.svi.values() {
+                    if s.admin_up && s.ip != 0 {
+                        best = best.max(s.ip);
+                    }
+                }
+            }
+        }
+        if best == 0 {
+            1
+        } else {
+            best
+        }
+    }
+
+    fn ospf_build_lsa(&self, dev: DevId) -> OspfLsa {
+        let mut lsa = OspfLsa {
+            router_id: self.ospf_router_id(dev),
+            ..Default::default()
+        };
+        for (_, ip, prefix) in self.ospf_enabled_ports(dev) {
+            if lsa.link_count as usize >= lsa.links.len() {
+                break;
+            }
+            let i = lsa.link_count as usize;
+            lsa.links[i] = Some(OspfLink {
+                net: ip & mask_from_prefix(prefix),
+                len: prefix,
+            });
+            lsa.link_count += 1;
+        }
+        if let Some(rt) = self.ospf.get(&dev) {
+            let now = self.now;
+            for (rid, nb) in &rt.neighbors {
+                if now.saturating_sub(nb.last_ns) <= OSPF_DEAD_NS
+                    && (lsa.neighbor_count as usize) < lsa.neighbors.len()
+                {
+                    lsa.neighbors[lsa.neighbor_count as usize] = *rid;
+                    lsa.neighbor_count += 1;
+                }
+            }
+        }
+        lsa
+    }
+
+    fn ospf_schedule(&mut self, dev: DevId) {
+        let need = {
+            let rt = self.ospf.entry(dev).or_default();
+            if rt.timer_pending {
+                false
+            } else {
+                rt.timer_pending = true;
+                true
+            }
+        };
+        if need {
+            self.push(self.now + OSPF_HELLO_NS, EKind::OspfTimer { dev });
+        }
+    }
+
+    fn ospf_send_hello(&mut self, dev: DevId) {
+        let lsa = self.ospf_build_lsa(dev);
+        for (port, ip, _) in self.ospf_enabled_ports(dev) {
+            let Some(mac) = self
+                .net
+                .device(dev)
+                .and_then(|d| d.port(port))
+                .map(|p| p.mac)
+            else {
+                continue;
+            };
+            let frame = EthernetFrame {
+                dst: OSPF_MULTICAST_MAC,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_OSPF,
+                payload: L3::Ospf(OspfPacket {
+                    kind: OspfKind::Hello,
+                    area: 0,
+                    router_id: lsa.router_id,
+                    src_ip: ip,
+                    lsa,
+                }),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+    }
+
+    fn ospf_flood(&mut self, dev: DevId, lsa: OspfLsa, skip: Option<PortId>) {
+        for (port, ip, _) in self.ospf_enabled_ports(dev) {
+            if skip == Some(port) {
+                continue;
+            }
+            let Some(mac) = self
+                .net
+                .device(dev)
+                .and_then(|d| d.port(port))
+                .map(|p| p.mac)
+            else {
+                continue;
+            };
+            let frame = EthernetFrame {
+                dst: OSPF_MULTICAST_MAC,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_OSPF,
+                payload: L3::Ospf(OspfPacket {
+                    kind: OspfKind::Lsu,
+                    area: 0,
+                    router_id: lsa.router_id,
+                    src_ip: ip,
+                    lsa,
+                }),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+    }
+
+    fn ospf_on_packet(&mut self, dev: DevId, port: PortId, pkt: OspfPacket) {
+        if !self.ospf_enabled(dev) || !self.ospf_port_enabled(dev, port) || pkt.area != 0 {
+            return;
+        }
+        let now = self.now;
+        let mut changed = false;
+        {
+            let rt = self.ospf.entry(dev).or_default();
+            match rt.neighbors.get(&pkt.router_id) {
+                Some(nb) if now.saturating_sub(nb.last_ns) <= OSPF_DEAD_NS => {}
+                _ => changed = true,
+            }
+            rt.neighbors.insert(
+                pkt.router_id,
+                OspfNeighbor {
+                    ip: pkt.src_ip,
+                    port,
+                    last_ns: now,
+                },
+            );
+            if pkt.lsa.router_id != 0 && rt.lsdb.get(&pkt.lsa.router_id) != Some(&pkt.lsa) {
+                rt.lsdb.insert(pkt.lsa.router_id, pkt.lsa);
+                changed = true;
+            }
+        }
+        if changed {
+            let own = self.ospf_build_lsa(dev);
+            if let Some(rt) = self.ospf.get_mut(&dev) {
+                rt.lsdb.insert(own.router_id, own);
+            }
+            self.ospf_flood(dev, pkt.lsa, Some(port));
+            self.ospf_recompute_all();
+        }
+    }
+
+    fn on_ospf_timer(&mut self, dev: DevId) {
+        if !self.ospf_enabled(dev) {
+            return;
+        }
+        if let Some(rt) = self.ospf.get_mut(&dev) {
+            rt.timer_pending = false;
+        }
+        let now = self.now;
+        let expired: Vec<Ipv4Addr> = self
+            .ospf
+            .get(&dev)
+            .map(|rt| {
+                rt.neighbors
+                    .iter()
+                    .filter(|(_, nb)| now.saturating_sub(nb.last_ns) > OSPF_DEAD_NS)
+                    .map(|(rid, _)| *rid)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !expired.is_empty() {
+            if let Some(rt) = self.ospf.get_mut(&dev) {
+                for rid in expired {
+                    rt.neighbors.remove(&rid);
+                }
+            }
+            let lsa = self.ospf_build_lsa(dev);
+            if let Some(rt) = self.ospf.get_mut(&dev) {
+                rt.lsdb.insert(lsa.router_id, lsa);
+            }
+            self.ospf_flood(dev, lsa, None);
+            self.ospf_recompute_all();
+        }
+        self.ospf_send_hello(dev);
+        self.ospf_schedule(dev);
+    }
+
+    /// 对每个 OSPF 路由器跑一次 SPF 并写回动态路由。
+    fn ospf_recompute_all(&mut self) {
+        let devs: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| matches!(&d.state, DeviceState::Router(rs) if !rs.ospf_networks.is_empty()))
+            .map(|d| d.id)
+            .collect();
+        for dev in &devs {
+            let lsa = self.ospf_build_lsa(*dev);
+            self.ospf
+                .entry(*dev)
+                .or_default()
+                .lsdb
+                .insert(lsa.router_id, lsa);
+        }
+        for dev in devs {
+            let routes = self.ospf_spf(dev);
+            if let Some(d) = self.net.device_mut(dev) {
+                if let DeviceState::Router(rs) = &mut d.state {
+                    rs.ospf_routes = routes;
+                }
+            }
+        }
+    }
+
+    fn ospf_spf(&self, dev: DevId) -> Vec<Route> {
+        let Some(rt) = self.ospf.get(&dev) else {
+            return vec![];
+        };
+        let self_id = self.ospf_router_id(dev);
+        let mut dist: std::collections::HashMap<Ipv4Addr, u32> = std::collections::HashMap::new();
+        let mut first: std::collections::HashMap<Ipv4Addr, Ipv4Addr> =
+            std::collections::HashMap::new();
+        let mut done: std::collections::HashSet<Ipv4Addr> = Default::default();
+        dist.insert(self_id, 0);
+        loop {
+            let next = dist
+                .iter()
+                .filter(|(rid, _)| !done.contains(*rid))
+                .min_by_key(|(_, d)| **d)
+                .map(|(rid, d)| (*rid, *d));
+            let Some((u, du)) = next else { break };
+            done.insert(u);
+            let Some(lsa) = rt.lsdb.get(&u) else { continue };
+            for i in 0..lsa.neighbor_count as usize {
+                let v = lsa.neighbors[i];
+                if v == 0 || !rt.lsdb.contains_key(&v) {
+                    continue;
+                }
+                let nd = du + 1;
+                if nd < *dist.get(&v).unwrap_or(&u32::MAX) {
+                    dist.insert(v, nd);
+                    let hop = if u == self_id {
+                        v
+                    } else {
+                        *first.get(&u).unwrap_or(&v)
+                    };
+                    first.insert(v, hop);
+                }
+            }
+        }
+        let mut routes = vec![];
+        let mut seen: std::collections::HashSet<(Ipv4Addr, u8)> = Default::default();
+        // 本机直连网段不重复装 OSPF 路由（连接路由优先）
+        let connected: std::collections::HashSet<(Ipv4Addr, u8)> = self
+            .net
+            .device(dev)
+            .map(|d| {
+                d.connected_routes()
+                    .iter()
+                    .map(|r| (r.dst, r.len))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for rid in dist.keys() {
+            if *rid == self_id {
+                continue;
+            }
+            let Some(hop) = first.get(rid) else { continue };
+            let Some(nb) = rt.neighbors.get(hop) else {
+                continue;
+            };
+            let Some(lsa) = rt.lsdb.get(rid) else {
+                continue;
+            };
+            for i in 0..lsa.link_count as usize {
+                let Some(link) = lsa.links[i] else { continue };
+                if connected.contains(&(link.net, link.len)) || !seen.insert((link.net, link.len)) {
+                    continue;
+                }
+                routes.push(Route {
+                    dst: link.net,
+                    len: link.len,
+                    nexthop: nb.ip,
+                    vlan: None,
+                    port: 0,
+                    src: RouteSrc::Ospf,
+                });
+            }
+        }
+        routes
+    }
+
+    // ---------- IPv6（简化：NDP + ICMPv6 ping + 静态路由） ----------
+
+    pub fn start_ping6(&mut self, dev: DevId, target: Ipv6Addr) -> Option<u16> {
+        let kind = d_kind(&self.net, dev);
+        if !matches!(kind, DeviceKind::Router | DeviceKind::Host) {
+            return None;
+        }
+        let sid = {
+            let d = self.net.device_mut(dev)?;
+            let (pings, next) = match &mut d.state {
+                DeviceState::Router(rs) => (&mut rs.pings6, &mut rs.next_ping6_id),
+                DeviceState::Host(hs) => (&mut hs.pings6, &mut hs.next_ping6_id),
+                _ => return None,
+            };
+            let id = (*next & 0xffff) as u16;
+            *next += 1;
+            pings.push(Ping6Session {
+                id,
+                target,
+                sent: 0,
+                received: 0,
+                done: false,
+                reported: false,
+            });
+            id
+        };
+        self.push(self.now, EKind::Ping6Send { dev, sid, probe: 0 });
+        Some(sid)
+    }
+
+    fn ping6_session_mut(&mut self, dev: DevId, sid: u16) -> Option<&mut Ping6Session> {
+        let d = self.net.device_mut(dev)?;
+        let pings = match &mut d.state {
+            DeviceState::Router(rs) => &mut rs.pings6,
+            DeviceState::Host(hs) => &mut hs.pings6,
+            _ => return None,
+        };
+        pings.iter_mut().find(|s| s.id == sid)
+    }
+
+    /// 返回 (出端口, 下一跳地址, 源地址)。
+    fn route_for_ping6(
+        &self,
+        dev: DevId,
+        target: Ipv6Addr,
+    ) -> Option<(PortId, Ipv6Addr, Ipv6Addr)> {
+        let d = self.net.device(dev)?;
+        match &d.state {
+            DeviceState::Host(hs) => {
+                let p = &d.ports[0];
+                let ip = p.ipv6?;
+                let arp_for = if ipv6_in_prefix(&target, &ip, p.prefix6) {
+                    target
+                } else {
+                    hs.gw6?
+                };
+                Some((0, arp_for, ip))
+            }
+            DeviceState::Router(_) => {
+                let (port, nh) = self.net.lookup_route6(dev, target)?;
+                let src = d.port(port).and_then(|p| p.ipv6)?;
+                Some((port, nh, src))
+            }
+            _ => None,
+        }
+    }
+
+    fn on_ping6_send(&mut self, dev: DevId, sid: u16, probe: u32) {
+        let now = self.now;
+        let (target, sent) = {
+            let Some(s) = self.ping6_session_mut(dev, sid) else {
+                return;
+            };
+            if s.done || probe != s.sent || probe >= Ping6Session::TOTAL {
+                return;
+            }
+            s.sent += 1;
+            (s.target, s.sent)
+        };
+        if let Some((port, arp_for, src)) = self.route_for_ping6(dev, target) {
+            let pkt = Ipv6Packet {
+                src,
+                dst: target,
+                hop_limit: 64,
+                icmp: Ipv6Icmp::EchoRequest {
+                    id: sid,
+                    seq: probe as u16,
+                },
+            };
+            self.send_ipv6(dev, port, pkt, arp_for);
+        }
+        if sent < Ping6Session::TOTAL {
+            self.push(
+                now + PingSession::INTERVAL_NS,
+                EKind::Ping6Send {
+                    dev,
+                    sid,
+                    probe: probe + 1,
+                },
+            );
+        } else {
+            self.push(now + PingSession::TIMEOUT_NS, EKind::Ping6Done { dev, sid });
+        }
+    }
+
+    fn on_ping6_done(&mut self, dev: DevId, sid: u16) {
+        if let Some(s) = self.ping6_session_mut(dev, sid) {
+            s.done = true;
+        }
+    }
+
+    /// 取已结束未输出的 ping6 会话。
+    pub fn take_unreported_ping6(&mut self, dev: DevId) -> Vec<Ping6Session> {
+        let Some(d) = self.net.device_mut(dev) else {
+            return vec![];
+        };
+        let pings = match &mut d.state {
+            DeviceState::Router(rs) => &mut rs.pings6,
+            DeviceState::Host(hs) => &mut hs.pings6,
+            _ => return vec![],
+        };
+        let mut out = vec![];
+        for s in pings.iter_mut() {
+            if s.done && !s.reported {
+                s.reported = true;
+                out.push(s.clone());
+            }
+        }
+        pings.retain(|s| !(s.done && s.reported));
+        out
+    }
+
+    /// 本机在该端口上的 IPv6 地址。
+    fn my_ipv6_on(&self, dev: DevId, port: PortId, addr: &Ipv6Addr) -> bool {
         self.net
             .device(dev)
             .and_then(|d| d.port(port))
-            .map(|p| p.stp_cost.unwrap_or(STP_COST_1G))
-            .unwrap_or(STP_COST_1G)
+            .and_then(|p| p.ipv6)
+            .map(|ip| ip == *addr)
+            .unwrap_or(false)
     }
 
-    /// 拓扑变化后由桥接层调用：清理死端口 BPDU、全量重算、调度 hello。
-    pub fn stp_topology_changed(&mut self) {
-        // 活跃端口集合：链路存在且两端端口均管理性开启
-        let mut live: std::collections::HashSet<(DevId, PortId)> = Default::default();
-        for l in &self.net.links {
-            if !l.up {
-                continue;
-            }
-            let a_up = self
-                .net
-                .device(l.a.0)
-                .and_then(|d| d.port(l.a.1))
-                .map(|p| p.admin_up)
-                .unwrap_or(false);
-            let b_up = self
-                .net
-                .device(l.b.0)
-                .and_then(|d| d.port(l.b.1))
-                .map(|p| p.admin_up)
-                .unwrap_or(false);
-            if a_up && b_up {
-                live.insert(l.a);
-                live.insert(l.b);
+    fn ndp_lookup(&self, dev: DevId, port: PortId, ip: Ipv6Addr) -> Option<NdpEntry> {
+        let d = self.net.device(dev)?;
+        match &d.state {
+            DeviceState::Router(rs) => rs.ndp.get(&(port, ip)).copied(),
+            DeviceState::Host(hs) => hs.ndp.get(&ip).copied(),
+            _ => None,
+        }
+    }
+
+    fn ndp_learn(&mut self, dev: DevId, port: PortId, ip: Ipv6Addr, mac: Mac) {
+        {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            match &mut d.state {
+                DeviceState::Router(rs) => {
+                    rs.ndp.insert((port, ip), NdpEntry { mac, port });
+                    rs.ndping.remove(&(port, ip));
+                }
+                DeviceState::Host(hs) => {
+                    hs.ndp.insert(ip, NdpEntry { mac, port });
+                    hs.ndping.remove(&ip);
+                }
+                _ => return,
             }
         }
+        self.flush_pending6(dev, ip, mac);
+    }
+
+    fn flush_pending6(&mut self, dev: DevId, ip: Ipv6Addr, mac: Mac) {
+        let ready: Vec<Pending6> = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            match &mut d.state {
+                DeviceState::Router(rs) => {
+                    let (ok, rest): (Vec<_>, Vec<_>) =
+                        rs.pending6.drain(..).partition(|p| p.dst_ip == ip);
+                    rs.pending6 = rest;
+                    ok
+                }
+                DeviceState::Host(hs) => {
+                    let (ok, rest): (Vec<_>, Vec<_>) =
+                        hs.pending6.drain(..).partition(|p| p.dst_ip == ip);
+                    hs.pending6 = rest;
+                    ok
+                }
+                _ => return,
+            }
+        };
+        for p in ready {
+            let frame = EthernetFrame {
+                dst: mac,
+                src: p.src_mac,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV6,
+                payload: L3::Ipv6(p.pkt),
+            };
+            self.transmit_frame(dev, p.port, frame);
+        }
+    }
+
+    /// 发送 IPv6（必要时先发 NS 解析邻居）。
+    fn send_ipv6(&mut self, dev: DevId, port: PortId, pkt: Ipv6Packet, arp_for: Ipv6Addr) {
+        let (mac, src_ip) = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let Some(p) = d.port(port) else {
+                return;
+            };
+            (p.mac, p.ipv6.unwrap_or([0u8; 16]))
+        };
+        if let Some(e) = self.ndp_lookup(dev, port, arp_for) {
+            let frame = EthernetFrame {
+                dst: e.mac,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV6,
+                payload: L3::Ipv6(pkt),
+            };
+            self.transmit_frame(dev, port, frame);
+            return;
+        }
+        let need_ns = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            match &mut d.state {
+                DeviceState::Router(rs) => {
+                    rs.pending6.push(Pending6 {
+                        port,
+                        dst_ip: arp_for,
+                        src_ip: pkt.src,
+                        src_mac: mac,
+                        pkt,
+                    });
+                    rs.ndping.insert((port, arp_for))
+                }
+                DeviceState::Host(hs) => {
+                    hs.pending6.push(Pending6 {
+                        port,
+                        dst_ip: arp_for,
+                        src_ip: pkt.src,
+                        src_mac: mac,
+                        pkt,
+                    });
+                    hs.ndping.insert(arp_for)
+                }
+                _ => return,
+            }
+        };
+        if need_ns {
+            let ns = Ipv6Packet {
+                src: src_ip,
+                dst: ipv6_solicited_addr(&arp_for),
+                hop_limit: 255,
+                icmp: Ipv6Icmp::NeighborSolicitation { target: arp_for },
+            };
+            let frame = EthernetFrame {
+                dst: ipv6_solicited_mac(&arp_for),
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV6,
+                payload: L3::Ipv6(ns),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+    }
+
+    fn ipv6_on_frame(&mut self, dev: DevId, port: PortId, frame: EthernetFrame) {
+        let L3::Ipv6(pkt) = frame.payload else {
+            return;
+        };
+        let my_mac = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(port))
+            .map(|p| p.mac)
+            .unwrap_or([0; 6]);
+        match pkt.icmp {
+            Ipv6Icmp::NeighborSolicitation { target } => {
+                if pkt.src != [0u8; 16] && pkt.src != target {
+                    self.ndp_learn(dev, port, pkt.src, frame.src);
+                }
+                if self.my_ipv6_on(dev, port, &target) {
+                    let na = Ipv6Packet {
+                        src: target,
+                        dst: pkt.src,
+                        hop_limit: 255,
+                        icmp: Ipv6Icmp::NeighborAdvertisement { target },
+                    };
+                    let out = EthernetFrame {
+                        dst: frame.src,
+                        src: my_mac,
+                        vlan: None,
+                        ethertype: ETHERTYPE_IPV6,
+                        payload: L3::Ipv6(na),
+                    };
+                    self.transmit_frame(dev, port, out);
+                }
+            }
+            Ipv6Icmp::NeighborAdvertisement { target } => {
+                self.ndp_learn(dev, port, target, frame.src);
+            }
+            Ipv6Icmp::EchoRequest { id, seq } => {
+                if self.my_ipv6_on(dev, port, &pkt.dst) {
+                    let reply = Ipv6Packet {
+                        src: pkt.dst,
+                        dst: pkt.src,
+                        hop_limit: 64,
+                        icmp: Ipv6Icmp::EchoReply { id, seq },
+                    };
+                    let out = EthernetFrame {
+                        dst: frame.src,
+                        src: my_mac,
+                        vlan: None,
+                        ethertype: ETHERTYPE_IPV6,
+                        payload: L3::Ipv6(reply),
+                    };
+                    self.transmit_frame(dev, port, out);
+                }
+            }
+            Ipv6Icmp::EchoReply { id, .. } => {
+                if self.my_ipv6_on(dev, port, &pkt.dst) {
+                    let matched = {
+                        let Some(d) = self.net.device_mut(dev) else {
+                            return;
+                        };
+                        let pings = match &mut d.state {
+                            DeviceState::Router(rs) => &mut rs.pings6,
+                            DeviceState::Host(hs) => &mut hs.pings6,
+                            _ => return,
+                        };
+                        pings
+                            .iter_mut()
+                            .find(|s| s.id == id && s.target == pkt.src && !s.done)
+                            .map(|s| {
+                                s.received += 1;
+                            })
+                            .is_some()
+                    };
+                    let _ = matched;
+                }
+            }
+        };
+        // 数据转发：仅路由器
+        if matches!(
+            pkt.icmp,
+            Ipv6Icmp::EchoRequest { .. } | Ipv6Icmp::EchoReply { .. }
+        ) && !self.my_ipv6_on(dev, port, &pkt.dst)
+        {
+            let is_router = matches!(d_kind(&self.net, dev), DeviceKind::Router);
+            if !is_router || pkt.hop_limit <= 1 {
+                return;
+            }
+            if let Some((out_port, nh)) = self.net.lookup_route6(dev, pkt.dst) {
+                let mut fwd = pkt;
+                fwd.hop_limit -= 1;
+                self.send_ipv6(dev, out_port, fwd, nh);
+            } else {
+                self.dropped += 1;
+            }
+        }
+    }
+
+    // ---------- VRRP（主备虚拟网关，简化） ----------
+
+    pub fn vrrp_config_changed(&mut self, dev: DevId) {
+        let has = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            let DeviceState::Router(rs) = &mut d.state else {
+                return;
+            };
+            for g in &mut rs.vrrp {
+                if g.state == VrrpState::Init {
+                    g.state = VrrpState::Master; // 通过通告收敛
+                }
+            }
+            !rs.vrrp.is_empty()
+        };
+        if has {
+            self.vrrp_schedule(dev);
+        }
+    }
+
+    fn vrrp_schedule(&mut self, dev: DevId) {
+        if self.vrrp_pending.insert(dev) {
+            self.push(self.now + VRRP_ADVERT_NS, EKind::VrrpTimer { dev });
+        }
+    }
+
+    fn on_vrrp_timer(&mut self, dev: DevId) {
+        self.vrrp_pending.remove(&dev);
+        let now = self.now;
+        let mut sends: Vec<(PortId, Mac, VrrpPacket)> = vec![];
+        {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            let ports = d.ports.clone();
+            let DeviceState::Router(rs) = &mut d.state else {
+                return;
+            };
+            for g in &mut rs.vrrp {
+                if g.state == VrrpState::Backup
+                    && now.saturating_sub(g.last_advert_ns) > VRRP_MASTER_DOWN_NS
+                {
+                    g.state = VrrpState::Master;
+                }
+                if g.state != VrrpState::Master {
+                    continue;
+                }
+                let Some(p) = ports.get(g.port) else { continue };
+                let Some(ip) = p.ip else { continue };
+                sends.push((
+                    g.port,
+                    p.mac,
+                    VrrpPacket {
+                        vrid: g.vrid,
+                        priority: g.priority,
+                        vip: g.vip,
+                        master_ip: ip,
+                    },
+                ));
+            }
+        }
+        for (port, mac, pkt) in sends {
+            let frame = EthernetFrame {
+                dst: VRRP_MULTICAST_MAC,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_VRRP,
+                payload: L3::Vrrp(pkt),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+        let has = self
+            .net
+            .device(dev)
+            .map(|d| matches!(&d.state, DeviceState::Router(rs) if !rs.vrrp.is_empty()))
+            .unwrap_or(false);
+        if has {
+            self.vrrp_schedule(dev);
+        }
+    }
+
+    fn vrrp_on_packet(&mut self, dev: DevId, pkt: VrrpPacket) {
+        let now = self.now;
+        let Some(d) = self.net.device_mut(dev) else {
+            return;
+        };
+        let ports = d.ports.clone();
+        let DeviceState::Router(rs) = &mut d.state else {
+            return;
+        };
+        let Some(g) = rs
+            .vrrp
+            .iter_mut()
+            .find(|g| g.vrid == pkt.vrid && g.vip == pkt.vip)
+        else {
+            return;
+        };
+        g.last_advert_ns = now;
+        let my_ip = ports.get(g.port).and_then(|p| p.ip).unwrap_or(0);
+        let remote_higher =
+            pkt.priority > g.priority || (pkt.priority == g.priority && pkt.master_ip > my_ip);
+        if remote_higher {
+            g.state = VrrpState::Backup;
+        } else if g.preempt && g.state == VrrpState::Backup {
+            g.state = VrrpState::Master;
+        }
+    }
+
+    /// 该接口上是否由本机充当该 VIP 的 Master，返回虚拟 MAC。
+    fn vrrp_vip_owner(&self, dev: DevId, port: PortId, vip: Ipv4Addr) -> Option<Mac> {
+        let d = self.net.device(dev)?;
+        let DeviceState::Router(rs) = &d.state else {
+            return None;
+        };
+        rs.vrrp
+            .iter()
+            .find(|g| g.state == VrrpState::Master && g.port == port && g.vip == vip)
+            .map(|g| vrrp_mac(g.vrid))
+    }
+
+    /// 该端口上本机是否拥有这个虚拟 MAC（Master 才应答）。
+    fn is_vrrp_virtual_mac_on(&self, dev: DevId, port: PortId, mac: &Mac) -> bool {
+        let Some(d) = self.net.device(dev) else {
+            return false;
+        };
+        let DeviceState::Router(rs) = &d.state else {
+            return false;
+        };
+        rs.vrrp
+            .iter()
+            .any(|g| g.state == VrrpState::Master && g.port == port && vrrp_mac(g.vrid) == *mac)
+    }
+
+    // ---------- 远程管理（Telnet / SSH） ----------
+
+    /// 找到拥有该管理 IP 的设备（物理口或启用的 SVI）。
+    pub fn mgmt_ip_owner(&self, ip: Ipv4Addr) -> Option<DevId> {
+        self.net.devices.iter().find_map(|d| {
+            if d.ports.iter().any(|p| p.ip == Some(ip)) {
+                return Some(d.id);
+            }
+            if let DeviceState::Switch(sw) = &d.state {
+                if sw.svi.values().any(|s| s.admin_up && s.ip == ip) {
+                    return Some(d.id);
+                }
+            }
+            None
+        })
+    }
+
+    /// 源设备到目标管理地址是否可达（路由存在；主机按同网段/有网关判断）。
+    fn mgmt_reachable(&self, from: DevId, ip: Ipv4Addr) -> bool {
+        let Some(d) = self.net.device(from) else {
+            return false;
+        };
+        match &d.state {
+            DeviceState::Host(h) => {
+                let p = &d.ports[0];
+                match p.ip {
+                    Some(my) => {
+                        let mask = mask_from_prefix(p.prefix);
+                        (ip & mask) == (my & mask) || h.gw.is_some()
+                    }
+                    None => false,
+                }
+            }
+            _ => self.net.lookup_route(from, ip).is_some(),
+        }
+    }
+
+    /// 登录前置检查：找到目标、可达、VTY 允许该协议。成功返回目标设备 id。
+    pub fn login_target(
+        &self,
+        from: DevId,
+        target_ip: Ipv4Addr,
+        proto: MgmtProto,
+    ) -> Result<DevId, LoginError> {
+        let target = self
+            .mgmt_ip_owner(target_ip)
+            .ok_or(LoginError::Unreachable)?;
+        if target == from || !self.mgmt_reachable(from, target_ip) {
+            return Err(LoginError::Unreachable);
+        }
+        let Some(d) = self.net.device(target) else {
+            return Err(LoginError::Unreachable);
+        };
+        if !d.mgmt.transport.allows(proto) {
+            return Err(LoginError::TransportDenied);
+        }
+        Ok(target)
+    }
+
+    /// 尝试一次远程登录并认证。成功返回 (目标设备 id, 用户权限级别)。
+    pub fn try_login(
+        &self,
+        from: DevId,
+        target_ip: Ipv4Addr,
+        proto: MgmtProto,
+        user: &str,
+        pass: &str,
+    ) -> Result<(DevId, u8), LoginError> {
+        let target = self.login_target(from, target_ip, proto)?;
+        let Some(d) = self.net.device(target) else {
+            return Err(LoginError::Unreachable);
+        };
+        if !d.mgmt.auth_local {
+            return Err(LoginError::AuthFailed);
+        }
+        let Some(u) = d.mgmt.find_user(user) else {
+            return Err(LoginError::AuthFailed);
+        };
+        if u.secret != pass {
+            return Err(LoginError::AuthFailed);
+        }
+        let svc_ok = match proto {
+            MgmtProto::Telnet => u.telnet,
+            MgmtProto::Ssh => u.ssh,
+        };
+        if !svc_ok {
+            return Err(LoginError::AuthFailed);
+        }
+        Ok((target, u.privilege))
+    }
+
+    // ---------- 链路聚合（LACP） ----------
+
+    /// 聚合组的逻辑端口（STP 视角）：优先最小选中成员，否则最小成员。
+    pub fn logical_port(&self, dev: DevId, port: PortId) -> PortId {
+        let Some(d) = self.net.device(dev) else {
+            return port;
+        };
+        let Some(gid) = d.port_lag(port) else {
+            return port;
+        };
+        let DeviceState::Switch(sw) = &d.state else {
+            return port;
+        };
+        let Some(g) = sw.lags.get(&gid) else {
+            return port;
+        };
+        if g.selected.is_empty() {
+            g.members.iter().copied().min().unwrap_or(port)
+        } else {
+            g.selected.iter().copied().min().unwrap_or(port)
+        }
+    }
+
+    /// STP/转发视角的逻辑端口列表：普通端口 + 每个聚合组的代表端口。
+    fn logical_ports(&self, dev: DevId) -> Vec<PortId> {
+        let Some(d) = self.net.device(dev) else {
+            return vec![];
+        };
+        if !matches!(d.state, DeviceState::Switch(_)) {
+            return (0..d.ports.len()).collect();
+        }
+        let mut out: Vec<PortId> = d
+            .ports
+            .iter()
+            .filter(|p| p.lag.is_none() || self.logical_port(dev, p.idx) == p.idx)
+            .map(|p| p.idx)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// 逻辑端口是否有可用链路（聚合组任一成员 up 即视为 up）。
+    fn logical_link_up(&self, dev: DevId, port: PortId) -> bool {
+        let Some(d) = self.net.device(dev) else {
+            return false;
+        };
+        let up = |m: PortId| {
+            d.port(m)
+                .map(|p| p.admin_up && p.link.map(|l| self.net.link_up(l)).unwrap_or(false))
+                .unwrap_or(false)
+        };
+        match d.port_lag(port) {
+            Some(gid) => match &d.state {
+                DeviceState::Switch(sw) => sw
+                    .lags
+                    .get(&gid)
+                    .map(|g| g.members.iter().copied().any(up))
+                    .unwrap_or(false),
+                _ => up(port),
+            },
+            None => up(port),
+        }
+    }
+
+    /// 配置变化后：重算成员、启动 LACP 定时器、触发 STP 重算。
+    pub fn lacp_config_changed(&mut self, dev: DevId) {
+        self.lacp_recompute(dev);
+        self.lacp_schedule(dev);
+        self.stp_topology_changed();
+    }
+
+    /// 摘要加载完成后初始化（LACP + STP 全量重算 + OSPF）。
+    pub fn after_load(&mut self) {
+        self.lacp_start_all();
+        self.stp_topology_changed();
+        let routers: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| matches!(&d.state, DeviceState::Router(rs) if !rs.ospf_networks.is_empty()))
+            .map(|d| d.id)
+            .collect();
+        for dev in routers {
+            self.ospf_config_changed(dev);
+        }
+        let vrrp_devs: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| matches!(&d.state, DeviceState::Router(rs) if !rs.vrrp.is_empty()))
+            .map(|d| d.id)
+            .collect();
+        for dev in vrrp_devs {
+            self.vrrp_config_changed(dev);
+        }
+    }
+
+    /// 加载拓扑后初始化聚合状态。
+    pub fn lacp_start_all(&mut self) {
         let devs: Vec<DevId> = self
             .net
             .devices
@@ -1654,7 +2905,288 @@ impl Engine {
             .map(|d| d.id)
             .collect();
         for dev in devs {
-            // 非活跃端口的 BPDU 缓存失效（对端关机/链路拆除立即感知）
+            self.lacp_recompute(dev);
+            self.lacp_schedule(dev);
+        }
+    }
+
+    fn lacp_schedule(&mut self, dev: DevId) {
+        let need = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &mut d.state else {
+                return;
+            };
+            if sw.lags.is_empty() {
+                false
+            } else {
+                let need = sw.lags.values().any(|g| !g.timer_pending);
+                if need {
+                    for g in sw.lags.values_mut() {
+                        g.timer_pending = true;
+                    }
+                }
+                need
+            }
+        };
+        if need {
+            self.push(self.now + LACP_INTERVAL_NS, EKind::LacpTimer { dev });
+        }
+    }
+
+    /// 重算各聚合组选中成员；返回是否有变化。
+    fn lacp_recompute(&mut self, dev: DevId) -> bool {
+        let now = self.now;
+        let my_mac = port_mac(dev, 0);
+        let link_up: Vec<(PortId, bool)> = {
+            let Some(d) = self.net.device(dev) else {
+                return false;
+            };
+            if !matches!(d.state, DeviceState::Switch(_)) {
+                return false;
+            }
+            d.ports
+                .iter()
+                .map(|p| {
+                    (
+                        p.idx,
+                        p.admin_up && p.link.map(|l| self.net.link_up(l)).unwrap_or(false),
+                    )
+                })
+                .collect()
+        };
+        let mut changed_members: Vec<PortId> = vec![];
+        let changed = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return false;
+            };
+            let DeviceState::Switch(sw) = &mut d.state else {
+                return false;
+            };
+            let mut changed = false;
+            for g in sw.lags.values_mut() {
+                // 老化：超时未收到 LACPDU 的对端信息失效
+                let before = g.partners.len();
+                g.partners
+                    .retain(|_, pr| now.saturating_sub(pr.last_ns) <= LACP_TIMEOUT_NS);
+                if g.partners.len() != before {
+                    changed = true;
+                }
+                let mut selected: Vec<PortId> = vec![];
+                for &m in &g.members {
+                    let up = link_up
+                        .iter()
+                        .find(|(p, _)| *p == m)
+                        .map(|(_, u)| *u)
+                        .unwrap_or(false);
+                    if !up {
+                        continue;
+                    }
+                    let ok = match g.mode {
+                        LagMode::Static => true,
+                        _ => g
+                            .partners
+                            .get(&m)
+                            .map(|pr| pr.key == g.id && pr.system != my_mac)
+                            .unwrap_or(false),
+                    };
+                    if ok {
+                        selected.push(m);
+                    }
+                }
+                if selected != g.selected {
+                    changed_members.extend(g.members.iter().copied());
+                    g.selected = selected;
+                    changed = true;
+                }
+            }
+            changed
+        };
+        if changed {
+            if let Some(d) = self.net.device_mut(dev) {
+                if let DeviceState::Switch(sw) = &mut d.state {
+                    sw.mac_table.retain(|_, p| !changed_members.contains(p));
+                }
+            }
+            self.stp_topology_changed();
+        }
+        changed
+    }
+
+    fn lacp_send_group(&mut self, dev: DevId, gid: u16) {
+        let my_mac = port_mac(dev, 0);
+        let members: Vec<(PortId, Mac, LacpPartner, LagMode)> = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &d.state else {
+                return;
+            };
+            let Some(g) = sw.lags.get(&gid) else {
+                return;
+            };
+            g.members
+                .iter()
+                .filter_map(|m| {
+                    let p = d.port(*m)?;
+                    if !p.admin_up || p.link.is_none() {
+                        return None;
+                    }
+                    Some((
+                        *m,
+                        p.mac,
+                        g.partners.get(m).copied().unwrap_or(LacpPartner {
+                            system: ZERO_MAC,
+                            key: 0,
+                            port: 0,
+                            last_ns: 0,
+                        }),
+                        g.mode,
+                    ))
+                })
+                .collect()
+        };
+        for (port, mac, partner, mode) in members {
+            let mut state = LACP_STATE_AGGREGATION
+                | LACP_STATE_SYNCHRONIZATION
+                | LACP_STATE_COLLECTING
+                | LACP_STATE_DISTRIBUTING;
+            if mode == LagMode::LacpActive {
+                state |= LACP_STATE_ACTIVITY;
+            }
+            let pdu = LacpPdu {
+                actor_system: my_mac,
+                actor_key: gid,
+                actor_port: (port as u16) + 1,
+                actor_state: state,
+                partner_system: partner.system,
+                partner_key: partner.key,
+                partner_port: partner.port,
+                partner_state: if partner.key != 0 {
+                    LACP_STATE_SYNCHRONIZATION
+                } else {
+                    0
+                },
+            };
+            let frame = EthernetFrame {
+                dst: SLOW_PROTOCOLS_MAC,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_LACP,
+                payload: L3::Lacp(pdu),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+    }
+
+    /// 收到 LACPDU：记录对端信息，被动模式立即回应，然后重选成员。
+    fn lacp_on_pdu(&mut self, dev: DevId, port: PortId, pdu: LacpPdu) {
+        let now = self.now;
+        let gid = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            let Some(gid) = d.port_lag(port) else {
+                return; // 未加入聚合组的端口不处理 LACPDU
+            };
+            let DeviceState::Switch(sw) = &mut d.state else {
+                return;
+            };
+            let Some(g) = sw.lags.get_mut(&gid) else {
+                return;
+            };
+            g.partners.insert(
+                port,
+                LacpPartner {
+                    system: pdu.actor_system,
+                    key: pdu.actor_key,
+                    port: pdu.actor_port,
+                    last_ns: now,
+                },
+            );
+            gid
+        };
+        let passive = self
+            .net
+            .device(dev)
+            .and_then(|d| match &d.state {
+                DeviceState::Switch(sw) => {
+                    sw.lags.get(&gid).map(|g| g.mode == LagMode::LacpPassive)
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        if passive {
+            self.lacp_send_group(dev, gid);
+        }
+        self.lacp_recompute(dev);
+    }
+
+    fn on_lacp_timer(&mut self, dev: DevId) {
+        let (has_groups, active_groups) = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &mut d.state else {
+                return;
+            };
+            for g in sw.lags.values_mut() {
+                g.timer_pending = false;
+            }
+            let mut ids: Vec<u16> = sw
+                .lags
+                .values()
+                .filter(|g| g.mode == LagMode::LacpActive)
+                .map(|g| g.id)
+                .collect();
+            ids.sort_unstable();
+            (!sw.lags.is_empty(), ids)
+        };
+        if !has_groups {
+            return;
+        }
+        self.lacp_recompute(dev);
+        for gid in active_groups {
+            self.lacp_send_group(dev, gid);
+        }
+        self.lacp_schedule(dev);
+    }
+
+    /// 端口路径成本：覆盖值优先，否则按速率（1Gbps → 4）。聚合口取成员最小值。
+    fn port_cost(&self, dev: DevId, port: PortId) -> u32 {
+        let Some(d) = self.net.device(dev) else {
+            return STP_COST_1G;
+        };
+        let cost_of = |m: PortId| {
+            d.port(m)
+                .map(|p| p.stp_cost.unwrap_or(STP_COST_1G))
+                .unwrap_or(STP_COST_1G)
+        };
+        match d.port_lag(port) {
+            Some(gid) => match &d.state {
+                DeviceState::Switch(sw) => sw
+                    .lags
+                    .get(&gid)
+                    .and_then(|g| g.members.iter().copied().map(cost_of).min())
+                    .unwrap_or_else(|| cost_of(port)),
+                _ => cost_of(port),
+            },
+            None => cost_of(port),
+        }
+    }
+
+    /// 拓扑变化后由桥接层调用：清理死端口 BPDU、全量重算、调度 hello。
+    pub fn stp_topology_changed(&mut self) {
+        let devs: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| d.kind == DeviceKind::Switch)
+            .map(|d| d.id)
+            .collect();
+        for dev in devs {
+            // 逻辑端口失联（聚合组全部成员 down）→ BPDU 缓存立即失效
             let dead: Vec<PortId> = {
                 let Some(d) = self.net.device(dev) else {
                     continue;
@@ -1666,7 +3198,7 @@ impl Engine {
                     .port_bpdus
                     .keys()
                     .copied()
-                    .filter(|p| !live.contains(&(dev, *p)))
+                    .filter(|p| !self.logical_link_up(dev, *p))
                     .collect()
             };
             let Some(d) = self.net.device_mut(dev) else {
@@ -1677,6 +3209,7 @@ impl Engine {
             };
             for p in dead {
                 sw.stp.port_bpdus.remove(&p);
+                sw.stp.last_bpdu_ns.remove(&p);
             }
         }
         self.stp_recompute_all();
@@ -1723,21 +3256,101 @@ impl Engine {
         }
     }
 
-    /// 收到 BPDU：记录并触发本机重算。
+    /// 收到 BPDU：按实例号记录并触发对应实例重算。
     fn stp_on_bpdu(&mut self, dev: DevId, port: PortId, bpdu: BpduPacket) {
-        if let Some(d) = self.net.device_mut(dev) {
-            if let DeviceState::Switch(sw) = &mut d.state {
-                sw.stp.port_bpdus.insert(port, bpdu);
-                sw.stp.last_bpdu_ns.insert(port, self.now);
+        let inst = bpdu.instance;
+        if inst == 0 {
+            if let Some(d) = self.net.device_mut(dev) {
+                if let DeviceState::Switch(sw) = &mut d.state {
+                    sw.stp.port_bpdus.insert(port, bpdu);
+                    sw.stp.last_bpdu_ns.insert(port, self.now);
+                }
             }
+            self.stp_recompute(dev);
+            return;
         }
-        self.stp_recompute(dev);
+        // MSTI：把实例现场换入 CIST 字段后复用同一套算法
+        let mstp = self
+            .net
+            .device(dev)
+            .map(|d| matches!(&d.state, DeviceState::Switch(sw) if sw.stp.mode == StpMode::Mstp))
+            .unwrap_or(false);
+        if !mstp {
+            return;
+        }
+        if let Some(saved) = self.mst_swap_in(dev, inst) {
+            if let Some(d) = self.net.device_mut(dev) {
+                if let DeviceState::Switch(sw) = &mut d.state {
+                    sw.stp.port_bpdus.insert(port, bpdu);
+                    sw.stp.last_bpdu_ns.insert(port, self.now);
+                }
+            }
+            self.stp_recompute(dev);
+            self.mst_swap_out(dev, inst, saved);
+        }
+    }
+
+    // ---------- MSTP 实例数据换入/换出 ----------
+
+    fn switch_stp_mut(&mut self, dev: DevId) -> Option<&mut StpInstance> {
+        match self.net.device_mut(dev).map(|d| &mut d.state) {
+            Some(DeviceState::Switch(sw)) => Some(&mut sw.stp),
+            _ => None,
+        }
+    }
+
+    fn mst_swap_in(&mut self, dev: DevId, inst: u16) -> Option<CistSaved> {
+        let stp = self.switch_stp_mut(dev)?;
+        let m = stp.mst.get_mut(&inst)?;
+        let saved = CistSaved {
+            root: stp.root,
+            root_cost: stp.root_cost,
+            root_port: stp.root_port,
+            ports: std::mem::take(&mut stp.ports),
+            port_bpdus: std::mem::take(&mut stp.port_bpdus),
+            last_bpdu_ns: std::mem::take(&mut stp.last_bpdu_ns),
+            epochs: std::mem::take(&mut stp.epochs),
+            priority: stp.priority,
+        };
+        stp.root = m.data.root;
+        stp.root_cost = m.data.root_cost;
+        stp.root_port = m.data.root_port;
+        stp.ports = std::mem::take(&mut m.data.ports);
+        stp.port_bpdus = std::mem::take(&mut m.data.port_bpdus);
+        stp.last_bpdu_ns = std::mem::take(&mut m.data.last_bpdu_ns);
+        stp.epochs = std::mem::take(&mut m.data.epochs);
+        stp.priority = m.priority;
+        Some(saved)
+    }
+
+    fn mst_swap_out(&mut self, dev: DevId, inst: u16, saved: CistSaved) {
+        let Some(stp) = self.switch_stp_mut(dev) else {
+            return;
+        };
+        if let Some(m) = stp.mst.get_mut(&inst) {
+            m.priority = stp.priority;
+            m.data.root = stp.root;
+            m.data.root_cost = stp.root_cost;
+            m.data.root_port = stp.root_port;
+            m.data.ports = std::mem::take(&mut stp.ports);
+            m.data.port_bpdus = std::mem::take(&mut stp.port_bpdus);
+            m.data.last_bpdu_ns = std::mem::take(&mut stp.last_bpdu_ns);
+            m.data.epochs = std::mem::take(&mut stp.epochs);
+        }
+        stp.root = saved.root;
+        stp.root_cost = saved.root_cost;
+        stp.root_port = saved.root_port;
+        stp.ports = saved.ports;
+        stp.port_bpdus = saved.port_bpdus;
+        stp.last_bpdu_ns = saved.last_bpdu_ns;
+        stp.epochs = saved.epochs;
+        stp.priority = saved.priority;
     }
 
     /// 核心算法：根据各端口最优 BPDU 重选根桥、根端口与端口角色，并驱动状态机。
     fn stp_recompute(&mut self, dev: DevId) {
         // 阶段 1：读取现场
-        let (my_bridge, enabled, n_ports, bpdus) = {
+        let (my_bridge, enabled, n_ports, bpdus, rstp) = {
             let Some(d) = self.net.device(dev) else {
                 return;
             };
@@ -1752,6 +3365,7 @@ impl Engine {
                 sw.stp.enabled,
                 d.ports.len(),
                 sw.stp.port_bpdus.clone(),
+                matches!(sw.stp.mode, StpMode::Rstp | StpMode::Mstp),
             )
         };
         if !enabled {
@@ -1788,15 +3402,15 @@ impl Engine {
             }
         }
 
-        // 阶段 4：逐端口角色
+        // 阶段 4：逐端口角色（聚合组只在代表端口上参与 STP）
+        let stp_ports = self.logical_ports(dev);
         let mut roles: Vec<(PortId, StpRole)> = Vec::with_capacity(n_ports);
         for port in 0..n_ports {
-            let has_link = self
-                .net
-                .device(dev)
-                .and_then(|d| d.port(port))
-                .map(|p| p.link.is_some() && p.admin_up)
-                .unwrap_or(false);
+            if !stp_ports.contains(&port) {
+                roles.push((port, StpRole::Disabled));
+                continue;
+            }
+            let has_link = self.logical_link_up(dev, port);
             if !has_link {
                 roles.push((port, StpRole::Disabled));
                 continue;
@@ -1863,8 +3477,11 @@ impl Engine {
                     StpRole::Disabled => StpSt::Blocking,
                     StpRole::Alternate => StpSt::Blocking,
                     StpRole::Root | StpRole::Designated => {
-                        // 新进入转发路径的端口从 Listening 开始
-                        if old_state == StpSt::Blocking || epoch_bump {
+                        if rstp {
+                            // RSTP：角色确定即转发（省略提案/同意握手）
+                            StpSt::Forwarding
+                        } else if old_state == StpSt::Blocking || epoch_bump {
+                            // 新进入转发路径的端口从 Listening 开始
                             StpSt::Listening
                         } else {
                             old_state
@@ -1891,7 +3508,8 @@ impl Engine {
                     sw.stp.epoch_of(port),
                 )
             };
-            if cur_state == StpSt::Listening
+            if !rstp
+                && cur_state == StpSt::Listening
                 && matches!(cur_role, StpRole::Root | StpRole::Designated)
             {
                 let e = cur_epoch;
@@ -1935,6 +3553,9 @@ impl Engine {
         if !sw.stp.enabled || sw.stp.epoch_of(port) != epoch {
             return;
         }
+        if sw.stp.mode == StpMode::Rstp {
+            return; // RSTP 端口已直接进入转发，旧的推进事件无效
+        }
         let role = sw.stp.role_of(port);
         if !matches!(role, StpRole::Root | StpRole::Designated) {
             return;
@@ -1957,87 +3578,29 @@ impl Engine {
         if !self.stp_on(dev) {
             return;
         }
-        // Max-Age 老化：缓存了 BPDU 但超过 20s 没收到邻居报文 → 淘汰并重算
-        {
-            let expired: Vec<PortId> = {
-                let Some(d) = self.net.device(dev) else {
-                    return;
-                };
-                let DeviceState::Switch(sw) = &d.state else {
-                    return;
-                };
-                sw.stp
-                    .port_bpdus
-                    .keys()
-                    .copied()
-                    .filter(|p| {
-                        let last = sw.stp.last_bpdu_ns.get(p).copied().unwrap_or(0);
-                        self.now.saturating_sub(last) > STP_MAX_AGE_NS
-                    })
-                    .collect()
+        self.stp_age_and_recompute(dev);
+        self.stp_send_bpdus(dev, 0);
+        // MSTP：每个实例独立老化、重算并发 BPDU（实例数据临时换入 CIST 字段）
+        let mst_ids: Vec<u16> = {
+            let Some(d) = self.net.device(dev) else {
+                return;
             };
-            if !expired.is_empty() {
-                let Some(d) = self.net.device_mut(dev) else {
-                    return;
-                };
-                let DeviceState::Switch(sw) = &mut d.state else {
-                    return;
-                };
-                for p in expired {
-                    sw.stp.port_bpdus.remove(&p);
-                    sw.stp.last_bpdu_ns.remove(&p);
-                }
-                self.stp_recompute(dev);
+            let DeviceState::Switch(sw) = &d.state else {
+                return;
+            };
+            if sw.stp.mode != StpMode::Mstp {
+                vec![]
+            } else {
+                let mut v: Vec<u16> = sw.stp.mst.keys().copied().collect();
+                v.sort_unstable();
+                v
             }
-        }
-        let (my_bridge, root, root_cost) = {
-            let Some(d) = self.net.device(dev) else {
-                return;
-            };
-            let DeviceState::Switch(sw) = &d.state else {
-                return;
-            };
-            (sw.stp.bridge_id(dev), sw.stp.root, sw.stp.root_cost)
         };
-        let n = self.net.device(dev).map(|d| d.ports.len()).unwrap_or(0);
-        let designated: Vec<PortId> = {
-            let Some(d) = self.net.device(dev) else {
-                return;
-            };
-            let DeviceState::Switch(sw) = &d.state else {
-                return;
-            };
-            (0..n)
-                .filter(|&p| sw.stp.role_of(p) == StpRole::Designated)
-                .collect()
-        };
-        for port in designated {
-            if self
-                .net
-                .device(dev)
-                .and_then(|d| d.port(port))
-                .map(|p| p.link.is_some() && p.admin_up)
-                .unwrap_or(false)
-            {
-                let bpdu = BpduPacket {
-                    root,
-                    cost: root_cost,
-                    sender: my_bridge,
-                    port: port as u32,
-                };
-                let frame = EthernetFrame {
-                    dst: STP_MULTICAST_MAC,
-                    src: self
-                        .net
-                        .device(dev)
-                        .and_then(|d| d.port(port))
-                        .map(|p| p.mac)
-                        .unwrap_or([0; 6]),
-                    vlan: None,
-                    ethertype: ETHERTYPE_BPDU,
-                    payload: L3::Bpdu(bpdu),
-                };
-                self.transmit_frame(dev, port, frame);
+        for inst in mst_ids {
+            if let Some(saved) = self.mst_swap_in(dev, inst) {
+                self.stp_age_and_recompute(dev);
+                self.stp_send_bpdus(dev, inst);
+                self.mst_swap_out(dev, inst, saved);
             }
         }
         // 重排 hello
@@ -2066,6 +3629,113 @@ impl Engine {
             };
             if !pending {
                 self.push(self.now + STP_HELLO_NS, EKind::StpHello { dev });
+            }
+        }
+    }
+
+    /// Max-Age 老化 + 重算（作用于当前装在 CIST 字段里的实例）。
+    fn stp_age_and_recompute(&mut self, dev: DevId) {
+        let expired: Vec<PortId> = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &d.state else {
+                return;
+            };
+            sw.stp
+                .port_bpdus
+                .keys()
+                .copied()
+                .filter(|p| {
+                    let last = sw.stp.last_bpdu_ns.get(p).copied().unwrap_or(0);
+                    self.now.saturating_sub(last) > STP_MAX_AGE_NS
+                })
+                .collect()
+        };
+        if !expired.is_empty() {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &mut d.state else {
+                return;
+            };
+            for p in expired {
+                sw.stp.port_bpdus.remove(&p);
+                sw.stp.last_bpdu_ns.remove(&p);
+            }
+        }
+        // 每个 hello 周期都重算一次：新建的 MSTI 实例没有历史 BPDU，也需要完成首次选举
+        self.stp_recompute(dev);
+    }
+
+    /// 从当前实例的指定端口发送配置 BPDU（instance=0 为 CIST）。
+    fn stp_send_bpdus(&mut self, dev: DevId, instance: u16) {
+        let (my_bridge, root, root_cost) = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &d.state else {
+                return;
+            };
+            (sw.stp.bridge_id(dev), sw.stp.root, sw.stp.root_cost)
+        };
+        let designated: Vec<PortId> = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &d.state else {
+                return;
+            };
+            self.logical_ports(dev)
+                .into_iter()
+                .filter(|&p| sw.stp.role_of(p) == StpRole::Designated)
+                .collect()
+        };
+        for port in designated {
+            let ready = self
+                .net
+                .device(dev)
+                .map(|d| {
+                    let link_ok = d
+                        .port(port)
+                        .map(|p| p.link.is_some() && p.admin_up)
+                        .unwrap_or(false);
+                    // 聚合口在成员未选中前不发 BPDU（等同逻辑链路未 up）
+                    let lag_ok = match d.port_lag(port) {
+                        Some(gid) => match &d.state {
+                            DeviceState::Switch(sw) => sw
+                                .lags
+                                .get(&gid)
+                                .map(|g| !g.selected.is_empty())
+                                .unwrap_or(false),
+                            _ => true,
+                        },
+                        None => true,
+                    };
+                    link_ok && lag_ok
+                })
+                .unwrap_or(false);
+            if ready {
+                let bpdu = BpduPacket {
+                    root,
+                    cost: root_cost,
+                    sender: my_bridge,
+                    port: port as u32,
+                    instance,
+                };
+                let frame = EthernetFrame {
+                    dst: STP_MULTICAST_MAC,
+                    src: self
+                        .net
+                        .device(dev)
+                        .and_then(|d| d.port(port))
+                        .map(|p| p.mac)
+                        .unwrap_or([0; 6]),
+                    vlan: None,
+                    ethertype: ETHERTYPE_BPDU,
+                    payload: L3::Bpdu(bpdu),
+                };
+                self.transmit_frame(dev, port, frame);
             }
         }
     }

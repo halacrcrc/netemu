@@ -17,22 +17,26 @@ export interface Workspace {
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** 收集当前拓扑 + 编辑器状态（保存/导出/分享共用）。 */
+export function currentWorkspace(): Workspace {
+  const sim = getSim();
+  return {
+    net: dumpSummary(sim),
+    editor: {
+      positions: JSON.parse(JSON.stringify(app.positions)),
+      pan: { ...app.pan },
+      zoom: app.zoom,
+      tabs: [...app.tabs],
+    },
+  };
+}
+
 /** 任何状态变化后调用；防抖落盘。 */
 export function markDirty() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
-      const sim = getSim();
-      const ws: Workspace = {
-        net: dumpSummary(sim),
-        editor: {
-          positions: JSON.parse(JSON.stringify(app.positions)),
-          pan: { ...app.pan },
-          zoom: app.zoom,
-          tabs: [...app.tabs],
-        },
-      };
-      localStorage.setItem(KEY, JSON.stringify(ws));
+      localStorage.setItem(KEY, JSON.stringify(currentWorkspace()));
     } catch (e) {
       console.warn('自动保存失败', e);
     }
@@ -56,16 +60,7 @@ export function clearWorkspace() {
 }
 
 export function exportFile() {
-  const sim = getSim();
-  const ws: Workspace = {
-    net: dumpSummary(sim),
-    editor: {
-      positions: JSON.parse(JSON.stringify(app.positions)),
-      pan: { ...app.pan },
-      zoom: app.zoom,
-      tabs: [...app.tabs],
-    },
-  };
+  const ws = currentWorkspace();
   const blob = new Blob([JSON.stringify(ws, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

@@ -5,8 +5,9 @@
 use sim_packets::Mac;
 
 use sim_core::device::{
-    AclProto, DevId, DeviceKind, DeviceState, Dialect, PingProbeState, PingSession, PortId,
-    PortMode, Route, RouteSrc, StpRole, StpSt, SviState, VlanId, DEFAULT_VLAN, STP_COST_1G,
+    AclProto, DevId, DeviceKind, DeviceState, Dialect, LagMode, PingProbeState, PingSession,
+    PortId, PortMode, Route, RouteSrc, StpMode, StpRole, StpSt, SviState, VlanId, DEFAULT_VLAN,
+    STP_COST_1G,
 };
 use sim_core::engine::Engine;
 use sim_core::{port_mac, Device};
@@ -213,14 +214,13 @@ fn route_rows(eng: &Engine, dev: DevId, dialect: Dialect) -> Vec<RouteRow> {
             },
         })
         .collect();
-    let statics: &[Route] = match &d.state {
-        DeviceState::Router(rs) => &rs.static_routes,
-        DeviceState::Switch(sw) => &sw.static_routes,
-        _ => &[],
+    let (statics, ospf): (&[Route], &[Route]) = match &d.state {
+        DeviceState::Router(rs) => (&rs.static_routes, &rs.ospf_routes),
+        DeviceState::Switch(sw) => (&sw.static_routes, &[]),
+        _ => (&[], &[]),
     };
-    {
-        let rs_static = statics;
-        for r in rs_static {
+    let mut add_dynamic = |routes: &[Route], src: RouteSrc| {
+        for r in routes {
             // 出接口 = 下一跳所在连接网段
             let port = d.connected_routes().iter().find_map(|c| {
                 if (r.nexthop & mask_from_prefix(c.len)) == c.dst {
@@ -232,23 +232,26 @@ fn route_rows(eng: &Engine, dev: DevId, dialect: Dialect) -> Vec<RouteRow> {
             rows.push(RouteRow {
                 dst: ipv4_str(r.dst),
                 len: r.len,
-                src: RouteSrc::Static,
+                src,
                 nexthop: ipv4_str(r.nexthop),
                 iface: port
                     .map(|p| ifname::display(dialect, d.kind, p))
                     .unwrap_or_else(|| "?".into()),
             });
         }
-    }
+    };
+    add_dynamic(statics, RouteSrc::Static);
+    add_dynamic(ospf, RouteSrc::Ospf);
     rows.sort_by(|a, b| {
+        let rank = |s: RouteSrc| match s {
+            RouteSrc::Connected => 3,
+            RouteSrc::Static => 2,
+            RouteSrc::Ospf => 1,
+        };
         b.len
             .cmp(&a.len)
             .then(a.dst.cmp(&b.dst))
-            .then(match (a.src, b.src) {
-                (RouteSrc::Connected, RouteSrc::Static) => std::cmp::Ordering::Less,
-                (RouteSrc::Static, RouteSrc::Connected) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            })
+            .then(rank(b.src).cmp(&rank(a.src)))
     });
     rows
 }
@@ -265,6 +268,7 @@ pub fn route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                 let code = match r.src {
                     RouteSrc::Connected => 'C',
                     RouteSrc::Static => 'S',
+                    RouteSrc::Ospf => 'O',
                 };
                 if r.src == RouteSrc::Connected {
                     out.push_str(&format!(
@@ -295,6 +299,7 @@ pub fn route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                 let (proto, pre, flags) = match r.src {
                     RouteSrc::Connected => ("Direct", 0, "D"),
                     RouteSrc::Static => ("Static", 60, "RD"),
+                    RouteSrc::Ospf => ("OSPF", 10, "D"),
                 };
                 out.push_str(&format!(
                     "{:<19} {:<7} {:<4} {:<6} {:<6} {:<15} {}\n",
@@ -322,6 +327,7 @@ pub fn route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                 let proto = match r.src {
                     RouteSrc::Connected => "Direct",
                     RouteSrc::Static => "Static",
+                    RouteSrc::Ospf => "OSPF",
                 };
                 out.push_str(&format!(
                     "{:<18} {:<7} {:<4} {:<5} {:<15} {}\n",
@@ -330,6 +336,7 @@ pub fn route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                     match r.src {
                         RouteSrc::Connected => 0,
                         RouteSrc::Static => 60,
+                        RouteSrc::Ospf => 10,
                     },
                     0,
                     r.nexthop,
@@ -557,13 +564,21 @@ pub fn stp_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
         return String::new();
     };
     let stp = &sw.stp;
+    if stp.mode == StpMode::Mstp {
+        return mst_table(eng, dev, dialect);
+    }
     let is_root = stp.root.mac == port_mac(dev, 0) && stp.root_cost == 0;
     let my_bridge = stp.bridge_id(dev);
     let mut out = String::new();
     match dialect {
         Dialect::Ios => {
             out.push_str("VLAN0001\n");
-            out.push_str("  Spanning tree enabled protocol ieee\n");
+            let protocol = if stp.mode == StpMode::Rstp {
+                "rapid-pvst"
+            } else {
+                "ieee"
+            };
+            out.push_str(&format!("  Spanning tree enabled protocol {}\n", protocol));
             out.push_str("  Root ID    Priority    ");
             out.push_str(&format!("{}\n", stp.root.priority));
             out.push_str(&format!(
@@ -603,14 +618,22 @@ pub fn stp_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                 "-------------------", "----", "---", "---------", "--------", "----"
             ));
             for p in &d.ports {
+                // 聚合组成员只在代表端口上显示一行
+                if p.lag.is_some() && eng.logical_port(dev, p.idx) != p.idx {
+                    continue;
+                }
                 let role = stp.role_of(p.idx);
                 let state = stp.state_of(p.idx);
                 if role == StpRole::Disabled && p.link.is_none() {
                     continue; // IOS 不显示未接线的端口
                 }
+                let name = match p.lag {
+                    Some(gid) => ifname::lag_canonical(dialect, gid),
+                    None => ifname::display(dialect, d.kind, p.idx),
+                };
                 out.push_str(&format!(
                     "{:<19} {:<4} {:<3} {:<9} {:<8} {}\n",
-                    ifname::display(dialect, d.kind, p.idx),
+                    name,
                     stp_role_str(dialect, role),
                     stp_state_str(dialect, state),
                     p.stp_cost.unwrap_or(STP_COST_1G),
@@ -622,6 +645,14 @@ pub fn stp_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
         _ => {
             // VRP / Comware：display stp brief
             out.push_str(&format!(
+                " Mode: {}\n\n",
+                if stp.mode == StpMode::Rstp {
+                    "RSTP"
+                } else {
+                    "STP"
+                }
+            ));
+            out.push_str(&format!(
                 " {:<6} {:<28} {:<5} {:<12} {}\n",
                 "MSTID", "Port", "Role", "STP State", "Protection"
             ));
@@ -630,21 +661,575 @@ pub fn stp_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                 "-----", "----------------------------", "-----", "------------", "----------"
             ));
             for p in &d.ports {
+                if p.lag.is_some() && eng.logical_port(dev, p.idx) != p.idx {
+                    continue;
+                }
                 let role = stp.role_of(p.idx);
                 let state = stp.state_of(p.idx);
                 if role == StpRole::Disabled && p.link.is_none() {
                     continue;
                 }
+                let name = match p.lag {
+                    Some(gid) => ifname::lag_canonical(dialect, gid),
+                    None => ifname::display(dialect, d.kind, p.idx),
+                };
                 out.push_str(&format!(
                     " {:<6} {:<28} {:<5} {:<12} {}\n",
                     0,
-                    ifname::display(dialect, d.kind, p.idx),
+                    name,
                     stp_role_str(dialect, role),
                     stp_state_str(dialect, state),
                     "NONE"
                 ));
             }
         }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ipv6 interface brief` / `display ipv6 interface brief`。
+pub fn ipv6_int_brief(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!(
+                "{:<24}{:<26}{:<10}{}\n",
+                "Interface", "IPv6-Address", "Status", "Protocol"
+            ));
+            for p in &d.ports {
+                let Some(ip) = p.ipv6 else { continue };
+                let oper = p.oper_up(p.link.map(|l| eng.net.link_up(l)).unwrap_or(false));
+                out.push_str(&format!(
+                    "{:<24}{:<26}{:<10}{}\n",
+                    ifname::display(dialect, d.kind, p.idx),
+                    format!("{}/{}", sim_packets::ipv6_str(&ip), p.prefix6),
+                    if p.admin_up { "up" } else { "down" },
+                    if oper { "up" } else { "down" }
+                ));
+            }
+            if !d.ports.iter().any(|p| p.ipv6.is_some()) {
+                out.push_str("（无 IPv6 接口）");
+            }
+        }
+        _ => {
+            out.push_str(&format!(
+                " {:<26}{:<28}{:<10}{}\n",
+                "Interface", "IPv6 Address/Mask", "Physical", "Protocol"
+            ));
+            for p in &d.ports {
+                let Some(ip) = p.ipv6 else { continue };
+                let oper = p.oper_up(p.link.map(|l| eng.net.link_up(l)).unwrap_or(false));
+                out.push_str(&format!(
+                    " {:<26}{:<28}{:<10}{}\n",
+                    ifname::display(dialect, d.kind, p.idx),
+                    format!("{}/{}", sim_packets::ipv6_str(&ip), p.prefix6),
+                    if oper { "up" } else { "down" },
+                    if oper { "up" } else { "down" }
+                ));
+            }
+            if !d.ports.iter().any(|p| p.ipv6.is_some()) {
+                out.push_str(" Info: No IPv6 interface.\n");
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ipv6 route` / `display ipv6 routing-table`。
+pub fn ipv6_route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    struct Row6 {
+        dst: String,
+        len: u8,
+        proto: &'static str,
+        nh: String,
+        iface: String,
+    }
+    let mut rows: Vec<Row6> = vec![];
+    for p in &d.ports {
+        if let Some(ip) = p.ipv6 {
+            let net = sim_packets::ipv6_net_addr(&ip, p.prefix6);
+            rows.push(Row6 {
+                dst: sim_packets::ipv6_str(&net),
+                len: p.prefix6,
+                proto: "C",
+                nh: "::".into(),
+                iface: ifname::display(dialect, d.kind, p.idx),
+            });
+        }
+    }
+    if let DeviceState::Router(rs) = &d.state {
+        for r in &rs.static_routes6 {
+            let port = d.ports.iter().find(|p| {
+                p.ipv6
+                    .map(|ip| sim_packets::ipv6_in_prefix(&r.nexthop, &ip, p.prefix6))
+                    .unwrap_or(false)
+            });
+            rows.push(Row6 {
+                dst: sim_packets::ipv6_str(&r.dst),
+                len: r.len,
+                proto: "S",
+                nh: sim_packets::ipv6_str(&r.nexthop),
+                iface: port
+                    .map(|p| ifname::display(dialect, d.kind, p.idx))
+                    .unwrap_or_else(|| "?".into()),
+            });
+        }
+    }
+    rows.sort_by(|a, b| b.len.cmp(&a.len).then(a.dst.cmp(&b.dst)));
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str("IPv6 Routing Table - default\nCodes: C - connected, S - static\n\n");
+            for r in &rows {
+                out.push_str(&format!(
+                    "{}   {}/{} [0/0] via {}, {}\n",
+                    r.proto, r.dst, r.len, r.nh, r.iface
+                ));
+            }
+            if rows.is_empty() {
+                out.push_str("（无 IPv6 路由）");
+            }
+        }
+        _ => {
+            out.push_str(&format!(
+                " {:<34}{:<7}{:<18}{}\n",
+                "Destination/Mask", "Proto", "NextHop", "Interface"
+            ));
+            for r in &rows {
+                out.push_str(&format!(
+                    " {:<34}{:<7}{:<18}{}\n",
+                    format!("{}/{}", r.dst, r.len),
+                    if r.proto == "C" { "Direct" } else { "Static" },
+                    r.nh,
+                    r.iface
+                ));
+            }
+            if rows.is_empty() {
+                out.push_str(" Info: No IPv6 route.\n");
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// IPv6 ping 结果（路由器三方言）。
+pub fn render_ping6(dialect: Dialect, s: &sim_core::device::Ping6Session) -> String {
+    let target = sim_packets::ipv6_str(&s.target);
+    let rate = if s.sent == 0 {
+        0
+    } else {
+        (s.received as f64 / s.sent as f64 * 100.0) as u64
+    };
+    match dialect {
+        Dialect::Ios => format!(
+            "Sending {}, 100-byte ICMPv6 Echos to {}\nSuccess rate is {} percent ({}/{})",
+            s.sent, target, rate, s.received, s.sent
+        ),
+        Dialect::Vrp => format!(
+            "  PING6 {}: 56 data bytes\n    {} packet(s) transmitted\n    {} packet(s) received\n    {:.2}% packet loss",
+            target,
+            s.sent,
+            s.received,
+            if s.sent == 0 {
+                100.0
+            } else {
+                (s.sent - s.received) as f64 / s.sent as f64 * 100.0
+            }
+        ),
+        Dialect::Comware => format!(
+            "PING6 {}: 56 data bytes\n{} packet(s) transmitted, {} packet(s) received, {:.1}% packet loss",
+            target,
+            s.sent,
+            s.received,
+            if s.sent == 0 {
+                100.0
+            } else {
+                (s.sent - s.received) as f64 / s.sent as f64 * 100.0
+            }
+        ),
+    }
+}
+
+/// 主机的 IPv6 ping（linux 风格）。
+pub fn render_ping6_generic(s: &sim_core::device::Ping6Session) -> String {
+    let target = sim_packets::ipv6_str(&s.target);
+    let loss = if s.sent == 0 {
+        100.0
+    } else {
+        (s.sent - s.received) as f64 / s.sent as f64 * 100.0
+    };
+    format!(
+        "PING6 {}: 56 data bytes\n{} packets transmitted, {} received, {:.0}% packet loss",
+        target, s.sent, s.received, loss
+    )
+}
+
+/// `show vrrp` / `display vrrp`。
+pub fn vrrp_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Router(rs) = &d.state else {
+        return String::new();
+    };
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!(
+                "{:<22}{:<6}{:<8}{:<12}{}\n",
+                "Interface", "Grp", "Prio", "State", "Virtual addr"
+            ));
+            for g in &rs.vrrp {
+                out.push_str(&format!(
+                    "{:<22}{:<6}{:<8}{:<12}{}\n",
+                    ifname::display(dialect, d.kind, g.port),
+                    g.vrid,
+                    g.priority,
+                    match g.state {
+                        sim_core::device::VrrpState::Master => "Master",
+                        sim_core::device::VrrpState::Backup => "Backup",
+                        sim_core::device::VrrpState::Init => "Initialize",
+                    },
+                    ipv4_str(g.vip)
+                ));
+            }
+            if rs.vrrp.is_empty() {
+                out.push_str("（未配置 VRRP）");
+            }
+        }
+        _ => {
+            out.push_str(&format!(
+                " {:<16}{:<6}{:<8}{:<10}{}\n",
+                "Interface", "VRID", "Priority", "State", "Virtual IP"
+            ));
+            for g in &rs.vrrp {
+                out.push_str(&format!(
+                    " {:<16}{:<6}{:<8}{:<10}{}\n",
+                    ifname::display(dialect, d.kind, g.port),
+                    g.vrid,
+                    g.priority,
+                    match g.state {
+                        sim_core::device::VrrpState::Master => "Master",
+                        sim_core::device::VrrpState::Backup => "Backup",
+                        sim_core::device::VrrpState::Init => "Initialize",
+                    },
+                    ipv4_str(g.vip)
+                ));
+            }
+            if rs.vrrp.is_empty() {
+                out.push_str(" Info: No VRRP group.\n");
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ip ospf neighbor` / `display ospf peer`。
+pub fn ospf_neighbors(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let rid = ipv4_str(eng.ospf_router_id_of(dev));
+    let nbs = eng.ospf_neighbors_of(dev);
+    let iface_for = |port: sim_core::device::PortId| ifname::display(dialect, d.kind, port);
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!(
+                "OSPF process 1, Router ID {}\n\n{:<16}{:<5}{:<16}{:<12}{:<16}{}\n",
+                rid, "Neighbor ID", "Pri", "State", "Dead Time", "Address", "Interface"
+            ));
+            for (nrid, ip, port) in &nbs {
+                out.push_str(&format!(
+                    "{:<16}{:<5}{:<16}{:<12}{:<16}{}\n",
+                    ipv4_str(*nrid),
+                    "1",
+                    "FULL/DR",
+                    "00:00:04",
+                    ipv4_str(*ip),
+                    iface_for(*port)
+                ));
+            }
+            if nbs.is_empty() {
+                out.push_str("（无邻居）");
+            }
+        }
+        _ => {
+            out.push_str(&format!("OSPF Process 1 with Router ID {}\n", rid));
+            out.push_str(" Neighbors\n\n");
+            out.push_str(&format!(
+                " {:<16}{:<18}{:<18}{}\n",
+                "Router ID", "Address", "Interface", "State"
+            ));
+            for (nrid, ip, port) in &nbs {
+                out.push_str(&format!(
+                    " {:<16}{:<18}{:<18}{}\n",
+                    ipv4_str(*nrid),
+                    ipv4_str(*ip),
+                    iface_for(*port),
+                    "Full"
+                ));
+            }
+            if nbs.is_empty() {
+                out.push_str(" Info: No OSPF neighbor.\n");
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ip ospf database` / `display ospf lsdb`（Router-LSA 摘要）。
+pub fn ospf_lsdb(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let rid = ipv4_str(eng.ospf_router_id_of(dev));
+    let entries = eng.ospf_lsdb_of(dev);
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!("OSPF Router with ID ({})\n\n", rid));
+            out.push_str(&format!("{:<18}{:<8}{}\n", "Link ID", "Links", "Neighbors"));
+            for (r, links, nbs) in &entries {
+                out.push_str(&format!("{:<18}{:<8}{}\n", ipv4_str(*r), links, nbs));
+            }
+        }
+        _ => {
+            out.push_str(&format!("OSPF LSDB (Router ID {})\n", rid));
+            out.push_str(&format!(
+                " {:<18}{:<8}{}\n",
+                "Router ID", "Links", "Neighbors"
+            ));
+            for (r, links, nbs) in &entries {
+                out.push_str(&format!(" {:<18}{:<8}{}\n", ipv4_str(*r), links, nbs));
+            }
+            if entries.is_empty() {
+                out.push_str(" Info: The LSDB is empty.\n");
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show etherchannel summary` / `display eth-trunk` / `display link-aggregation`。
+pub fn lag_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Switch(sw) = &d.state else {
+        return String::new();
+    };
+    let mut ids: Vec<u16> = sw.lags.keys().copied().collect();
+    ids.sort_unstable();
+    if ids.is_empty() {
+        return match dialect {
+            Dialect::Ios => String::new(),
+            Dialect::Vrp => "Info: No Eth-Trunk exists.".into(),
+            Dialect::Comware => "Info: No aggregation group exists.".into(),
+        };
+    }
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str("Flags:  D - down        P - bundled in port-channel\n");
+            out.push_str("        U - in use      s - suspended\n\n");
+            out.push_str(&format!("Number of channel-groups in use: {}\n", ids.len()));
+            out.push_str("Group  Port-channel  Protocol    Ports\n");
+            out.push_str(
+                "------+-------------+-----------+-----------------------------------------------\n",
+            );
+            for id in ids {
+                let Some(g) = sw.lags.get(&id) else { continue };
+                let proto = match g.mode {
+                    LagMode::Static => "Static",
+                    _ => "LACP",
+                };
+                let flags = if g.selected.is_empty() { "SD" } else { "SU" };
+                let ports = g
+                    .members
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{}({})",
+                            ifname::short(dialect, d.kind, *m),
+                            if g.selected.contains(m) { "P" } else { "D" }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.push_str(&format!(
+                    "{:<6} {:<13} {:<11} {}\n",
+                    id,
+                    format!("{}({})", ifname::lag_short(dialect, id), flags),
+                    proto,
+                    ports
+                ));
+            }
+        }
+        Dialect::Vrp => {
+            for id in ids {
+                let Some(g) = sw.lags.get(&id) else { continue };
+                out.push_str(&format!("Eth-Trunk{}'s state information is:\n", id));
+                out.push_str(&format!(
+                    "WorkingMode: {}\n",
+                    if g.mode == LagMode::Static {
+                        "NORMAL"
+                    } else {
+                        "LACP"
+                    }
+                ));
+                out.push_str(&format!(
+                    "Operate status: {}\n",
+                    if g.selected.is_empty() { "down" } else { "up" }
+                ));
+                out.push_str(&format!(
+                    "Number Of Up Port In Trunk: {}\n\n",
+                    g.selected.len()
+                ));
+                out.push_str(&format!(
+                    "{:<24}{:<10}{}\n",
+                    "ActorPortName", "Status", "PortType"
+                ));
+                for m in &g.members {
+                    out.push_str(&format!(
+                        "{:<24}{:<10}{}\n",
+                        ifname::canonical(dialect, d.kind, *m),
+                        if g.selected.contains(m) { "Up" } else { "Down" },
+                        "Ethernet"
+                    ));
+                }
+                out.push('\n');
+            }
+        }
+        Dialect::Comware => {
+            for id in ids {
+                let Some(g) = sw.lags.get(&id) else { continue };
+                out.push_str(&format!(
+                    "Aggregation Interface: {}\n",
+                    ifname::lag_canonical(dialect, id)
+                ));
+                out.push_str(&format!(
+                    "Aggregation Mode: {}\n",
+                    if g.mode == LagMode::Static {
+                        "Static"
+                    } else {
+                        "Dynamic"
+                    }
+                ));
+                out.push_str("Loadsharing Type: Shar\n");
+                out.push_str("Local:\n");
+                out.push_str(&format!("  {:<16}{:<8}{}\n", "Port", "Status", "LAG-ID"));
+                for m in &g.members {
+                    out.push_str(&format!(
+                        "  {:<16}{:<8}{}\n",
+                        ifname::display(dialect, d.kind, *m),
+                        if g.selected.contains(m) { "S" } else { "U" },
+                        id
+                    ));
+                }
+                out.push('\n');
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// MSTP：按实例展示根桥与端口角色（0 = CIST）。
+fn mst_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Switch(sw) = &d.state else {
+        return String::new();
+    };
+    let mac_fmt = |m: &Mac| match dialect {
+        Dialect::Ios => sim_packets::mac_str_cisco(m),
+        _ => sim_packets::mac_str_huawei(m),
+    };
+    let mut out = String::new();
+    out.push_str(if dialect == Dialect::Ios {
+        "MSTP configuration\n"
+    } else {
+        " Mode: MSTP\n"
+    });
+    let mut ids: Vec<u16> = sw.stp.mst.keys().copied().collect();
+    ids.sort_unstable();
+    let mut render =
+        |inst: u16,
+         vlans: &[VlanId],
+         root: sim_packets::BridgeId,
+         cost: u32,
+         root_port: Option<PortId>,
+         ports: &std::collections::HashMap<PortId, sim_core::device::StpPortSt>| {
+            let label = if vlans.is_empty() {
+                "CIST".to_string()
+            } else {
+                format!(
+                    "VLAN {}",
+                    vlans
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            out.push_str(&format!(
+                "Instance {} ({})  Root {}.{}  Cost {}  RootPort {}\n",
+                inst,
+                label,
+                root.priority,
+                mac_fmt(&root.mac),
+                cost,
+                root_port
+                    .map(|p| ifname::display(dialect, d.kind, p))
+                    .unwrap_or_else(|| "-".into())
+            ));
+            for p in &d.ports {
+                if p.lag.is_some() && eng.logical_port(dev, p.idx) != p.idx {
+                    continue;
+                }
+                let Some(st) = ports.get(&p.idx) else {
+                    continue;
+                };
+                if st.role == StpRole::Disabled && p.link.is_none() {
+                    continue;
+                }
+                let name = match p.lag {
+                    Some(gid) => ifname::lag_canonical(dialect, gid),
+                    None => ifname::display(dialect, d.kind, p.idx),
+                };
+                out.push_str(&format!(
+                    "  {:<24}{:<6}{}\n",
+                    name,
+                    stp_role_str(dialect, st.role),
+                    stp_state_str(dialect, st.state)
+                ));
+            }
+        };
+    let cist_ports = sw.stp.ports.clone();
+    render(
+        0,
+        &[],
+        sw.stp.root,
+        sw.stp.root_cost,
+        sw.stp.root_port,
+        &cist_ports,
+    );
+    for id in ids {
+        let Some(m) = sw.stp.mst.get(&id) else {
+            continue;
+        };
+        render(
+            id,
+            &m.vlans,
+            m.data.root,
+            m.data.root_cost,
+            m.data.root_port,
+            &m.data.ports,
+        );
     }
     out.trim_end().to_string()
 }

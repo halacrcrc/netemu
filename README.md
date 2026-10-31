@@ -4,7 +4,7 @@
 
 > 目标：覆盖 HCIA/HCIP/HCIE、CCNA/CCNP 等课程体系（数通 / 安全 / 无线 / 数据中心），对同一知识点**同时讲解思科、华为、华三的命令写法**，并提供从简单办公网到大型园区网、数据中心的在线练习场，附带笔记与进度追踪。
 
-## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全）✅ + M3a（课程/笔记/云同步）✅
+## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4 起步（OSPF/VRRP/IPv6）✅
 
 **M0 = 可运行的骨架**：
 
@@ -39,7 +39,7 @@
 
 ### M2c 新增（题库 / 错题本 / 进度看板）
 
-- **题库 v1**：30 道 IA 单选题（网络基础/VLAN/STP/DHCP/ACL/NAT 六主题，原创题面+解析），顶栏「题库」进入，按主题或全部练习，即答即判 + 解析。
+- **题库 v2**：103 道 IA 单选题（网络基础/VLAN/STP/DHCP/ACL/NAT 六主题，每主题 17~18 题，原创题面+解析），顶栏「题库」进入，按主题或全部练习，即答即判 + 解析。
 - **错题本**：答错自动入本，"错题重做"专项练习；统计页一键清空记录。
 - **进度看板**：总体进度（已答/错题数/最近正确率）+ 分主题掌握度条形图；本地持久化。
 - **实验进度徽章**：实验判分全过会在实验卡上打 ✓（本地记忆）。
@@ -52,7 +52,45 @@
 - **Gist 云同步**：经典 PAT（gist 权限）备份/恢复笔记+题库记录+实验进度到私有 Gist；题库按答题次数合并、实验进度并集。Token 仅存本机。
 - **导航**：练习场 / 题库 / 课程 / 笔记 四视图切换。
 
-**已验证**：48 个 Rust 测试全绿；浏览器端实测：四课对照表 54/54 全 ✓、笔记新建/编辑/渲染、四个实验判分全过。
+### M3b 新增（链路聚合 LACP）
+
+- **逐包 LACPDU**：1 秒周期、3.5 秒老化；Active / Passive / Static 三种模式，成员 Selected/Standby 选举，成员故障后自动剔除并切换。
+- **聚合口是逻辑端口**：出方向按流哈希在成员间分担，MAC 学习固定在逻辑端口；STP 只看到一条链路（代表端口），双链路聚合不会被误阻塞。
+- **三方言命令**：IOS `channel-group … mode active|passive|on` + `interface Port-channel` + `show etherchannel summary`；VRP `interface Eth-Trunk` + `eth-trunk` + `mode lacp-static` + `display eth-trunk`；Comware `interface Bridge-Aggregation` + `port link-aggregation group` + `link-aggregation mode dynamic` + `display link-aggregation summary`。
+- **实验五「链路聚合与带宽冗余」**：双链路聚合 → 抓包可见 LACPDU → 断一条成员业务不中断，自动判分 7 项。
+
+### M2 收尾（SSH / Telnet 管理面）
+
+- **本地认证**：三方言本地用户与权限（IOS `username ... privilege ... secret`、VRP `local-user ... password cipher`、Comware `local-user ... class manage` + `password simple`），口令明文仅存本机（教学用途）。
+- **VTY 接入控制**：`line vty` / `user-interface vty` 视图配置本地认证与传输协议（`transport input` / `protocol inbound` 支持 ssh / telnet / all / none）。
+- **远程登录会话**：设备与 PC 均可 `telnet <IP>` / `ssh <IP>`，逐行输入用户名/口令；认证通过后命令**转发到目标设备**（可 show、可改配置），`exit` 断开；SSH 权限 15 直接进入特权模式。
+- **实验六「设备管理面加固」**：只开 SSH、关闭 Telnet，SSH 登录成功并在远端执行 show，Telnet 被拒绝，自动判分 4 项。
+
+### M2 收尾（RSTP 快速收敛）
+
+- **模式切换**：IOS `spanning-tree mode rapid-pvst`、VRP/Comware `stp mode rstp`（可切回 802.1D）。
+- **快速收敛（简化实现）**：RSTP 模式下根端口/指定端口角色确定即进入转发，根端口故障时替换端口**立即**接替；802.1D 仍走 Listening/Learning 30 秒。`show spanning-tree` / `display stp brief` 显示当前模式。
+- 说明：未模拟提案/同意 BPDU 标志与边缘端口，详见 ADR D16。
+
+### M3c 新增（PWA 离线）
+
+- **可安装 + 离线**：`vite-plugin-pwa` 生成 Service Worker，预缓存页面、WASM、课程与题库；断网刷新仍可打开练习场。自带 192/512 图标（暗色网络节点徽标）与 Web App Manifest。
+
+### 体验增强（MSTP / i18n / 拓扑分享）
+
+- **MSTP 多实例**：`spanning-tree mode mst` / `stp mode mstp`，`spanning-tree mst 1 priority 4096` / `stp instance 1 priority 4096`，MST 域视图配置 `instance 1 vlan 10` 映射；每个实例独立发送 BPDU、独立选根，数据面按 VLAN 归属实例转发（同一端口可在不同 VLAN 分别转发/阻塞，实现负载分担）。`show spanning-tree` / `display stp brief` 按实例展示。
+  说明：不做 MST 域协商（name/revision 仅接受），详见 ADR D17。
+- **界面双语**：顶栏「EN / 中」一键切换，界面骨架、练习场、题库/课程/笔记的操作文案均为中英双语；课程与题目内容保持中文。
+- **URL 分享拓扑**：拓扑管理面板「复制分享链接」把工作区（含设备位置）压缩进 `#topo=`，打开链接即还原；同时补上导出/导入文件入口。分享链接优先于本地工作区。
+
+### M4 起步（OSPF / VRRP / IPv6）
+
+- **OSPF 单区域**：Hello（2s）建立邻居、Router-LSA 泛洪、SPF 计算动态路由（`O` 路由）；三方言配置（`router ospf 1` + `network … area 0` / `ospf 1` + `area 0` + `network`），`show/display ospf neighbor|peer / database|lsdb`。
+- **VRRP 主备**：优先级选举（平局比接口 IP）、1s 通告、3.5s 失效切换、虚拟 MAC 网关、Master 应答 VIP 的 ARP 与 ICMP；三方言配置与 `show/display vrrp`。
+- **IPv6**：接口 IPv6 地址、NDP（NS/NA + solicited-node 组播）、ICMPv6 ping6、连接/静态 v6 路由；三方言 `ipv6 address`、`ipv6 route`/`route-static`、`ping ipv6`、`show/display ipv6 interface brief|routing-table`；主机属性面板可直接配置 IPv6 地址/网关，PC 终端 `ping6`。
+- **英文内容**：四篇课程、103 道题库、6 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
+
+**已验证**：87 个 Rust 测试全绿；浏览器端实测：OSPF 三路由器邻居 FULL + O 路由与 ping 连通、VRRP 主备状态与接口故障后 Backup 接管且虚拟网关仍通、IPv6 主机 `ping6` 5/5 与主机 IPv6 配置面板、EN 下课程/题库/实验内容与界面均为英文。
 
 ## 本地开发
 
@@ -94,14 +132,14 @@ web/
 |---|---|---|
 | M0 骨架 | 逐包转发闭环 + 拓扑编辑器 + 三方言最小命令集 + CI/Pages 部署 | ✅ |
 | M1 数通IA闭环（MVP） | VLAN/Trunk/SVI/静态路由（三方言）+ 校验引擎 + 报文查看器 + 办公网实验集 | ✅ |
-| M2 IA 补全 | STP ✅、DHCP ✅、ACL ✅、NAT ✅、题库/进度 ✅、LACP、SSH | 进行中 |
-| M3 内容+笔记+同步 | 课程管线、三厂商对照表组件、Gist 同步（经典 PAT）、PWA 离线 | |
-| M4 IP 进阶 | OSPF 多区域、VRRP、DHCP Snooping、端口安全、IPv6、QoS 基础 | |
+| M2 IA 补全 | STP ✅、RSTP ✅、MSTP ✅、DHCP ✅、ACL ✅、NAT ✅、题库/进度 ✅、LACP ✅、SSH ✅ | ✅ |
+| M3 内容+笔记+同步 | 课程管线 ✅、三厂商对照表 ✅、Gist 同步 ✅、PWA 离线 ✅ | ✅ |
+| M4 IP 进阶 | OSPF 多区域 → 单区域 ✅、VRRP ✅、IPv6 ✅、DHCP Snooping、端口安全、QoS 基础 | 进行中 |
 | M5 IE 数通 | BGP、IS-IS、route-policy、VRF、MPLS L3VPN + 大型园区实验 | |
 | M6 安全方向 | 防火墙三方言（ASA/USG/SecPath）、区域/策略、IPSec/SSL VPN | |
 | M7 无线方向 | AC/AP、CAPWAP、WLAN 安全 | |
 | M8 数据中心 | 堆叠/IRF/CSS、M-LAG、VXLAN EVPN + DC 实验；F5 LTM 基础 | |
-| M9 打磨 | 大拓扑 Canvas 渲染、英文界面、社区内容贡献管线 | |
+| M9 打磨 | 大拓扑 Canvas 渲染、英文界面与内容（界面+课程/题库/实验文案 ✅）、社区内容贡献管线 | 进行中 |
 
 ## 部署（GitHub Pages）
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   // 笔记视图：列表 + 编辑/预览 + Gist 云同步。
   import { renderMarkdown } from '../lib/md';
+  import { t } from '../lib/i18n.svelte';
   import {
     loadNotes,
     saveNotes,
@@ -33,7 +34,7 @@
   function newNote() {
     const n: Note = {
       id: `n${Date.now()}`,
-      title: '无标题笔记',
+      title: t('notes.untitled'),
       body: '',
       at: Date.now(),
     };
@@ -61,7 +62,7 @@
     if (!activeId) return;
     notes = notes.map((n) =>
       n.id === activeId
-        ? { ...n, title: draftTitle.trim() || '无标题笔记', body: draftBody, at: Date.now() }
+        ? { ...n, title: draftTitle.trim() || t('notes.untitled'), body: draftBody, at: Date.now() }
         : n
     );
     editing = false;
@@ -70,7 +71,7 @@
 
   function removeNote() {
     if (!activeId) return;
-    if (!confirm('删除这篇笔记？')) return;
+    if (!confirm(t('notes.deleteConfirm'))) return;
     notes = notes.filter((n) => n.id !== activeId);
     activeId = notes[0]?.id ?? null;
     editing = false;
@@ -88,7 +89,7 @@
       saveToken(token.trim());
       const id = await backupToGist(token.trim());
       gistOk = true;
-      syncMsg = `✓ 已备份到 Gist（${id.slice(0, 8)}…）`;
+      syncMsg = `✓ ${t('notes.backupOk')} (${id.slice(0, 8)}…)`;
     } catch (e) {
       syncMsg = `✗ ${String(e instanceof Error ? e.message : e)}`;
     } finally {
@@ -104,7 +105,7 @@
       const data = await restoreFromGist(token.trim());
       applyBackup(data);
       applyLocal(data);
-      syncMsg = '✓ 已从云端恢复（笔记已覆盖，题库/实验进度按次数合并）';
+      syncMsg = `✓ ${t('notes.restoreOk')}`;
     } catch (e) {
       syncMsg = `✗ ${String(e instanceof Error ? e.message : e)}`;
     } finally {
@@ -126,9 +127,9 @@
 
 <div class="notes-view">
   <aside class="list panel">
-    <h3>我的笔记</h3>
+    <h3>{t('notes.title')}</h3>
     <div class="pad">
-      <button class="primary" onclick={newNote}>＋ 新建笔记</button>
+      <button class="primary" onclick={newNote}>{t('notes.new')}</button>
     </div>
     <div class="pad note-list">
       {#each notes as n (n.id)}
@@ -137,7 +138,7 @@
           <span class="nd">{new Date(n.at).toLocaleDateString()}</span>
         </button>
       {:else}
-        <div class="hint">还没有笔记，点上方新建。</div>
+        <div class="hint">{t('notes.emptyList')}</div>
       {/each}
     </div>
   </aside>
@@ -147,17 +148,17 @@
       <div class="panel">
         {#if editing}
           <div class="pad">
-            <input class="title-input" bind:value={draftTitle} placeholder="笔记标题" />
+            <input class="title-input" bind:value={draftTitle} placeholder={t('notes.titlePh')} />
             <textarea
               class="body-input mono"
               bind:value={draftBody}
               rows={16}
-              placeholder="支持 Markdown：## 标题、**加粗**、`代码`、- 列表、``` 代码块"
+              placeholder={t('notes.bodyPh')}
             ></textarea>
             <div class="row">
-              <button class="primary" onclick={saveEdit}>保存</button>
-              <button onclick={() => (editing = false)}>取消</button>
-              <span class="hint">预览随输入实时更新 →</span>
+              <button class="primary" onclick={saveEdit}>{t('notes.save')}</button>
+              <button onclick={() => (editing = false)}>{t('notes.cancel')}</button>
+              <span class="hint">{t('notes.previewHint')}</span>
             </div>
           </div>
           {#if draftBody}
@@ -170,40 +171,37 @@
             <div class="read-head">
               <h1 class="note-title">{active.title}</h1>
               <div class="row">
-                <button onclick={startEdit}>✎ 编辑</button>
-                <button class="danger" onclick={removeNote}>删除</button>
+                <button onclick={startEdit}>{t('notes.edit')}</button>
+                <button class="danger" onclick={removeNote}>{t('notes.delete')}</button>
               </div>
             </div>
             {#if active.body}
               <div class="md">{@html readHtml}</div>
             {:else}
-              <div class="hint">这篇笔记还没有内容，点"编辑"开始写。</div>
+              <div class="hint">{t('notes.emptyBody')}</div>
             {/if}
           </div>
         {/if}
       </div>
     {:else}
-      <div class="panel"><div class="pad hint">选择或新建一篇笔记。</div></div>
+      <div class="panel"><div class="pad hint">{t('notes.selectHint')}</div></div>
     {/if}
 
     <div class="panel">
-      <h3>云同步（GitHub Gist）</h3>
+      <h3>{t('notes.syncTitle')}</h3>
       <div class="pad">
-        <div class="hint">
-          在 GitHub 生成<b>经典 PAT</b>（勾选 gist 权限），粘贴到下面。笔记、题库记录、实验进度会备份到一个私有
-          Gist；Token 只保存在本机浏览器中。
-        </div>
+        <div class="hint">{t('notes.syncHint')}</div>
         <input
           class="mono token-input"
           type="password"
           bind:value={token}
-          placeholder="ghp_…（经典 PAT，gist 权限）"
+          placeholder={t('notes.tokenPh')}
         />
         <div class="row">
           <button class="primary" disabled={syncBusy} onclick={doBackup}>
-            {gistOk ? '↻ 备份到云' : '☁ 备份到云'}
+            {gistOk ? t('notes.rebackup') : t('notes.backup')}
           </button>
-          <button disabled={syncBusy || !gistOk} onclick={doRestore}>⤓ 从云恢复</button>
+          <button disabled={syncBusy || !gistOk} onclick={doRestore}>{t('notes.restore')}</button>
         </div>
         {#if syncMsg}<div class="sync-msg">{syncMsg}</div>{/if}
       </div>

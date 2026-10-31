@@ -34,7 +34,13 @@ fn h_exit(c: &mut Ctx) -> Result<String, CliError> {
     c.sess.mode = match c.sess.mode {
         Mode::If => Mode::Config,
         Mode::Config => Mode::Priv,
-        Mode::Pool | Mode::Acl => Mode::Config,
+        Mode::Pool
+        | Mode::Acl
+        | Mode::Line
+        | Mode::Aaa
+        | Mode::Mst
+        | Mode::Ospf
+        | Mode::OspfArea => Mode::Config,
         _ => Mode::Exec,
     };
     if c.sess.mode != Mode::If {
@@ -68,6 +74,14 @@ fn show_branch() -> CNode {
                 )
                 .kid(CNode::lit("route", "IP routing table").run(cmd::show_route))
                 .kid(
+                    CNode::lit("ospf", "OSPF information")
+                        .kid(CNode::lit("neighbor", "OSPF neighbors").run(cmd::show_ospf_neighbor))
+                        .kid(
+                            CNode::lit("database", "OSPF link state database")
+                                .run(cmd::show_ospf_db),
+                        ),
+                )
+                .kid(
                     CNode::lit("nat", "NAT translations")
                         .kid(
                             CNode::lit("translations", "Show NAT translation table")
@@ -76,7 +90,15 @@ fn show_branch() -> CNode {
                         .run(cmd::show_nat),
                 ),
         )
+        .kid(
+            CNode::lit("ipv6", "IPv6 information")
+                .kid(CNode::lit("interface", "IPv6 interfaces").kid(
+                    CNode::lit("brief", "Brief IPv6 interface status").run(cmd::show_ipv6_brief),
+                ))
+                .kid(CNode::lit("route", "IPv6 routing table").run(cmd::show_ipv6_route)),
+        )
         .kid(CNode::lit("spanning-tree", "Spanning tree topology").run(cmd::show_stp))
+        .kid(CNode::lit("vrrp", "VRRP status").run(cmd::show_vrrp))
         .kid(CNode::lit("access-lists", "List access lists").run(cmd::show_acl))
         .kid(
             CNode::lit("vlan", "VLAN information")
@@ -85,6 +107,11 @@ fn show_branch() -> CNode {
         .kid(
             CNode::lit("mac", "MAC address table information")
                 .kid(CNode::lit("address-table", "Show the MAC address table").run(cmd::show_mac)),
+        )
+        .kid(
+            CNode::lit("etherchannel", "EtherChannel information").kid(
+                CNode::lit("summary", "One-line summary per channel-group").run(cmd::show_lag),
+            ),
         )
 }
 
@@ -97,7 +124,31 @@ pub fn build() -> Trees {
                 "target",
                 "IP address of target",
             ))
+            .kid(
+                CNode::lit("ipv6", "IPv6 echo messages").kid(
+                    CNode::param(ParamKind::Word, "target", "IPv6 address of target")
+                        .run(cmd::ping_ipv6),
+                ),
+            )
             .run(cmd::ping)
+    };
+    let login_cmds = || {
+        vec![
+            CNode::lit("telnet", "Open a Telnet connection")
+                .kid(CNode::param(
+                    ParamKind::Ipv4,
+                    "target",
+                    "IP address of target",
+                ))
+                .run(cmd::telnet_login),
+            CNode::lit("ssh", "Open an SSH connection")
+                .kid(CNode::param(
+                    ParamKind::Ipv4,
+                    "target",
+                    "IP address of target",
+                ))
+                .run(cmd::ssh_login),
+        ]
     };
 
     Trees {
@@ -105,7 +156,10 @@ pub fn build() -> Trees {
             CNode::lit("enable", "Turn on privileged commands").run(h_enable),
             ping(),
             show_branch(),
-        ],
+        ]
+        .into_iter()
+        .chain(login_cmds())
+        .collect(),
         priv_: vec![
             CNode::lit("disable", "Turn off privileged commands").run(h_disable),
             CNode::lit("configure", "Enter configuration mode")
@@ -115,7 +169,10 @@ pub fn build() -> Trees {
                 .kid(CNode::lit("memory", "Write configuration to memory").run(h_write)),
             ping(),
             show_branch(),
-        ],
+        ]
+        .into_iter()
+        .chain(login_cmds())
+        .collect(),
         config: vec![
             CNode::lit("hostname", "Set system's network name")
                 .kid(CNode::param(
@@ -124,6 +181,55 @@ pub fn build() -> Trees {
                     "Hostname of the router",
                 ))
                 .run(cmd::hostname),
+            CNode::lit("router", "Enable a routing process")
+                .kid(CNode::lit("ospf", "Open Shortest Path First").kid(
+                    CNode::param(ParamKind::Number, "pid", "Process ID").run(cmd::ospf_enter),
+                )),
+            CNode::lit("ipv6", "IPv6 configuration").kid(
+                CNode::lit("route", "IPv6 static route").kid(
+                    CNode::param(ParamKind::Word, "prefix", "Prefix, e.g. 2001:db8:2::/64")
+                        .kid(
+                            CNode::param(ParamKind::Number, "len", "Prefix length").kid(
+                                CNode::param(ParamKind::Word, "nexthop", "Next hop IPv6 address")
+                                    .run(cmd::ipv6_route),
+                            ),
+                        )
+                        .kid(
+                            CNode::param(ParamKind::Word, "nexthop", "Next hop IPv6 address")
+                                .run(cmd::ipv6_route),
+                        ),
+                ),
+            ),
+            CNode::lit("username", "Establish a local user").kid(
+                CNode::param(ParamKind::Word, "name", "User name")
+                    .run(cmd::mgmt_username)
+                    .kid(
+                        CNode::lit("privilege", "Set the privilege level").kid(
+                            CNode::param(ParamKind::Number, "privilege", "0-15").kid(
+                                CNode::lit("secret", "Specify the secret").kid(
+                                    CNode::param(ParamKind::Word, "secret", "Secret")
+                                        .run(cmd::mgmt_username),
+                                ),
+                            ),
+                        ),
+                    )
+                    .kid(CNode::lit("secret", "Specify the secret").kid(
+                        CNode::param(ParamKind::Word, "secret", "Secret").run(cmd::mgmt_username),
+                    )),
+            ),
+            CNode::lit("enable", "Configure privileged mode").kid(
+                CNode::lit("secret", "Set the enable secret").kid(
+                    CNode::param(ParamKind::Word, "secret", "Secret").run(cmd::mgmt_enable_secret),
+                ),
+            ),
+            CNode::lit("line", "Configure lines").kid(
+                CNode::lit("vty", "Virtual terminal lines").kid(
+                    CNode::param(ParamKind::Number, "first", "First line number").kid(
+                        CNode::param(ParamKind::Number, "last", "Last line number")
+                            .run(cmd::mgmt_enter_line),
+                    ),
+                ),
+            ),
             CNode::lit("interface", "Select an interface to configure")
                 .run(cmd::interface)
                 .kid(CNode::param(
@@ -251,6 +357,34 @@ pub fn build() -> Trees {
             CNode::lit("spanning-tree", "Spanning Tree Protocol subgroup")
                 .run(|c| cmd::stp_enable(c, true))
                 .kid(
+                    CNode::lit("mode", "Spanning tree mode")
+                        .kid(CNode::lit("rapid-pvst", "Rapid PVST+ (RSTP)").run(cmd::stp_mode_rstp))
+                        .kid(CNode::lit("pvst", "PVST+ (802.1D timers)").run(cmd::stp_mode_stp))
+                        .kid(
+                            CNode::lit("mst", "Multiple Spanning Tree (MSTP)")
+                                .run(cmd::stp_mode_mst),
+                        ),
+                )
+                .kid(
+                    CNode::lit("mst", "MSTP configuration")
+                        .kid(
+                            CNode::param(ParamKind::Number, "id", "MST instance, 1-4094").kid(
+                                CNode::lit("priority", "Set the instance bridge priority").kid(
+                                    CNode::param(
+                                        ParamKind::Number,
+                                        "priority",
+                                        "0-61440, step 4096",
+                                    )
+                                    .run(cmd::stp_mst_priority),
+                                ),
+                            ),
+                        )
+                        .kid(
+                            CNode::lit("configuration", "Enter MST configuration mode")
+                                .run(cmd::stp_enter_mst),
+                        ),
+                )
+                .kid(
                     CNode::lit("vlan", "VLAN spanning tree configuration").kid(
                         CNode::param(ParamKind::Number, "vlan", "VLAN ID, 1-4094").kid(
                             CNode::lit("priority", "Set the bridge priority for the spanning tree")
@@ -308,6 +442,16 @@ pub fn build() -> Trees {
                     ),
                 ),
             // 交换机二层口命令
+            CNode::lit("ipv6", "IPv6 interface configuration").kid(
+                CNode::lit("address", "Set the IPv6 address").kid(
+                    CNode::param(
+                        ParamKind::Word,
+                        "addr",
+                        "Address/prefix, e.g. 2001:db8::1/64",
+                    )
+                    .run(cmd::ipv6_address),
+                ),
+            ),
             CNode::lit("switchport", "Set switching mode characteristics")
                 .kid(
                     CNode::lit("mode", "Set trunking mode of the interface")
@@ -352,12 +496,41 @@ pub fn build() -> Trees {
                     ),
                 ),
             ),
+            CNode::lit("vrrp", "VRRP virtual router").kid(
+                CNode::param(ParamKind::Number, "vrid", "VRRP group, 1-255")
+                    .kid(
+                        CNode::lit("ip", "Virtual IP address").kid(
+                            CNode::param(ParamKind::Ipv4, "vip", "Virtual IP").run(cmd::vrrp_vip),
+                        ),
+                    )
+                    .kid(
+                        CNode::lit("priority", "Set the priority").kid(
+                            CNode::param(ParamKind::Number, "priority", "1-254")
+                                .run(cmd::vrrp_priority),
+                        ),
+                    )
+                    .kid(CNode::lit("preempt", "Enable preemption").run(cmd::vrrp_preempt)),
+            ),
+            CNode::lit("channel-group", "EtherChannel/aggregation group").kid(
+                CNode::param(ParamKind::Number, "group", "Channel group number, 1-128")
+                    .run(cmd::lag_bind_ios)
+                    .kid(
+                        CNode::lit("mode", "EtherChannel mode").kid(
+                            CNode::param(ParamKind::Word, "mode", "active | passive | on")
+                                .run(cmd::lag_bind_ios),
+                        ),
+                    ),
+            ),
             CNode::lit("no", "Negate a command or set its defaults")
                 .kid(CNode::lit("shutdown", "Undo shutdown of the interface").run(h_no_shutdown))
                 .kid(
                     CNode::lit("ip", "IP information").kid(
                         CNode::lit("address", "Remove the IP address").run(cmd::no_ip_address),
                     ),
+                )
+                .kid(
+                    CNode::lit("channel-group", "Leave the EtherChannel group")
+                        .run(cmd::lag_unbind),
                 ),
             CNode::lit("shutdown", "Shut down the interface").run(h_shutdown),
             CNode::lit("exit", "Exit from interface configuration mode").run(h_exit),
@@ -379,5 +552,52 @@ pub fn build() -> Trees {
             CNode::lit("exit", "Exit from DHCP pool configuration mode").run(h_exit),
         ],
         acl: vec![CNode::lit("exit", "Exit from ACL configuration mode").run(h_exit)],
+        line: vec![
+            CNode::lit("login", "Enable login authentication")
+                .run(cmd::mgmt_login_local)
+                .kid(CNode::lit("local", "Use the local user database").run(cmd::mgmt_login_local)),
+            CNode::lit("transport", "Line transport settings").kid(
+                CNode::lit("input", "Allowed inbound protocols").kid(
+                    CNode::param(ParamKind::WordList, "protos", "ssh | telnet | all | none")
+                        .run(cmd::mgmt_transport),
+                ),
+            ),
+            CNode::lit("exit", "Exit from line configuration mode").run(h_exit),
+        ],
+        aaa: vec![CNode::lit("exit", "Exit from AAA configuration mode").run(h_exit)],
+        mst: vec![
+            CNode::lit("instance", "Map VLANs to an MST instance").kid(
+                CNode::param(ParamKind::Number, "id", "MST instance, 1-4094").kid(
+                    CNode::lit("vlan", "VLAN list").kid(
+                        CNode::param(ParamKind::VlanList, "vlans", "VLAN list, e.g. 10,20-24")
+                            .run(cmd::stp_mst_instance_vlan),
+                    ),
+                ),
+            ),
+            CNode::lit("name", "Region name")
+                .kid(CNode::param(ParamKind::Word, "name", "Region name").run(cmd::stp_mst_noop)),
+            CNode::lit("revision", "Region revision").kid(
+                CNode::param(ParamKind::Number, "rev", "Revision, 0-65535").run(cmd::stp_mst_noop),
+            ),
+            CNode::lit("exit", "Exit from MST configuration mode").run(h_exit),
+        ],
+        ospf: vec![
+            CNode::lit("network", "Enable OSPF on a network").kid(
+                CNode::param(ParamKind::Ipv4, "net", "Network address").kid(
+                    CNode::param(ParamKind::Wildcard, "wildcard", "Wildcard bits").kid(
+                        CNode::lit("area", "OSPF area").kid(
+                            CNode::param(ParamKind::Number, "area", "Area ID")
+                                .run(cmd::ospf_network),
+                        ),
+                    ),
+                ),
+            ),
+            CNode::lit("exit", "Exit from router configuration mode").run(h_exit),
+            CNode::lit("end", "Exit to privileged mode").run(h_end),
+        ],
+        ospf_area: vec![
+            CNode::lit("exit", "Exit from router configuration mode").run(h_exit),
+            CNode::lit("end", "Exit to privileged mode").run(h_end),
+        ],
     }
 }

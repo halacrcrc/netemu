@@ -8,17 +8,32 @@ use serde::{Deserialize, Serialize};
 pub const MAC_LEN: usize = 6;
 pub type Mac = [u8; MAC_LEN];
 pub type Ipv4Addr = u32;
+pub type Ipv6Addr = [u8; 16];
 
 pub const BROADCAST_MAC: Mac = [0xff; MAC_LEN];
 pub const ZERO_MAC: Mac = [0x00; MAC_LEN];
 /// 802.1D 网桥组组播地址（STP BPDU 目的 MAC）。
 pub const STP_MULTICAST_MAC: Mac = [0x01, 0x80, 0xc2, 0x00, 0x00, 0x00];
+/// 慢协议组播地址（LACPDU 目的 MAC）。
+pub const SLOW_PROTOCOLS_MAC: Mac = [0x01, 0x80, 0xc2, 0x00, 0x00, 0x02];
 
 pub const ETHERTYPE_IPV4: u16 = 0x0800;
 pub const ETHERTYPE_ARP: u16 = 0x0806;
 /// BPDU 在本模拟器中的标记值（真实 BPDU 走 802.3+LLC DSAP 0x42，
 /// 我们的帧模型用 ethertype 承载类型标记，抓包视图据此解码）。
 pub const ETHERTYPE_BPDU: u16 = 0x0042;
+/// LACP（慢协议）ethertype。
+pub const ETHERTYPE_LACP: u16 = 0x8809;
+/// OSPF 在本模拟器中的类型标记（真实 OSPF 为 IP proto 89）。
+pub const ETHERTYPE_OSPF: u16 = 0x0089;
+/// OSPF 组播目的 MAC（224.0.0.5 → 01:00:5e:00:00:05）。
+pub const OSPF_MULTICAST_MAC: Mac = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x05];
+/// VRRP 在本模拟器中的类型标记（真实为 IP proto 112）。
+pub const ETHERTYPE_VRRP: u16 = 0x0070;
+/// VRRP 组播目的 MAC（224.0.0.18 → 01:00:5e:00:00:12）。
+pub const VRRP_MULTICAST_MAC: Mac = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x12];
+/// IPv6 ethertype。
+pub const ETHERTYPE_IPV6: u16 = 0x86DD;
 
 pub const DEFAULT_TTL: u8 = 64;
 
@@ -195,7 +210,7 @@ pub struct DhcpPacket {
     pub requested_ip: Ipv4Addr,
 }
 
-/// 配置 BPDU（802.1D 简化：不含 TCN/拓扑变更标志）。
+/// 配置 BPDU（802.1D 简化：不含 TCN/拓扑变更标志；MSTP 实例号 0 = CIST）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BpduPacket {
     /// 公告的根桥
@@ -206,6 +221,9 @@ pub struct BpduPacket {
     pub sender: BridgeId,
     /// 发送端口（内部端口号）
     pub port: u32,
+    /// MSTP 实例号（0 = CIST）
+    #[serde(default)]
+    pub instance: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +233,224 @@ pub enum L3 {
     Bpdu(BpduPacket),
     /// DHCP（UDP 67/68 的简化承载）
     Dhcp(DhcpPacket),
+    /// LACP 链路聚合控制协议
+    Lacp(LacpPdu),
+    /// OSPF（简化：Hello + 单条 Router-LSA 的 LSU）
+    Ospf(OspfPacket),
+    /// VRRP 通告
+    Vrrp(VrrpPacket),
+    /// IPv6（含 ICMPv6/NDP）
+    Ipv6(Ipv6Packet),
+}
+
+/// VRRP 通告（简化字段）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VrrpPacket {
+    pub vrid: u8,
+    pub priority: u8,
+    pub vip: Ipv4Addr,
+    /// 发送接口 IP（决定竞选平局）
+    pub master_ip: Ipv4Addr,
+}
+
+/// ICMPv6 / NDP 报文（简化）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Ipv6Icmp {
+    EchoRequest { id: u16, seq: u16 },
+    EchoReply { id: u16, seq: u16 },
+    NeighborSolicitation { target: Ipv6Addr },
+    NeighborAdvertisement { target: Ipv6Addr },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ipv6Packet {
+    pub src: Ipv6Addr,
+    pub dst: Ipv6Addr,
+    pub hop_limit: u8,
+    pub icmp: Ipv6Icmp,
+}
+
+/// IPv6 文本表示（最长零压缩）。
+pub fn ipv6_str(a: &Ipv6Addr) -> String {
+    let groups: Vec<u16> = (0..8)
+        .map(|i| ((a[i * 2] as u16) << 8) | a[i * 2 + 1] as u16)
+        .collect();
+    let mut best = (0usize, 0usize);
+    let mut cur: Option<usize> = None;
+    for (i, g) in groups.iter().enumerate() {
+        if *g == 0 {
+            cur.get_or_insert(i);
+        } else if let Some(s) = cur.take() {
+            if i - s > best.1 - best.0 {
+                best = (s, i);
+            }
+        }
+    }
+    if let Some(s) = cur {
+        if 8 - s > best.1 - best.0 {
+            best = (s, 8);
+        }
+    }
+    let hex = |gs: &[u16]| {
+        gs.iter()
+            .map(|g| format!("{:x}", g))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    if best.1 - best.0 >= 2 {
+        format!("{}::{}", hex(&groups[..best.0]), hex(&groups[best.1..]))
+    } else {
+        hex(&groups)
+    }
+}
+
+/// 解析 IPv6（支持 `::` 压缩）。
+pub fn ipv6_from_str(s: &str) -> Option<Ipv6Addr> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let parse_side = |x: &str| -> Option<Vec<u16>> {
+        if x.is_empty() {
+            return Some(vec![]);
+        }
+        x.split(':')
+            .map(|p| {
+                if p.is_empty() || p.len() > 4 {
+                    None
+                } else {
+                    u16::from_str_radix(p, 16).ok()
+                }
+            })
+            .collect()
+    };
+    let (head, tail, compressed) = match s.split_once("::") {
+        Some((h, t)) => (h, t, true),
+        None => (s, "", false),
+    };
+    let h = parse_side(head)?;
+    let t = parse_side(tail)?;
+    let total = h.len() + t.len();
+    if total > 8 {
+        return None;
+    }
+    if !compressed && total != 8 {
+        return None;
+    }
+    if compressed && total == 8 {
+        return None;
+    }
+    let mut groups: Vec<u16> = h;
+    groups.extend(std::iter::repeat_n(0u16, 8 - total));
+    groups.extend(t);
+    let mut out = [0u8; 16];
+    for (i, g) in groups.iter().enumerate() {
+        out[i * 2] = (g >> 8) as u8;
+        out[i * 2 + 1] = *g as u8;
+    }
+    Some(out)
+}
+
+/// 取地址在指定前缀下的网络地址。
+pub fn ipv6_net_addr(addr: &Ipv6Addr, len: u8) -> Ipv6Addr {
+    let mut out = *addr;
+    let full = (len as usize) / 8;
+    let rem = (len as usize) % 8;
+    if rem != 0 && full < 16 {
+        out[full] &= 0xffu8 << (8 - rem);
+    }
+    let start = full + usize::from(rem != 0);
+    for b in out.iter_mut().skip(start) {
+        *b = 0;
+    }
+    out
+}
+
+/// IPv6 前缀比较（按位）。
+pub fn ipv6_in_prefix(addr: &Ipv6Addr, net: &Ipv6Addr, len: u8) -> bool {
+    let full = (len as usize) / 8;
+    let rem = (len as usize) % 8;
+    if addr[..full] != net[..full] {
+        return false;
+    }
+    if rem == 0 {
+        return true;
+    }
+    let mask = 0xffu8 << (8 - rem);
+    (addr[full] & mask) == (net[full] & mask)
+}
+
+/// IPv6 地址对应的 solicited-node 组播 MAC（33:33:ff:xx:xx:xx）。
+pub fn ipv6_solicited_mac(addr: &Ipv6Addr) -> Mac {
+    [0x33, 0x33, 0xff, addr[13], addr[14], addr[15]]
+}
+
+/// IPv6 地址对应的 solicited-node 组播地址（ff02::1:ffxx:xxxx）。
+pub fn ipv6_solicited_addr(addr: &Ipv6Addr) -> Ipv6Addr {
+    let mut m = [0u8; 16];
+    m[0] = 0xff;
+    m[1] = 0x02;
+    m[11] = 0x01;
+    m[12] = 0xff;
+    m[13] = addr[13];
+    m[14] = addr[14];
+    m[15] = addr[15];
+    m
+}
+
+/// OSPF 链路（Router-LSA 中的网段）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OspfLink {
+    pub net: Ipv4Addr,
+    pub len: u8,
+}
+
+/// Router-LSA（固定容量，保持 Copy 语义）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OspfLsa {
+    pub router_id: Ipv4Addr,
+    pub links: [Option<OspfLink>; 8],
+    pub link_count: u8,
+    pub neighbors: [Ipv4Addr; 8],
+    pub neighbor_count: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OspfKind {
+    Hello,
+    /// 泛洪一条 Router-LSA
+    Lsu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OspfPacket {
+    pub kind: OspfKind,
+    pub area: u32,
+    pub router_id: Ipv4Addr,
+    /// 发送接口 IP（用于计算下一跳）
+    pub src_ip: Ipv4Addr,
+    pub lsa: OspfLsa,
+}
+
+/// LACPDU 状态位。
+pub const LACP_STATE_ACTIVITY: u8 = 0x01;
+pub const LACP_STATE_TIMEOUT: u8 = 0x02;
+pub const LACP_STATE_AGGREGATION: u8 = 0x04;
+pub const LACP_STATE_SYNCHRONIZATION: u8 = 0x08;
+pub const LACP_STATE_COLLECTING: u8 = 0x10;
+pub const LACP_STATE_DISTRIBUTING: u8 = 0x20;
+
+/// LACPDU（IEEE 802.3ad 的简化字段：只保留聚合协商所需信息）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LacpPdu {
+    pub actor_system: Mac,
+    pub actor_key: u16,
+    pub actor_port: u16,
+    pub actor_state: u8,
+    pub partner_system: Mac,
+    pub partner_key: u16,
+    pub partner_port: u16,
+    pub partner_state: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +471,10 @@ impl EthernetFrame {
             L3::Ipv4(_) => 20 + ICMP_DATA_SIZE,
             L3::Bpdu(_) => 35,           // 802.3+LLC 头 + 配置 BPDU 载荷近似
             L3::Dhcp(_) => 20 + 8 + 272, // IP + UDP + DHCP 载荷近似
+            L3::Lacp(_) => 110,          // LACPDU 定长载荷近似
+            L3::Ospf(_) => 120,          // OSPF 字段近似
+            L3::Vrrp(_) => 40,           // VRRP 通告近似
+            L3::Ipv6(_) => 40 + 8 + 16,  // IPv6 头 + ICMPv6 近似
         };
         14 + payload + 4 + if self.vlan.is_some() { 4 } else { 0 }
     }
@@ -266,5 +506,43 @@ mod tests {
         assert_eq!(mac_from_str(&mac_str(&mac)), Some(mac));
         assert_eq!(mac_from_str("02-00-00-00-01-02"), Some(mac));
         assert!(mac_from_str("02:00:00").is_none());
+    }
+
+    #[test]
+    fn ipv6_roundtrip() {
+        for s in [
+            "2001:db8::1",
+            "::1",
+            "::",
+            "fe80::1",
+            "2001:db8:1:2:3:4:5:6",
+        ] {
+            let a = ipv6_from_str(s).unwrap_or_else(|| panic!("parse {}", s));
+            let t = ipv6_str(&a);
+            assert_eq!(ipv6_from_str(&t), Some(a), "{} -> {}", s, t);
+        }
+        assert!(ipv6_from_str("2001:db8::1::2").is_none());
+        assert!(ipv6_from_str("2001:db8:1:2:3:4:5").is_none());
+        assert_eq!(
+            ipv6_str(&ipv6_from_str("2001:db8::").unwrap()),
+            "2001:db8::"
+        );
+        assert!(ipv6_in_prefix(
+            &ipv6_from_str("2001:db8:1::5").unwrap(),
+            &ipv6_from_str("2001:db8:1::").unwrap(),
+            64
+        ));
+        assert!(!ipv6_in_prefix(
+            &ipv6_from_str("2001:db8:2::5").unwrap(),
+            &ipv6_from_str("2001:db8:1::").unwrap(),
+            64
+        ));
+        assert_eq!(
+            ipv6_str(&ipv6_net_addr(
+                &ipv6_from_str("2001:db8:1:2::9").unwrap(),
+                64
+            )),
+            "2001:db8:1:2::"
+        );
     }
 }

@@ -176,6 +176,31 @@ impl Sim {
         Ok(())
     }
 
+    /// 设置主机 IPv6 地址/前缀/网关（空串表示清除）。
+    pub fn set_host_v6(&mut self, dev: u32, ip: &str, prefix: u8, gw: &str) -> Result<(), JsValue> {
+        let Some(d) = self.eng.net.device(dev) else {
+            return Err(JsValue::from_str("device not found"));
+        };
+        if d.kind != DeviceKind::Host {
+            return Err(JsValue::from_str("not a host"));
+        }
+        let ip = if ip.trim().is_empty() {
+            None
+        } else {
+            Some(sim_packets::ipv6_from_str(ip).ok_or_else(|| JsValue::from_str("invalid ipv6"))?)
+        };
+        let gw = if gw.trim().is_empty() {
+            None
+        } else {
+            Some(
+                sim_packets::ipv6_from_str(gw)
+                    .ok_or_else(|| JsValue::from_str("invalid ipv6 gateway"))?,
+            )
+        };
+        self.eng.net.set_host_v6(dev, ip, prefix, gw);
+        Ok(())
+    }
+
     /// 执行一行 CLI 并驱动引擎至静默，返回输出文本。
     pub fn exec_command(&mut self, dev: u32, line: &str) -> Result<String, JsValue> {
         if self.eng.net.device(dev).is_none() {
@@ -247,6 +272,7 @@ impl Sim {
             .net
             .apply_summary(&summary)
             .map_err(|e| JsValue::from_str(&e))?;
+        self.eng.after_load();
         // 重建自动命名计数（从现有名字推断）
         for d in &self.eng.net.devices {
             let base = match d.kind {
@@ -415,6 +441,11 @@ impl Sim {
             "If" => cli_engine::Mode::If,
             "Pool" => cli_engine::Mode::Pool,
             "Acl" => cli_engine::Mode::Acl,
+            "Line" => cli_engine::Mode::Line,
+            "Aaa" => cli_engine::Mode::Aaa,
+            "Mst" => cli_engine::Mode::Mst,
+            "Ospf" => cli_engine::Mode::Ospf,
+            "OspfArea" => cli_engine::Mode::OspfArea,
             _ => return false,
         };
         let trees = cli_dialects::trees(d);
@@ -472,8 +503,113 @@ impl Sim {
         Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
     }
 
-    // ---------- 抓包 ----------
+    /// 检查端口是否属于指定聚合组。
+    pub fn check_lag_member(&mut self, dev: u32, group: u16, port: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::LagMember {
+                    dev,
+                    group,
+                    port: port as usize,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
 
+    /// 检查聚合组已选中的成员数。
+    pub fn check_lag_selected(
+        &mut self,
+        dev: u32,
+        group: u16,
+        count: u32,
+    ) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::LagSelected {
+                    dev,
+                    group,
+                    count: count as usize,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查本地用户存在。
+    pub fn check_mgmt_user(&mut self, dev: u32, name: &str) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::MgmtUser {
+                    dev,
+                    name: name.to_string(),
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 VTY 接入协议：all | ssh | telnet | none。
+    pub fn check_vty_transport(&mut self, dev: u32, transport: &str) -> Result<String, JsValue> {
+        use sim_core::device::VtyTransport;
+        let t = match transport.to_lowercase().as_str() {
+            "all" => VtyTransport::All,
+            "ssh" => VtyTransport::Ssh,
+            "telnet" => VtyTransport::Telnet,
+            "none" => VtyTransport::None,
+            _ => return Err(JsValue::from_str("unknown transport")),
+        };
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::VtyTransport { dev, transport: t },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查远程登录尝试（proto: telnet | ssh）。
+    pub fn check_login(
+        &mut self,
+        from: u32,
+        to: &str,
+        proto: &str,
+        user: &str,
+        pass: &str,
+        expect: bool,
+    ) -> Result<String, JsValue> {
+        use sim_core::device::MgmtProto;
+        let to = ipv4_from_str(to).ok_or_else(|| JsValue::from_str("invalid ip"))?;
+        let proto = match proto.to_lowercase().as_str() {
+            "telnet" => MgmtProto::Telnet,
+            "ssh" => MgmtProto::Ssh,
+            _ => return Err(JsValue::from_str("unknown protocol")),
+        };
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::LoginAttempt {
+                    from,
+                    to,
+                    proto,
+                    user: user.to_string(),
+                    pass: pass.to_string(),
+                    expect,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    // ---------- 抓包 ----------
     /// 开关某条链路的抓包。
     pub fn set_capture(&mut self, link: u32, on: bool) -> Result<(), JsValue> {
         if !self.eng.net.set_capture(link, on) {
@@ -543,6 +679,53 @@ impl Sim {
                             sim_packets::mac_str(&d.client_mac),
                             sim_packets::ipv4_str(d.server_ip),
                             sim_packets::ipv4_str(d.offered_ip)
+                        ),
+                    ),
+                    L3::Lacp(l) => (
+                        "LACP",
+                        format!(
+                            "actor 系统={} key={} 端口={} 状态=0x{:02x}",
+                            sim_packets::mac_str(&l.actor_system),
+                            l.actor_key,
+                            l.actor_port,
+                            l.actor_state
+                        ),
+                    ),
+                    L3::Ospf(o) => (
+                        if matches!(o.kind, sim_packets::OspfKind::Hello) {
+                            "OSPF Hello"
+                        } else {
+                            "OSPF LSU"
+                        },
+                        format!(
+                            "router-id={} area={} 网段={} 邻居={}",
+                            sim_packets::ipv4_str(o.router_id),
+                            o.area,
+                            o.lsa.link_count,
+                            o.lsa.neighbor_count
+                        ),
+                    ),
+                    L3::Vrrp(v) => (
+                        "VRRP",
+                        format!(
+                            "vrid={} priority={} vip={}",
+                            v.vrid,
+                            v.priority,
+                            sim_packets::ipv4_str(v.vip)
+                        ),
+                    ),
+                    L3::Ipv6(p) => (
+                        match p.icmp {
+                            sim_packets::Ipv6Icmp::EchoRequest { .. } => "ICMPv6 Echo Request",
+                            sim_packets::Ipv6Icmp::EchoReply { .. } => "ICMPv6 Echo Reply",
+                            sim_packets::Ipv6Icmp::NeighborSolicitation { .. } => "NDP NS",
+                            sim_packets::Ipv6Icmp::NeighborAdvertisement { .. } => "NDP NA",
+                        },
+                        format!(
+                            "{} → {} hop={}",
+                            sim_packets::ipv6_str(&p.src),
+                            sim_packets::ipv6_str(&p.dst),
+                            p.hop_limit
                         ),
                     ),
                 };
