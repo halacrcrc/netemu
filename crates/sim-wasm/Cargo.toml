@@ -1,0 +1,17 @@
+[package]
+name = "sim-wasm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sim-packets.workspace = true
+sim-core.workspace = true
+cli-engine.workspace = true
+cli-dialects.workspace = true
+lab-checks.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true

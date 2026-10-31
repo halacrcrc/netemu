@@ -1,0 +1,11 @@
+[package]
+name = "sim-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim-packets.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

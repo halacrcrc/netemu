@@ -1,0 +1,188 @@
+/* ============================================================
+   网工模拟器 · 双主题
+   - 暗「机房夜航」：深蓝黑底、设备灯色（默认）
+   - 亮「工程图纸」：暖纸白底、石墨墨色、钢笔墨蓝强调
+   所有组件只允许消费以下 CSS 变量，不允许硬编码颜色。
+   ============================================================ */
+
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0b1020;
+  --bg-panel: #111832;
+  --bg-panel-2: #0e1428;
+  --border: #1f2a4a;
+  --border-strong: #2c3a63;
+  --text: #dbe4ff;
+  --text-dim: #8794bd;
+
+  --accent: #38bdf8;
+  --accent-2: #f59e0b;
+  --good: #34d399;
+  --bad: #f87171;
+
+  --router: #f59e0b;
+  --switch: #38bdf8;
+  --host: #a3e635;
+
+  --btn-hover-bg: #16204a;
+  --primary-bg: #0c4a6e;
+  --primary-border: #0284c7;
+  --primary-text: #e0f2fe;
+
+  --node-stroke: #2a3a6a;
+  --grid-line: #141d3d;
+  --link-down: #5b688f;
+  --dot-off: #5b688f;
+
+  --term-bg: #0b1020;
+  --term-fg: #dbe4ff;
+  --term-cursor: #38bdf8;
+  --term-selection: #264f78;
+
+  --header-border: 1px solid var(--border);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  /* 工程图纸：#f2f1ee 纸白 + 石墨墨 + 钢笔墨蓝 */
+  --bg: #f2f1ee;
+  --bg-panel: #f9f8f5;
+  --bg-panel-2: #e9e7e1;
+  --border: #d9d6cd;
+  --border-strong: #c4c0b3;
+  --text: #33322e;
+  --text-dim: #75726a;
+
+  --accent: #1e5fbf;
+  --accent-2: #b45309;
+  --good: #2f7d46;
+  --bad: #c0392b;
+
+  --router: #b45309;
+  --switch: #0e7490;
+  --host: #5c7c1e;
+
+  --btn-hover-bg: #eae8e1;
+  --primary-bg: #1e5fbf;
+  --primary-border: #174a99;
+  --primary-text: #f5f8ff;
+
+  --node-stroke: #c4c0b3;
+  --grid-line: #e3e1d9;
+  --link-down: #a8a49a;
+  --dot-off: #a8a49a;
+
+  --term-bg: #f7f6f2;
+  --term-fg: #33322e;
+  --term-cursor: #1e5fbf;
+  --term-selection: #cddcf5;
+
+  /* 图纸标题栏式的双细线 */
+  --header-border: 3px double var(--border-strong);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    'Segoe UI',
+    'Microsoft YaHei',
+    system-ui,
+    sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+#app {
+  height: 100vh;
+}
+
+button {
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 13px;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+
+button:hover {
+  border-color: var(--accent);
+  background: var(--btn-hover-bg);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button.primary {
+  background: var(--primary-bg);
+  border-color: var(--primary-border);
+  color: var(--primary-text);
+}
+
+button.primary:hover {
+  border-color: var(--accent);
+}
+
+button.danger:hover {
+  border-color: var(--bad);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+input,
+select {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.panel h3 {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  letter-spacing: 0.05em;
+}
+
+.mono {
+  font-family: Consolas, 'Cascadia Mono', monospace;
+}

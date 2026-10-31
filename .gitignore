@@ -1,0 +1,12 @@
+# Rust
+/target/
+
+# 前端
+node_modules/
+web/dist/
+web/src/wasm/
+
+# 编辑器
+.vscode/
+.idea/
+.zcode/

@@ -1,0 +1,191 @@
+<script lang="ts">
+  // 课程视图：左侧课程列表 + 右侧阅读器 + 三厂商命令对照表（运行时验证）。
+  import { LESSONS } from '../lib/course';
+  import { CMDMAP, type CmdRow } from '../content/cmdmap';
+  import { renderMarkdown } from '../lib/md';
+  import { getSim } from '../lib/sim';
+  import { app } from '../lib/store.svelte';
+  import { LABS } from '../lib/labs';
+
+  let currentId = $state(LESSONS[0]?.id ?? '');
+  const current = $derived(LESSONS.find((l) => l.id === currentId) ?? LESSONS[0]);
+  const html = $derived(current ? renderMarkdown(current.md) : '');
+
+  // 对照表按当前课程主题过滤
+  const rows = $derived(
+    current ? CMDMAP.filter((r) => r.topic === current.topic) : []
+  );
+
+  // 运行时验证：命令能否被对应方言解析（缓存结果）
+  const verifyCache = new Map<string, boolean>();
+  function verify(row: CmdRow, vendor: 'ios' | 'vrp' | 'comware'): boolean {
+    const cmd = row[vendor];
+    const mode = vendor === 'ios' ? (row.modeIos ?? row.mode) : vendor === 'vrp' ? (row.modeVrp ?? row.mode) : (row.modeComware ?? row.mode);
+    const key = `${mode}|${cmd}`;
+    if (!verifyCache.has(key)) {
+      try {
+        verifyCache.set(key, getSim().verify_command(dialectOf(vendor), mode, cmd));
+      } catch {
+        verifyCache.set(key, false);
+      }
+    }
+    return verifyCache.get(key)!;
+  }
+
+  function dialectOf(v: 'ios' | 'vrp' | 'comware'): string {
+    return v === 'ios' ? 'Ios' : v === 'vrp' ? 'Vrp' : 'Comware';
+  }
+
+  const VENDOR_NAMES = { ios: '思科 IOS', vrp: '华为 VRP', comware: '华三 Comware' } as const;
+
+  function openLab() {
+    if (!current?.lab) return;
+    app.view = 'lab';
+    // 实验加载交给 LeftPanel：这里用自定义事件简化
+    window.dispatchEvent(new CustomEvent('netemu:open-lab', { detail: current.lab }));
+  }
+</script>
+
+<div class="course-view">
+  <aside class="list panel">
+    <h3>课程目录</h3>
+    <div class="pad lessons">
+      {#each LESSONS as l (l.id)}
+        <button class="lesson" class:active={l.id === currentId} onclick={() => (currentId = l.id)}>
+          <span class="no">{String(l.order).padStart(2, '0')}</span>
+          {l.title}
+        </button>
+      {/each}
+    </div>
+  </aside>
+
+  <div class="reader">
+    {#if current}
+      <div class="panel lesson-card">
+        <div class="pad">
+          <h1 class="lesson-title">{current.title}</h1>
+          <div class="md">{@html html}</div>
+          {#if current.lab}
+            {@const lab = LABS.find((x) => x.id === current.lab)}
+            <button class="primary lab-open" onclick={openLab}>
+              ▶ 打开对应实验{lab ? `：${lab.title}` : ''}
+            </button>
+          {/if}
+        </div>
+      </div>
+
+      {#if rows.length}
+        <div class="panel">
+          <h3>三厂商命令对照（本课相关 · ✓ = 与模拟器行为已验证一致）</h3>
+          <div class="pad table-wrap">
+            <table class="cmd-table mono">
+              <thead>
+                <tr>
+                  <th>功能</th>
+                  <th>思科 IOS</th>
+                  <th>华为 VRP</th>
+                  <th>华三 Comware</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each rows as row (row.feature)}
+                  <tr>
+                    <td class="feat">{row.feature}</td>
+                    <td class="ok">{verify(row, 'ios') ? '✓ ' : '⚠ '}{row.ios}</td>
+                    <td class="ok">{verify(row, 'vrp') ? '✓ ' : '⚠ '}{row.vrp}</td>
+                    <td class="ok">{verify(row, 'comware') ? '✓ ' : '⚠ '}{row.comware}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <div class="hint">对照表数据即模拟器的命令树——每条都经过运行时解析验证；本表可作为速查手册使用。</div>
+          </div>
+        </div>
+      {/if}
+    {/if}
+  </div>
+</div>
+
+<style>
+  .course-view {
+    height: 100%;
+    display: flex;
+    min-height: 0;
+  }
+  .list {
+    width: 240px;
+    min-width: 200px;
+    margin: 12px 0 12px 12px;
+    align-self: flex-start;
+    max-height: calc(100% - 24px);
+    overflow-y: auto;
+  }
+  .lessons {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .lesson {
+    text-align: left;
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .lesson.active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .lesson .no {
+    font-family: Consolas, monospace;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .reader {
+    flex: 1;
+    min-width: 0;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    max-height: 100%;
+  }
+  .lesson-title {
+    margin: 0 0 8px;
+    font-size: 22px;
+  }
+  .lab-open {
+    margin-top: 14px;
+  }
+  .table-wrap {
+    overflow-x: auto;
+  }
+  .cmd-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .cmd-table th,
+  .cmd-table td {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .cmd-table th {
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .cmd-table .feat {
+    color: var(--text);
+    font-family: inherit;
+  }
+  .cmd-table td.ok {
+    color: var(--text);
+  }
+  .hint {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-top: 8px;
+  }
+</style>

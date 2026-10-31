@@ -1,0 +1,9 @@
+[package]
+name = "cli-dialects"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim-packets.workspace = true
+sim-core.workspace = true
+cli-engine.workspace = true

@@ -1,0 +1,8 @@
+[package]
+name = "cli-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim-packets.workspace = true
+sim-core.workspace = true
