@@ -425,6 +425,70 @@ impl Sim {
         Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
     }
 
+    /// 检查 VRRP 组是否为 Master。
+    pub fn check_vrrp_master(&mut self, dev: u32, vrid: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::VrrpMaster {
+                    dev,
+                    vrid: vrid as u8,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 OSPF 邻居数量。
+    pub fn check_ospf_neighbors(&mut self, dev: u32, min: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::OspfNeighbors {
+                    dev,
+                    min: min as usize,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查静态 LSP 是否存在（MPLS 实验判分）。
+    pub fn check_mpls_lsp(&mut self, dev: u32, name: &str) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::MplsLsp {
+                    dev,
+                    name: name.to_string(),
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查路由不存在（用于策略过滤后的负向断言）。
+    pub fn check_route_absent(&mut self, dev: u32, dst: &str) -> Result<String, JsValue> {
+        let (dst, len) = lab_checks::parse_net(dst)
+            .ok_or_else(|| JsValue::from_str("invalid net, expect a.b.c.d/len"))?;
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::RouteExists {
+                    dev,
+                    dst,
+                    len,
+                    src: None,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": !r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
     /// 校验一条命令在指定方言/模式下能否被解析（对照表与模拟器一致性的运行时验证）。
     /// dialect: Ios | Vrp | Comware；mode: Exec | Priv | Config | If | Pool | Acl
     pub fn verify_command(&self, dialect: &str, mode: &str, line: &str) -> bool {
@@ -446,6 +510,9 @@ impl Sim {
             "Mst" => cli_engine::Mode::Mst,
             "Ospf" => cli_engine::Mode::Ospf,
             "OspfArea" => cli_engine::Mode::OspfArea,
+            "Bgp" => cli_engine::Mode::Bgp,
+            "Isis" => cli_engine::Mode::Isis,
+            "RoutePolicy" => cli_engine::Mode::RoutePolicy,
             _ => return false,
         };
         let trees = cli_dialects::trees(d);
@@ -726,6 +793,45 @@ impl Sim {
                             sim_packets::ipv6_str(&p.src),
                             sim_packets::ipv6_str(&p.dst),
                             p.hop_limit
+                        ),
+                    ),
+                    L3::Bgp(b) => (
+                        match b.kind {
+                            sim_packets::BgpKind::Open => "BGP Open",
+                            sim_packets::BgpKind::Keepalive => "BGP Keepalive",
+                            sim_packets::BgpKind::Update => "BGP Update",
+                        },
+                        format!(
+                            "AS {} src={} 条目={}",
+                            b.asn,
+                            sim_packets::ipv4_str(b.src_ip),
+                            b.count
+                        ),
+                    ),
+                    L3::Isis(i) => (
+                        match i.kind {
+                            sim_packets::IsisKind::Hello => "IS-IS Hello",
+                            sim_packets::IsisKind::Lsp => "IS-IS LSP",
+                        },
+                        format!(
+                            "sysid={} 网段={} 邻居={}",
+                            i.system_id
+                                .iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<Vec<_>>()
+                                .join(""),
+                            i.lsa.link_count,
+                            i.lsa.neighbor_count
+                        ),
+                    ),
+                    L3::Mpls(m) => (
+                        "MPLS",
+                        format!(
+                            "label={} depth={} inner {} → {}",
+                            m.labels[0],
+                            m.depth,
+                            sim_packets::ipv4_str(m.ip.src),
+                            sim_packets::ipv4_str(m.ip.dst)
                         ),
                     ),
                 };

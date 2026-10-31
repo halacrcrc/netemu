@@ -33,6 +33,21 @@ pub struct PortSummary {
     pub ipv6: Option<String>,
     #[serde(default)]
     pub prefix6: u8,
+    /// 是否参与 IS-IS
+    #[serde(default)]
+    pub isis_enable: bool,
+    /// 所属 VRF 名称
+    #[serde(default)]
+    pub vrf: Option<String>,
+    /// DHCP Snooping 信任端口 / 端口安全 / QoS
+    #[serde(default)]
+    pub dhcp_trust: bool,
+    #[serde(default)]
+    pub port_security: Option<PortSecurity>,
+    #[serde(default)]
+    pub broadcast_limit_pps: Option<u32>,
+    #[serde(default)]
+    pub rate_limit_kbps: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,6 +79,9 @@ pub struct DevSummary {
     /// 仅交换机：链路聚合组
     #[serde(default)]
     pub lags: Vec<LagSummary>,
+    /// 仅交换机：DHCP Snooping 全局开关
+    #[serde(default)]
+    pub dhcp_snooping: bool,
     /// 管理面（本地用户 / VTY）
     #[serde(default)]
     pub mgmt: MgmtState,
@@ -73,6 +91,28 @@ pub struct DevSummary {
     /// VRRP 组配置
     #[serde(default)]
     pub vrrp: Vec<VrrpSummary>,
+    /// BGP 配置
+    #[serde(default)]
+    pub bgp_asn: Option<u32>,
+    #[serde(default)]
+    pub bgp_neighbors: Vec<(String, u32)>,
+    #[serde(default)]
+    pub bgp_networks: Vec<(String, u8)>,
+    /// BGP 邻居策略绑定（邻居, import?, 策略名）
+    #[serde(default)]
+    pub bgp_peer_policies: Vec<(String, bool, String)>,
+    /// 路由策略
+    #[serde(default)]
+    pub route_policies: Vec<RoutePolicySummary>,
+    /// IS-IS NET
+    #[serde(default)]
+    pub isis_net: Option<String>,
+    /// VRF 表（名称 + 静态路由）
+    #[serde(default)]
+    pub vrfs: Vec<VrfSummary>,
+    /// MPLS 静态 LSP
+    #[serde(default)]
+    pub mpls_lsps: Vec<MplsLspSummary>,
     /// 主机 IPv6 网关
     #[serde(default)]
     pub gw6: Option<String>,
@@ -86,6 +126,40 @@ pub struct StaticRoute6Summary {
     pub dst: String,
     pub len: u8,
     pub nexthop: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VrfSummary {
+    pub name: String,
+    pub static_routes: Vec<StaticRouteSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutePolicySummary {
+    pub name: String,
+    pub nodes: Vec<RoutePolicyNodeSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutePolicyNodeSummary {
+    pub seq: u16,
+    pub permit: bool,
+    pub match_acl: Option<u32>,
+    pub set_local_pref: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MplsLspSummary {
+    pub name: String,
+    pub net: Option<String>,
+    pub len: Option<u8>,
+    pub in_label: Option<u32>,
+    pub out_label: Option<u32>,
+    pub nexthop: Option<String>,
+    #[serde(default)]
+    pub vrf: Option<String>,
+    #[serde(default)]
+    pub vpn_label: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +260,12 @@ impl Net {
                             lag: p.lag,
                             ipv6: p.ipv6.map(|a| sim_packets::ipv6_str(&a)),
                             prefix6: p.prefix6,
+                            dhcp_trust: p.dhcp_trust,
+                            port_security: p.port_security,
+                            broadcast_limit_pps: p.broadcast_limit_pps,
+                            rate_limit_kbps: p.rate_limit_kbps,
+                            isis_enable: p.isis_enable,
+                            vrf: d.vrf_name_of_port(p.idx),
                         })
                         .collect(),
                     gw: match &d.state {
@@ -285,6 +365,10 @@ impl Net {
                         }
                         _ => vec![],
                     },
+                    dhcp_snooping: match &d.state {
+                        DeviceState::Switch(sw) => sw.dhcp_snooping,
+                        _ => false,
+                    },
                     mgmt: d.mgmt.clone(),
                     ospf_networks: match &d.state {
                         DeviceState::Router(rs) => rs
@@ -304,6 +388,101 @@ impl Net {
                                 port: g.port,
                                 priority: g.priority,
                                 preempt: g.preempt,
+                            })
+                            .collect(),
+                        _ => vec![],
+                    },
+                    bgp_asn: match &d.state {
+                        DeviceState::Router(rs) => rs.bgp.as_ref().map(|b| b.asn),
+                        _ => None,
+                    },
+                    bgp_neighbors: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .bgp
+                            .as_ref()
+                            .map(|b| {
+                                b.neighbors
+                                    .iter()
+                                    .map(|(ip, asn)| (ipv4_str(*ip), *asn))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        _ => vec![],
+                    },
+                    bgp_networks: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .bgp
+                            .as_ref()
+                            .map(|b| {
+                                b.networks
+                                    .iter()
+                                    .map(|(net, len)| (ipv4_str(*net), *len))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        _ => vec![],
+                    },
+                    bgp_peer_policies: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .bgp
+                            .as_ref()
+                            .map(|b| {
+                                b.peer_policies
+                                    .iter()
+                                    .map(|p| (ipv4_str(p.neighbor), p.import, p.name.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        _ => vec![],
+                    },
+                    route_policies: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .route_policies
+                            .iter()
+                            .map(|rp| RoutePolicySummary {
+                                name: rp.name.clone(),
+                                nodes: rp
+                                    .nodes
+                                    .iter()
+                                    .map(|n| RoutePolicyNodeSummary {
+                                        seq: n.seq,
+                                        permit: n.permit,
+                                        match_acl: n.match_acl,
+                                        set_local_pref: n.set_local_pref,
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
+                        _ => vec![],
+                    },
+                    isis_net: match &d.state {
+                        DeviceState::Router(rs) => rs.isis.as_ref().map(|i| i.net.clone()),
+                        _ => None,
+                    },
+                    vrfs: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .vrfs
+                            .iter()
+                            .map(|v| VrfSummary {
+                                name: v.name.clone(),
+                                static_routes: static_summaries(&v.static_routes),
+                            })
+                            .collect(),
+                        _ => vec![],
+                    },
+                    mpls_lsps: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .mpls_lsps
+                            .iter()
+                            .map(|l| MplsLspSummary {
+                                name: l.name.clone(),
+                                net: l.net.map(|(n, _)| ipv4_str(n)),
+                                len: l.net.map(|(_, len)| len),
+                                in_label: l.in_label,
+                                out_label: l.out_label,
+                                nexthop: l.nexthop.map(ipv4_str),
+                                vrf: l.vrf.clone(),
+                                vpn_label: l.vpn_label,
                             })
                             .collect(),
                         _ => vec![],
@@ -366,6 +545,11 @@ impl Net {
                     p.acl_out = ps.acl_out;
                     p.lag = ps.lag;
                     p.prefix6 = ps.prefix6;
+                    p.dhcp_trust = ps.dhcp_trust;
+                    p.port_security = ps.port_security;
+                    p.broadcast_limit_pps = ps.broadcast_limit_pps;
+                    p.rate_limit_kbps = ps.rate_limit_kbps;
+                    p.isis_enable = ps.isis_enable;
                     if let Some(txt) = &ps.ipv6 {
                         p.ipv6 = sim_packets::ipv6_from_str(txt);
                     }
@@ -385,6 +569,13 @@ impl Net {
             }
             match &mut d.state {
                 DeviceState::Router(rs) => {
+                    for (i, vs) in ds.vrfs.iter().enumerate() {
+                        rs.vrfs.push(Vrf {
+                            id: (i + 1) as u16,
+                            name: vs.name.clone(),
+                            static_routes: vs.static_routes.iter().map(static_from).collect(),
+                        });
+                    }
                     for r in &ds.static_routes6 {
                         if let (Some(dst), Some(nh)) = (
                             sim_packets::ipv6_from_str(&r.dst),
@@ -400,6 +591,19 @@ impl Net {
                     }
                     for r in &ds.static_routes {
                         rs.static_routes.push(static_from(r));
+                    }
+                    for l in &ds.mpls_lsps {
+                        rs.mpls_lsps.push(StaticLsp {
+                            name: l.name.clone(),
+                            net: l.net.as_ref().and_then(|n| {
+                                l.len.map(|len| (ipv4_from_str(n).unwrap_or(0), len))
+                            }),
+                            in_label: l.in_label,
+                            out_label: l.out_label,
+                            nexthop: l.nexthop.as_ref().and_then(|n| ipv4_from_str(n)),
+                            vrf: l.vrf.clone(),
+                            vpn_label: l.vpn_label,
+                        });
                     }
                     for pool in &ds.dhcp_pools {
                         rs.dhcp_pools.push(DhcpPool {
@@ -427,6 +631,57 @@ impl Net {
                                 preempt: g.preempt,
                                 state: VrrpState::Init,
                                 last_advert_ns: 0,
+                            });
+                        }
+                    }
+                    if let Some(asn) = ds.bgp_asn {
+                        let mut bgp = BgpConfig {
+                            asn,
+                            neighbors: vec![],
+                            networks: vec![],
+                            peer_policies: vec![],
+                        };
+                        for (ip, ra) in &ds.bgp_neighbors {
+                            if let Some(ip) = ipv4_from_str(ip) {
+                                bgp.neighbors.push((ip, *ra));
+                            }
+                        }
+                        for (net, len) in &ds.bgp_networks {
+                            if let Some(net) = ipv4_from_str(net) {
+                                bgp.networks.push((net, *len));
+                            }
+                        }
+                        for (ip, import, name) in &ds.bgp_peer_policies {
+                            if let Some(ip) = ipv4_from_str(ip) {
+                                bgp.peer_policies.push(BgpPeerPolicy {
+                                    neighbor: ip,
+                                    import: *import,
+                                    name: name.clone(),
+                                });
+                            }
+                        }
+                        rs.bgp = Some(bgp);
+                    }
+                    for rp in &ds.route_policies {
+                        rs.route_policies.push(RoutePolicy {
+                            name: rp.name.clone(),
+                            nodes: rp
+                                .nodes
+                                .iter()
+                                .map(|n| RoutePolicyNode {
+                                    seq: n.seq,
+                                    permit: n.permit,
+                                    match_acl: n.match_acl,
+                                    set_local_pref: n.set_local_pref,
+                                })
+                                .collect(),
+                        });
+                    }
+                    if let Some(net) = &ds.isis_net {
+                        if let Some(sid) = parse_isis_net(net) {
+                            rs.isis = Some(IsisConfig {
+                                net: net.clone(),
+                                system_id: sid,
                             });
                         }
                     }
@@ -458,6 +713,7 @@ impl Net {
                     }
                 }
                 DeviceState::Switch(sw) => {
+                    sw.dhcp_snooping = ds.dhcp_snooping;
                     // 端口引用的 VLAN 需要登记进 VLAN 表
                     for ps in &ds.ports {
                         sw.ensure_vlan(ps.pvid);
@@ -484,6 +740,23 @@ impl Net {
                     }
                 }
                 _ => {}
+            }
+            // 端口 VRF 归属（摘要里按名称保存）
+            let vrf_ports: Vec<(usize, String)> = ds
+                .ports
+                .iter()
+                .filter_map(|p| p.vrf.clone().map(|n| (p.idx, n)))
+                .collect();
+            if let DeviceState::Router(rs) = &d.state {
+                let map: std::collections::HashMap<&str, u16> =
+                    rs.vrfs.iter().map(|v| (v.name.as_str(), v.id)).collect();
+                for (idx, name) in &vrf_ports {
+                    if let Some(id) = map.get(name.as_str()) {
+                        if let Some(p) = d.ports.get_mut(*idx) {
+                            p.vrf = Some(*id);
+                        }
+                    }
+                }
             }
             // 聚合组：模式来自摘要，成员以端口上的 lag 归属为准
             let lag_ports: Vec<(u16, usize)> = d

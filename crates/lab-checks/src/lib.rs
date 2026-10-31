@@ -72,6 +72,12 @@ pub enum CheckKind {
         pass: String,
         expect: bool,
     },
+    /// 检查设备上存在指定名称的静态 LSP。
+    MplsLsp { dev: DevId, name: String },
+    /// 检查 VRRP 组处于 Master。
+    VrrpMaster { dev: DevId, vrid: u8 },
+    /// 检查 OSPF 邻居数量不少于 min。
+    OspfNeighbors { dev: DevId, min: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +133,19 @@ fn run_one(eng: &mut Engine, c: &Check) -> CheckResult {
                         if r.dst == (*dst & sim_packets::mask_from_prefix(*len))
                             && r.len == *len
                             && src.is_none_or(|s| s == RouteSrc::Static)
+                        {
+                            found = true;
+                        }
+                    }
+                    for r in rs
+                        .ospf_routes
+                        .iter()
+                        .chain(rs.bgp_routes.iter())
+                        .chain(rs.isis_routes.iter())
+                    {
+                        if r.dst == (*dst & sim_packets::mask_from_prefix(*len))
+                            && r.len == *len
+                            && src.is_none_or(|s| s == r.src)
                         {
                             found = true;
                         }
@@ -339,6 +358,57 @@ fn run_one(eng: &mut Engine, c: &Check) -> CheckResult {
                     format!("{} 登录被拒绝（{:?}）", name, r.err())
                 },
             )
+        }
+        CheckKind::MplsLsp { dev, name } => {
+            let found = eng.net.device(*dev).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Router(rs) => {
+                    rs.mpls_lsps.iter().find(|l| l.name == *name).cloned()
+                }
+                _ => None,
+            });
+            (
+                found.is_some(),
+                match found {
+                    Some(l) => format!(
+                        "LSP {} 已配置（in {} / out {}）",
+                        name,
+                        l.in_label
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        l.out_label
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "-".into())
+                    ),
+                    None => format!("LSP {} 未配置", name),
+                },
+            )
+        }
+        CheckKind::VrrpMaster { dev, vrid } => {
+            let state = eng.net.device(*dev).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Router(rs) => {
+                    rs.vrrp.iter().find(|g| g.vrid == *vrid).map(|g| g.state)
+                }
+                _ => None,
+            });
+            (
+                state == Some(sim_core::device::VrrpState::Master),
+                match state {
+                    Some(sim_core::device::VrrpState::Master) => {
+                        format!("VRRP 组 {} 为 Master", vrid)
+                    }
+                    Some(sim_core::device::VrrpState::Backup) => {
+                        format!("VRRP 组 {} 为 Backup", vrid)
+                    }
+                    Some(sim_core::device::VrrpState::Init) => {
+                        format!("VRRP 组 {} 未收敛（Init）", vrid)
+                    }
+                    None => format!("VRRP 组 {} 未配置", vrid),
+                },
+            )
+        }
+        CheckKind::OspfNeighbors { dev, min } => {
+            let n = eng.ospf_neighbors_of(*dev).len();
+            (n >= *min, format!("OSPF 邻居 {} 个（要求 ≥{}）", n, min))
         }
         CheckKind::SviIp { dev, vlan, ip } => {
             let got = eng.net.device(*dev).and_then(|d| match &d.state {

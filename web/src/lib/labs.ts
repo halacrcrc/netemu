@@ -18,6 +18,10 @@ export interface LabCheckDef {
     | { type: 'staticRoute'; dev: string; net: string }
     | { type: 'portIp'; dev: string; port: number; ip: string }
     | { type: 'routeExists'; dev: string; net: string }
+    | { type: 'routeAbsent'; dev: string; net: string }
+    | { type: 'mplsLsp'; dev: string; name: string }
+    | { type: 'vrrpMaster'; dev: string; vrid: number }
+    | { type: 'ospfNeighbors'; dev: string; min: number }
     | { type: 'rootBridge'; dev: string }
     | { type: 'portRole'; dev: string; port: number; role: 'Designated' | 'Root' | 'Alternate' }
     | {
@@ -188,6 +192,30 @@ export function runLabChecks(lab: LabDef): { label: string; passed: boolean; det
         out.push({ label: ck.label, passed: r.passed, detail: r.detail });
       } else if (ck.kind.type === 'routeExists') {
         const r = JSON.parse(sim.check_route(need(ck.kind.dev), ck.kind.net)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'vrrpMaster') {
+        const r = JSON.parse(sim.check_vrrp_master(need(ck.kind.dev), ck.kind.vrid)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'ospfNeighbors') {
+        const r = JSON.parse(sim.check_ospf_neighbors(need(ck.kind.dev), ck.kind.min)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'mplsLsp') {
+        const r = JSON.parse(sim.check_mpls_lsp(need(ck.kind.dev), ck.kind.name)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'routeAbsent') {
+        const r = JSON.parse(sim.check_route_absent(need(ck.kind.dev), ck.kind.net)) as {
           passed: boolean;
           detail: string;
         };
@@ -482,7 +510,199 @@ export const lab6: LabDef = {
   },
 };
 
-export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6];
+// ---------- 实验七：BGP 路由策略（route-policy） ----------
+
+export const lab7: LabDef = {
+  id: 'bgp-route-policy',
+  title: '实验七 · BGP 路由策略（route-policy）',
+  brief:
+    'R1 通过 BGP 向 R2 宣告两个网段，其中 172.16.9.0/24 是受控业务。用 route-policy + ACL 在 R2 的入方向只过滤这一个前缀，其余路由照常放行。',
+  tasks: [
+    'R1：G0/0/0 192.168.1.1/24、G0/0/1 10.0.0.1/24、G0/0/2 172.16.9.1/24，全部 undo shutdown',
+    'R2：G0/0/0 10.0.0.2/24、G0/0/1 192.168.2.1/24，全部 undo shutdown',
+    'R1：bgp 65001 → peer 10.0.0.2 as-number 65002 → network 192.168.1.0 255.255.255.0 → network 172.16.9.0 255.255.255.0',
+    'R2：bgp 65002 → peer 10.0.0.1 as-number 65001 → network 192.168.2.0 255.255.255.0 → quit',
+    'R2：acl 2000 → rule permit source 172.16.9.0 0.0.0.255 → quit（只匹配受控网段）',
+    'R2：route-policy FILTER deny node 10 → if-match acl 2000 → quit',
+    'R2：route-policy FILTER permit node 20 → quit',
+    'R2：bgp 65002 → peer 10.0.0.1 route-policy FILTER import → quit',
+    'R2：display bgp routing-table —— 应只有 192.168.1.0/24，没有 172.16.9.0/24（IOS：route-map + match ip address + neighbor ... route-map ... in）',
+    'PC2 ping 192.168.1.10 应通；ping 172.16.9.10 应不通（被策略过滤）',
+  ],
+  checks: [
+    {
+      label: 'R2 学到 R1 的 192.168.1.0/24（BGP 路由）',
+      kind: { type: 'routeExists', dev: 'R2', net: '192.168.1.0/24' },
+    },
+    {
+      label: 'R2 未学到受控网段 172.16.9.0/24（策略过滤）',
+      kind: { type: 'routeAbsent', dev: 'R2', net: '172.16.9.0/24' },
+    },
+    {
+      label: 'R1 学到 R2 的 192.168.2.0/24（回程路由存在）',
+      kind: { type: 'routeExists', dev: 'R1', net: '192.168.2.0/24' },
+    },
+    { label: 'PC2 → PC1（192.168.1.10）连通', kind: { type: 'ping', from: 'PC2', to: '192.168.1.10' } },
+    {
+      label: 'PC2 → 受控服务器（172.16.9.10）不通',
+      kind: { type: 'ping', from: 'PC2', to: '172.16.9.10', expect: false },
+    },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const r1 = sim.add_device('Router', 'Vrp');
+    const r2 = sim.add_device('Router', 'Vrp');
+    const pc2 = sim.add_device('Host', 'Ios');
+    const srv = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(r1, 'R1');
+    sim.rename_device(r2, 'R2');
+    sim.rename_device(pc2, 'PC2');
+    sim.rename_device(srv, 'SRV');
+    sim.add_link(pc1, r1); // R1 G0/0/0
+    sim.add_link(r1, r2); // R1 G0/0/1 — R2 G0/0/0
+    sim.add_link(r2, pc2); // R2 G0/0/1
+    sim.add_link(r1, srv); // R1 G0/0/2
+    sim.set_host_config(pc1, '192.168.1.10', 24, '192.168.1.1');
+    sim.set_host_config(pc2, '192.168.2.10', 24, '192.168.2.1');
+    sim.set_host_config(srv, '172.16.9.10', 24, '172.16.9.1');
+    setPosition(pc1, { x: 40, y: 40 });
+    setPosition(r1, { x: 250, y: 110 });
+    setPosition(srv, { x: 250, y: 250 });
+    setPosition(r2, { x: 480, y: 110 });
+    setPosition(pc2, { x: 690, y: 110 });
+  },
+};
+
+// ---------- 实验八：MPLS L3VPN（VRF + 静态 LSP） ----------
+
+export const lab8: LabDef = {
+  id: 'mpls-l3vpn',
+  title: '实验八 · MPLS L3VPN（VRF + 静态 LSP）',
+  brief:
+    '两家客户站点通过运营商 MPLS 骨干互联。PE 上用 VRF 隔离客户路由，入口压入“传输标签 + VPN 标签”，P 只换外层标签，出口 PE 按 VPN 标签把报文投递回客户 VRF。',
+  tasks: [
+    'PE1：system-view → ip vpn-instance CUST1（注意不要 quit）→ interface g0/0/0 → ip binding vpn-instance CUST1 → ip address 192.168.1.1 24 → undo shutdown → quit',
+    'PE1：interface g0/0/1 → ip address 10.0.0.1 24 → undo shutdown → quit',
+    'PE1：static-lsp ingress to-ce2 destination 192.168.2.0 24 nexthop 10.0.0.2 out-label 100 vrf CUST1 vpn-label 1001',
+    'PE1 回程：static-lsp egress trans400 incoming-label 400 → static-lsp egress vpn1002 incoming-label 1002 vrf CUST1',
+    'P：G0/0/0 10.0.0.2/24、G0/0/1 10.0.1.1/24；static-lsp transit t1 incoming-label 100 nexthop 10.0.1.2 out-label 200',
+    'P：static-lsp transit t2 incoming-label 300 nexthop 10.0.0.1 out-label 400',
+    'PE2：ip vpn-instance CUST1 → g0/0/0 10.0.1.2/24、g0/0/1 绑定 CUST1 + 192.168.2.1/24',
+    'PE2：static-lsp egress trans200 incoming-label 200 → static-lsp egress vpn1001 incoming-label 1001 vrf CUST1',
+    'PE2 回程：static-lsp ingress to-ce1 destination 192.168.1.0 24 nexthop 10.0.1.1 out-label 300 vrf CUST1 vpn-label 1002',
+    'display mpls lsp 应看到 VRF=CUST1 与 VPN 标签；CE1 ping 192.168.2.10（IOS：mpls static-lsp … 同结构）',
+  ],
+  checks: [
+    { label: 'PE1 已配置去程 VPN LSP to-ce2', kind: { type: 'mplsLsp', dev: 'PE1', name: 'to-ce2' } },
+    { label: 'PE2 已配置 VPN 标签 1001 的 VRF 映射', kind: { type: 'mplsLsp', dev: 'PE2', name: 'vpn1001' } },
+    { label: 'CE1 → CE2 跨 MPLS 骨干连通', kind: { type: 'ping', from: 'CE1', to: '192.168.2.10' } },
+    { label: 'CE2 → CE1 回程连通', kind: { type: 'ping', from: 'CE2', to: '192.168.1.10' } },
+  ],
+  build: (sim) => {
+    const ce1 = sim.add_device('Host', 'Ios');
+    const pe1 = sim.add_device('Router', 'Vrp');
+    const p = sim.add_device('Router', 'Vrp');
+    const pe2 = sim.add_device('Router', 'Vrp');
+    const ce2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(ce1, 'CE1');
+    sim.rename_device(pe1, 'PE1');
+    sim.rename_device(p, 'P');
+    sim.rename_device(pe2, 'PE2');
+    sim.rename_device(ce2, 'CE2');
+    sim.add_link(ce1, pe1); // PE1 g0/0/0
+    sim.add_link(pe1, p); // PE1 g0/0/1 — P g0/0/0
+    sim.add_link(p, pe2); // P g0/0/1 — PE2 g0/0/0
+    sim.add_link(pe2, ce2); // PE2 g0/0/1
+    sim.set_host_config(ce1, '192.168.1.10', 24, '192.168.1.1');
+    sim.set_host_config(ce2, '192.168.2.10', 24, '192.168.2.1');
+    setPosition(ce1, { x: 40, y: 100 });
+    setPosition(pe1, { x: 230, y: 100 });
+    setPosition(p, { x: 440, y: 100 });
+    setPosition(pe2, { x: 650, y: 100 });
+    setPosition(ce2, { x: 840, y: 100 });
+  },
+};
+
+// ---------- 实验九：大型园区综合实验 ----------
+
+export const lab9: LabDef = {
+  id: 'campus-capstone',
+  title: '实验九 · 大型园区综合实验（VLAN/LACP/OSPF/VRRP/NAT）',
+  brief:
+    '两栋楼各一台接入交换机，双链路 LACP 互联；核心交换机 DSW 做 VLAN 间路由；两台核心路由器做 VRRP 网关与 OSPF，CORE1 负责 NAT 上外网。这是一次把 M2~M5 串起来的园区收官实验。',
+  tasks: [
+    'SW1：vlan batch 10 20；G0/0/1 access VLAN10（PC1）、G0/0/2 access VLAN20（PC3）；G0/0/3、G0/0/4、G0/0/5 配 trunk 并 allow-pass vlan 10 20',
+    'SW2：vlan batch 10 20；G0/0/1、G0/0/2 配 trunk allow-pass vlan 10 20；G0/0/3 access VLAN10（PC2）、G0/0/4 access VLAN20（PC4）',
+    'SW1/SW2：成员口（SW1 G0/0/3、G0/0/4；SW2 G0/0/1、G0/0/2）执行 eth-trunk 1 加入聚合组；成员口已配 trunk，聚合口本身无需再配（display eth-trunk 1 应看到 2 个 Up）',
+    'DSW：vlan batch 10 20 99；G0/0/1 trunk allow-pass vlan 10 20（接 SW1）；G0/0/2、G0/0/3 access VLAN99（接核心）',
+    'DSW：Vlanif10 192.168.10.1/24、Vlanif20 192.168.20.1/24、Vlanif99 10.0.0.2/24；ip route-static 0.0.0.0 0 10.0.0.1（网关指向 VRRP VIP）',
+    'CORE1（IOS）：g0/0 10.0.0.10/24 + vrrp 1 ip 10.0.0.1 + priority 200 + preempt + ip nat inside；g0/1 10.1.0.1/30；g0/2 203.0.113.1/24 + ip nat outside',
+    'CORE1：ip route 192.168.0.0 255.255.0.0 10.0.0.2；router ospf 1 → network 10.1.0.0 0.0.0.3 area 0',
+    'CORE2（IOS）：g0/0 10.0.0.11/24 + vrrp 1 ip 10.0.0.1；g0/1 10.1.0.2/30；router ospf 1 → network 10.1.0.0 0.0.0.3 area 0',
+    '验证：display vrrp（CORE1 Master）、show ip ospf neighbor（FULL）、display eth-trunk 1（2 Up）；PC1 ping PC2/PC3/203.0.113.10',
+  ],
+  checks: [
+    { label: 'SW1 聚合组 1 两个成员已选中', kind: { type: 'lagSelected', dev: 'SW1', group: 1, count: 2 } },
+    { label: 'DSW Vlanif10 = 192.168.10.1', kind: { type: 'sviIp', dev: 'DSW', vlan: 10, ip: '192.168.10.1' } },
+    { label: 'DSW Vlanif20 = 192.168.20.1', kind: { type: 'sviIp', dev: 'DSW', vlan: 20, ip: '192.168.20.1' } },
+    { label: 'CORE1 是 VRRP 组 1 的 Master', kind: { type: 'vrrpMaster', dev: 'CORE1', vrid: 1 } },
+    { label: 'CORE1 与 CORE2 建立 OSPF 邻居', kind: { type: 'ospfNeighbors', dev: 'CORE1', min: 1 } },
+    { label: 'PC1 → PC2（同 VLAN 跨楼）连通', kind: { type: 'ping', from: 'PC1', to: '192.168.10.12' } },
+    { label: 'PC1 → PC3（跨 VLAN 经 SVI）连通', kind: { type: 'ping', from: 'PC1', to: '192.168.20.21' } },
+    { label: 'PC1 → 外网服务器（NAT）连通', kind: { type: 'ping', from: 'PC1', to: '203.0.113.10' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const pc3 = sim.add_device('Host', 'Ios');
+    const sw1 = sim.add_device('Switch', 'Vrp');
+    const sw2 = sim.add_device('Switch', 'Vrp');
+    const dsw = sim.add_device('Switch', 'Vrp');
+    const pc2 = sim.add_device('Host', 'Ios');
+    const pc4 = sim.add_device('Host', 'Ios');
+    const core1 = sim.add_device('Router', 'Ios');
+    const core2 = sim.add_device('Router', 'Ios');
+    const srv = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(pc3, 'PC3');
+    sim.rename_device(sw1, 'SW1');
+    sim.rename_device(sw2, 'SW2');
+    sim.rename_device(dsw, 'DSW');
+    sim.rename_device(pc2, 'PC2');
+    sim.rename_device(pc4, 'PC4');
+    sim.rename_device(core1, 'CORE1');
+    sim.rename_device(core2, 'CORE2');
+    sim.rename_device(srv, 'SRV');
+    sim.add_link(pc1, sw1); // SW1 p0
+    sim.add_link(pc3, sw1); // SW1 p1
+    sim.add_link(sw1, sw2); // SW1 p2 / SW2 p0
+    sim.add_link(sw1, sw2); // SW1 p3 / SW2 p1
+    sim.add_link(sw1, dsw); // SW1 p4 / DSW p0
+    sim.add_link(sw2, pc2); // SW2 p2
+    sim.add_link(sw2, pc4); // SW2 p3
+    sim.add_link(dsw, core1); // DSW p1 / CORE1 p0
+    sim.add_link(dsw, core2); // DSW p2 / CORE2 p0
+    sim.add_link(core1, core2); // CORE1 p1 / CORE2 p1
+    sim.add_link(core1, srv); // CORE1 p2
+    sim.set_host_config(pc1, '192.168.10.11', 24, '192.168.10.1');
+    sim.set_host_config(pc2, '192.168.10.12', 24, '192.168.10.1');
+    sim.set_host_config(pc3, '192.168.20.21', 24, '192.168.20.1');
+    sim.set_host_config(pc4, '192.168.20.22', 24, '192.168.20.1');
+    sim.set_host_config(srv, '203.0.113.10', 24, '');
+    setPosition(pc1, { x: 40, y: 40 });
+    setPosition(pc3, { x: 40, y: 160 });
+    setPosition(sw1, { x: 210, y: 100 });
+    setPosition(sw2, { x: 450, y: 100 });
+    setPosition(pc2, { x: 620, y: 40 });
+    setPosition(pc4, { x: 620, y: 160 });
+    setPosition(dsw, { x: 330, y: 240 });
+    setPosition(core1, { x: 230, y: 370 });
+    setPosition(core2, { x: 470, y: 370 });
+    setPosition(srv, { x: 70, y: 470 });
+  },
+};
+
+export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9];
 
 // 合并英文文案
 for (const l of LABS) {

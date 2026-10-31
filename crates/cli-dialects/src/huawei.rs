@@ -2,7 +2,7 @@
 //!
 //! 差异（接口名规则、show 输出、报错前缀、VLAN 命令词）分别在 ifname/show/lib 中按方言处理。
 
-use cli_engine::{CNode, CliError, Ctx, Mode, ParamKind};
+use cli_engine::{CNode, CliError, CmdFn, Ctx, Mode, ParamKind};
 
 use crate::cmd;
 use crate::Trees;
@@ -21,7 +21,10 @@ fn h_quit(c: &mut Ctx) -> Result<String, CliError> {
         | Mode::Aaa
         | Mode::Mst
         | Mode::Ospf
-        | Mode::OspfArea => Mode::Config,
+        | Mode::OspfArea
+        | Mode::Bgp
+        | Mode::Isis
+        | Mode::RoutePolicy => Mode::Config,
         _ => Mode::Exec,
     };
     if c.sess.mode != Mode::If {
@@ -44,6 +47,31 @@ fn h_undo_shutdown(c: &mut Ctx) -> Result<String, CliError> {
 
 fn h_shutdown(c: &mut Ctx) -> Result<String, CliError> {
     cmd::shutdown(c, false)
+}
+
+/// `source A.B.C.D wildcard [destination A.B.C.D wildcard]`。
+fn acl_rule_source(handler: CmdFn) -> CNode {
+    CNode::lit("source", "Specify the source address").kid(
+        CNode::param(ParamKind::Ipv4, "src", "Source address").kid(
+            CNode::param(ParamKind::Wildcard, "src_wildcard", "Wildcard bits")
+                .run(handler)
+                .kid(
+                    CNode::lit("destination", "Specify the destination address").kid(
+                        CNode::param(ParamKind::Ipv4, "dst", "Destination address").kid(
+                            CNode::param(ParamKind::Wildcard, "dst_wildcard", "Wildcard bits")
+                                .run(handler),
+                        ),
+                    ),
+                ),
+        ),
+    )
+}
+
+/// `permit|deny {source ... | icmp source ...}`。
+fn acl_rule_action() -> CNode {
+    CNode::param(ParamKind::Word, "action", "deny | permit")
+        .kid(acl_rule_source(cmd::acl_rule))
+        .kid(CNode::lit("icmp", "ICMP protocol").kid(acl_rule_source(cmd::acl_rule_icmp)))
 }
 
 /// undo 子树：`undo shutdown` / `undo ip address` / `undo eth-trunk`
@@ -72,7 +100,13 @@ fn display_branch() -> CNode {
                 ))
                 .kid(
                     CNode::lit("routing-table", "Display the IP routing table")
-                        .run(cmd::show_route),
+                        .run(cmd::show_route)
+                        .kid(
+                            CNode::lit("vpn-instance", "VPN instance routing table").kid(
+                                CNode::param(ParamKind::Word, "name", "VPN instance name")
+                                    .run(cmd::show_route_vrf),
+                            ),
+                        ),
                 ),
         )
         .kid(
@@ -87,6 +121,35 @@ fn display_branch() -> CNode {
                     CNode::lit("brief", "Brief IPv6 interface status").run(cmd::show_ipv6_brief),
                 ))
                 .kid(CNode::lit("routing-table", "IPv6 routing table").run(cmd::show_ipv6_route)),
+        )
+        .kid(
+            CNode::lit("dhcp", "DHCP information").kid(
+                CNode::lit("snooping", "DHCP snooping").kid(
+                    CNode::lit("user-binding", "DHCP snooping binding table")
+                        .run(cmd::show_dhcp_snooping),
+                ),
+            ),
+        )
+        .kid(CNode::lit("port-security", "Port security").run(cmd::show_port_security))
+        .kid(CNode::lit("storm-control", "Storm control").run(cmd::show_qos))
+        .kid(CNode::lit("qos", "QoS statistics").run(cmd::show_qos))
+        .kid(
+            CNode::lit("bgp", "Display BGP information")
+                .kid(CNode::lit("peer", "BGP peers").run(cmd::show_bgp_summary))
+                .kid(CNode::lit("routing-table", "BGP routing table").run(cmd::show_bgp_table)),
+        )
+        .kid(
+            CNode::lit("isis", "Display IS-IS information")
+                .kid(CNode::lit("peer", "IS-IS peers").run(cmd::show_isis_neighbors))
+                .kid(CNode::lit("lsdb", "IS-IS link state database").run(cmd::show_isis_db)),
+        )
+        .kid(
+            CNode::lit("mpls", "Display MPLS information")
+                .kid(CNode::lit("lsp", "Static LSPs").run(cmd::show_mpls)),
+        )
+        .kid(
+            CNode::lit("route-policy", "Display route policy information")
+                .run(cmd::show_route_policy),
         )
         .kid(CNode::lit("vlan", "Display VLAN information").run(cmd::show_vlan))
         .kid(CNode::lit("mac-address", "Display the MAC address table").run(cmd::show_mac))
@@ -179,6 +242,95 @@ fn local_user_node() -> CNode {
     )
 }
 
+fn mpls_lsp_node() -> CNode {
+    CNode::lit("static-lsp", "Static label switched path")
+        .kid(
+            CNode::lit("ingress", "Ingress LSR").kid(
+                CNode::param(ParamKind::Word, "name", "LSP name").kid(
+                    CNode::lit("destination", "FEC destination").kid(
+                        CNode::param(ParamKind::Ipv4, "net", "Destination network").kid(
+                            CNode::param(ParamKind::PrefixLen, "len", "Prefix length").kid(
+                                CNode::lit("nexthop", "Next hop").kid(
+                                    CNode::param(ParamKind::Ipv4, "nexthop", "Next hop IP").kid(
+                                        CNode::lit("out-label", "Out label").kid(
+                                            CNode::param(ParamKind::Number, "out", "Out label")
+                                                .run(cmd::mpls_lsp_ingress)
+                                                .kid(
+                                                    CNode::lit("vrf", "VPN instance").kid(
+                                                        CNode::param(
+                                                            ParamKind::Word,
+                                                            "vrf",
+                                                            "VRF name",
+                                                        )
+                                                        .run(cmd::mpls_lsp_ingress)
+                                                        .kid(
+                                                            CNode::lit("vpn-label", "VPN label")
+                                                                .kid(
+                                                                    CNode::param(
+                                                                        ParamKind::Number,
+                                                                        "vpn",
+                                                                        "VPN label",
+                                                                    )
+                                                                    .run(cmd::mpls_lsp_ingress),
+                                                                ),
+                                                        ),
+                                                    ),
+                                                )
+                                                .kid(
+                                                    CNode::lit("vpn-label", "VPN label").kid(
+                                                        CNode::param(
+                                                            ParamKind::Number,
+                                                            "vpn",
+                                                            "VPN label",
+                                                        )
+                                                        .run(cmd::mpls_lsp_ingress),
+                                                    ),
+                                                ),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .kid(
+            CNode::lit("transit", "Transit LSR").kid(
+                CNode::param(ParamKind::Word, "name", "LSP name").kid(
+                    CNode::lit("incoming-label", "Incoming label").kid(
+                        CNode::param(ParamKind::Number, "in", "In label").kid(
+                            CNode::lit("nexthop", "Next hop").kid(
+                                CNode::param(ParamKind::Ipv4, "nexthop", "Next hop IP").kid(
+                                    CNode::lit("out-label", "Out label").kid(
+                                        CNode::param(ParamKind::Number, "out", "Out label")
+                                            .run(cmd::mpls_lsp_transit),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .kid(
+            CNode::lit("egress", "Egress LSR").kid(
+                CNode::param(ParamKind::Word, "name", "LSP name").kid(
+                    CNode::lit("incoming-label", "Incoming label").kid(
+                        CNode::param(ParamKind::Number, "in", "In label")
+                            .run(cmd::mpls_lsp_egress)
+                            .kid(
+                                CNode::lit("vrf", "VPN instance").kid(
+                                    CNode::param(ParamKind::Word, "vrf", "VRF name")
+                                        .run(cmd::mpls_lsp_egress),
+                                ),
+                            ),
+                    ),
+                ),
+            ),
+        )
+}
+
 pub fn build() -> Trees {
     let ping = || {
         CNode::lit("ping", "Check the network connectivity")
@@ -231,6 +383,21 @@ pub fn build() -> Trees {
                 .run(cmd::hostname),
             CNode::lit("ospf", "OSPF process")
                 .kid(CNode::param(ParamKind::Number, "pid", "Process ID").run(cmd::ospf_enter)),
+            CNode::lit("bgp", "BGP process")
+                .kid(CNode::param(ParamKind::Number, "asn", "Local AS number").run(cmd::bgp_enter)),
+            CNode::lit("route-policy", "Create a route policy").kid(
+                CNode::param(ParamKind::Word, "name", "Route policy name").kid(
+                    CNode::param(ParamKind::Word, "action", "permit | deny").kid(
+                        CNode::lit("node", "Route policy node").kid(
+                            CNode::param(ParamKind::Number, "seq", "Node sequence")
+                                .run(cmd::route_policy_enter),
+                        ),
+                    ),
+                ),
+            ),
+            CNode::lit("isis", "IS-IS process")
+                .kid(CNode::param(ParamKind::Number, "pid", "Process ID").run(cmd::isis_enter)),
+            mpls_lsp_node(),
             CNode::lit("aaa", "Authentication, authorization and accounting")
                 .run(cmd::mgmt_enter_aaa),
             local_user_node(),
@@ -263,6 +430,9 @@ pub fn build() -> Trees {
                         )),
                 ),
             CNode::lit("ip", "IP configuration subcommands")
+                .kid(CNode::lit("vpn-instance", "Create a VPN instance").kid(
+                    CNode::param(ParamKind::Word, "name", "VPN instance name").run(cmd::vrf_create),
+                ))
                 .kid(
                     CNode::lit("route-static", "Establish static routes")
                         .run(cmd::static_route)
@@ -270,6 +440,23 @@ pub fn build() -> Trees {
                             CNode::param(ParamKind::Ipv4, "dst", "Destination prefix").kid(
                                 CNode::param(ParamKind::PrefixLen, "mask", "Prefix length").kid(
                                     CNode::param(ParamKind::Ipv4, "nexthop", "Next-hop IP address"),
+                                ),
+                            ),
+                        )
+                        .kid(
+                            CNode::lit("vpn-instance", "VRF static route").kid(
+                                CNode::param(ParamKind::Word, "name", "VPN instance").kid(
+                                    CNode::param(ParamKind::Ipv4, "dst", "Destination").kid(
+                                        CNode::param(ParamKind::PrefixLen, "mask", "Prefix length")
+                                            .kid(
+                                                CNode::param(
+                                                    ParamKind::Ipv4,
+                                                    "nexthop",
+                                                    "Next hop",
+                                                )
+                                                .run(cmd::vrf_static),
+                                            ),
+                                    ),
                                 ),
                             ),
                         ),
@@ -323,6 +510,11 @@ pub fn build() -> Trees {
                             ),
                         ),
                     ),
+                ),
+            ),
+            CNode::lit("dhcp", "DHCP configuration").kid(
+                CNode::lit("snooping", "DHCP snooping").kid(
+                    CNode::lit("enable", "Enable DHCP snooping").run(cmd::dhcp_snooping_enable),
                 ),
             ),
             CNode::lit("stp", "Spanning Tree Protocol subgroup")
@@ -400,17 +592,26 @@ pub fn build() -> Trees {
             CNode::lit("save", "Save the current configuration").run(cmd::save_msg),
         ],
         if_: vec![
-            CNode::lit("ip", "IP configuration subcommands").kid(
-                CNode::lit("address", "Set the IP address of the interface")
-                    .run(cmd::ip_address)
-                    .kid(
-                        CNode::param(ParamKind::Ipv4, "ip", "IP address").kid(CNode::param(
-                            ParamKind::PrefixLen,
-                            "mask",
-                            "Prefix length",
-                        )),
+            CNode::lit("ip", "IP configuration subcommands")
+                .kid(
+                    CNode::lit("address", "Set the IP address of the interface")
+                        .run(cmd::ip_address)
+                        .kid(
+                            CNode::param(ParamKind::Ipv4, "ip", "IP address").kid(CNode::param(
+                                ParamKind::PrefixLen,
+                                "mask",
+                                "Prefix length",
+                            )),
+                        ),
+                )
+                .kid(
+                    CNode::lit("binding", "Bind this interface to a VPN instance").kid(
+                        CNode::lit("vpn-instance", "VPN instance").kid(
+                            CNode::param(ParamKind::Word, "name", "VPN instance name")
+                                .run(cmd::vrf_bind),
+                        ),
                     ),
-            ),
+                ),
             CNode::lit("port", "Port commands")
                 .kid(
                     CNode::lit("link-type", "Set the port link type")
@@ -506,6 +707,11 @@ pub fn build() -> Trees {
                     .run(cmd::ipv6_address),
                 ),
             ),
+            CNode::lit("isis", "IS-IS on this interface")
+                .run(cmd::isis_enable_if)
+                .kid(
+                    CNode::lit("enable", "Enable IS-IS on this interface").run(cmd::isis_enable_if),
+                ),
             CNode::lit("stp", "Spanning Tree Protocol subgroup").kid(
                 CNode::lit("cost", "Set the port path cost").kid(
                     CNode::param(ParamKind::Number, "cost", "Path cost, 1-200000000")
@@ -529,10 +735,60 @@ pub fn build() -> Trees {
                         ),
                 ),
             ),
-            CNode::lit("dhcp", "DHCP configuration").kid(
-                CNode::lit("select", "Enable the DHCP server on this interface")
-                    .kid(CNode::lit("global", "Use global address pools").run(cmd::dhcp_select)),
+            CNode::lit("dhcp", "DHCP configuration")
+                .kid(
+                    CNode::lit("select", "Enable the DHCP server on this interface").kid(
+                        CNode::lit("global", "Use global address pools").run(cmd::dhcp_select),
+                    ),
+                )
+                .kid(
+                    CNode::lit("snooping", "DHCP snooping")
+                        .kid(
+                            CNode::lit("trusted", "Trust this port for DHCP servers")
+                                .run(cmd::dhcp_snooping_trust),
+                        )
+                        .kid(
+                            CNode::lit("trust", "Trust this port for DHCP servers")
+                                .run(cmd::dhcp_snooping_trust),
+                        ),
+                ),
+            CNode::lit("port-security", "Port security")
+                .run(cmd::port_security_enable)
+                .kid(CNode::lit("enable", "Enable port security").run(cmd::port_security_enable))
+                .kid(CNode::lit("max-mac-num", "Max secure MAC addresses").kid(
+                    CNode::param(ParamKind::Number, "max", "1-1024").run(cmd::port_security_max),
+                ))
+                .kid(
+                    CNode::lit("protect-action", "Violation action").kid(
+                        CNode::param(ParamKind::Word, "action", "shutdown | restrict")
+                            .run(cmd::port_security_violation),
+                    ),
+                ),
+            CNode::lit("broadcast-suppression", "Broadcast storm suppression").kid(
+                CNode::param(ParamKind::Number, "pps", "Broadcast frames per second")
+                    .run(cmd::storm_control),
             ),
+            CNode::lit("qos", "QoS")
+                .kid(
+                    CNode::lit("car", "Committed access rate").kid(
+                        CNode::lit("inbound", "Inbound direction").kid(
+                            CNode::lit("cir", "Committed information rate").kid(
+                                CNode::param(ParamKind::Number, "kbps", "Rate in kbps")
+                                    .run(cmd::rate_limit),
+                            ),
+                        ),
+                    ),
+                )
+                .kid(
+                    CNode::lit("lr", "Line rate").kid(
+                        CNode::lit("inbound", "Inbound direction").kid(
+                            CNode::lit("cir", "Committed information rate").kid(
+                                CNode::param(ParamKind::Number, "kbps", "Rate in kbps")
+                                    .run(cmd::rate_limit),
+                            ),
+                        ),
+                    ),
+                ),
             CNode::lit("nat", "NAT configuration").kid(
                 CNode::lit("outbound", "Enable Easy-IP NAT for outbound traffic")
                     .run(cmd::nat_outbound),
@@ -568,44 +824,7 @@ pub fn build() -> Trees {
             CNode::lit("quit", "Quit from the current view").run(h_quit),
         ],
         acl: vec![
-            CNode::lit("rule", "Add a rule to the ACL")
-                .run(cmd::acl_rule)
-                .kid(
-                    CNode::param(ParamKind::Word, "action", "deny | permit").kid(
-                        CNode::param(ParamKind::Word, "proto", "icmp | (omitted for IP)").kid(
-                            CNode::lit("source", "Specify the source address").kid(
-                                CNode::param(ParamKind::Ipv4, "src", "Source address").kid(
-                                    CNode::param(
-                                        ParamKind::Wildcard,
-                                        "src_wildcard",
-                                        "Wildcard bits",
-                                    )
-                                    .kid(
-                                        CNode::lit(
-                                            "destination",
-                                            "Specify the destination address",
-                                        )
-                                        .kid(
-                                            CNode::param(
-                                                ParamKind::Ipv4,
-                                                "dst",
-                                                "Destination address",
-                                            )
-                                            .kid(
-                                                CNode::param(
-                                                    ParamKind::Wildcard,
-                                                    "dst_wildcard",
-                                                    "Wildcard bits",
-                                                )
-                                                .run(cmd::acl_rule),
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
+            CNode::lit("rule", "Add a rule to the ACL").kid(acl_rule_action()),
             CNode::lit("quit", "Quit from the current view").run(h_quit),
         ],
         line: vec![
@@ -684,6 +903,61 @@ pub fn build() -> Trees {
                 CNode::param(ParamKind::Ipv4, "net", "Network address").kid(
                     CNode::param(ParamKind::Wildcard, "wildcard", "Wildcard bits")
                         .run(cmd::ospf_network),
+                ),
+            ),
+            CNode::lit("quit", "Quit from the current view").run(h_quit),
+            CNode::lit("return", "Return to the user view").run(h_return),
+        ],
+        bgp: vec![
+            CNode::lit("peer", "Configure a BGP peer").kid(
+                CNode::param(ParamKind::Ipv4, "ip", "Peer IP address")
+                    .kid(CNode::lit("as-number", "Peer AS number").kid(
+                        CNode::param(ParamKind::Number, "asn", "Remote AS").run(cmd::bgp_neighbor),
+                    ))
+                    .kid(
+                        CNode::lit("route-policy", "Apply a route policy").kid(
+                            CNode::param(ParamKind::Word, "policy", "Route policy name").kid(
+                                CNode::param(ParamKind::Word, "dir", "import | export")
+                                    .run(cmd::bgp_peer_policy),
+                            ),
+                        ),
+                    ),
+            ),
+            CNode::lit("network", "Advertise a network").kid(
+                CNode::param(ParamKind::Ipv4, "net", "Network address")
+                    .kid(
+                        CNode::lit("mask", "Subnet mask").kid(
+                            CNode::param(ParamKind::DottedMask, "mask", "Subnet mask")
+                                .run(cmd::bgp_network),
+                        ),
+                    )
+                    .kid(
+                        CNode::param(ParamKind::DottedMask, "mask", "Subnet mask")
+                            .run(cmd::bgp_network),
+                    ),
+            ),
+            CNode::lit("quit", "Quit from the current view").run(h_quit),
+            CNode::lit("return", "Return to the user view").run(h_return),
+        ],
+        isis: vec![
+            CNode::lit("network-entity", "Set the Network Entity Title").kid(
+                CNode::param(ParamKind::Word, "net", "e.g. 49.0001.0000.0000.0001.00")
+                    .run(cmd::isis_net),
+            ),
+            CNode::lit("quit", "Quit from the current view").run(h_quit),
+            CNode::lit("return", "Return to the user view").run(h_return),
+        ],
+        route_policy: vec![
+            CNode::lit("if-match", "Define a match criterion").kid(
+                CNode::lit("acl", "Match an ACL").kid(
+                    CNode::param(ParamKind::Number, "acl", "ACL number")
+                        .run(cmd::route_policy_match_acl),
+                ),
+            ),
+            CNode::lit("apply", "Set route attributes").kid(
+                CNode::lit("local-preference", "BGP local preference").kid(
+                    CNode::param(ParamKind::Number, "pref", "Local preference value")
+                        .run(cmd::route_policy_set_local_pref),
                 ),
             ),
             CNode::lit("quit", "Quit from the current view").run(h_quit),

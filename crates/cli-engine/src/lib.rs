@@ -114,6 +114,8 @@ pub struct SubCtx {
     pub acl: Option<(u32, bool /*advanced*/)>,
     /// AAA 视图中正在配置的本地用户
     pub aaa_user: Option<String>,
+    /// 路由策略视图中正在编辑的 (策略名, 节点 seq)
+    pub rp: Option<(String, u16)>,
 }
 
 /// 远程登录输入流程。
@@ -184,6 +186,12 @@ pub enum Mode {
     Ospf,
     /// OSPF 区域视图（VRP/Comware）
     OspfArea,
+    /// BGP 视图
+    Bgp,
+    /// IS-IS 视图
+    Isis,
+    /// 路由策略视图（route-map / route-policy node）
+    RoutePolicy,
 }
 
 #[derive(Debug)]

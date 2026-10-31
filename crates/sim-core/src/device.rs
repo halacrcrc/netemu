@@ -55,6 +55,10 @@ pub enum RouteSrc {
     Static,
     /// OSPF 动态学习
     Ospf,
+    /// BGP 动态学习
+    Bgp,
+    /// IS-IS 动态学习
+    Isis,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +70,30 @@ pub struct Route {
     pub vlan: Option<VlanId>,
     pub port: PortId,
     pub src: RouteSrc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortSecViolation {
+    #[default]
+    Restrict,
+    Shutdown,
+}
+
+/// 端口安全配置。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortSecurity {
+    pub max: u16,
+    pub violation: PortSecViolation,
+    pub sticky: bool,
+}
+
+/// DHCP Snooping 绑定表项。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DhcpSnoopingBinding {
+    pub mac: Mac,
+    pub ip: Ipv4Addr,
+    pub vlan: VlanId,
+    pub port: PortId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,14 +276,24 @@ pub struct AclRule {
 
 impl AclRule {
     /// 数据报文是否命中本条规则（M2b 仅 ICMP/任意协议区分）。
+    /// 通配符位为 1 表示忽略；源/目的都为 0 且通配符为 0 视为未限制该字段。
     pub fn matches(&self, src: Ipv4Addr, dst: Ipv4Addr, is_icmp: bool) -> bool {
         let proto_ok = match self.proto {
             AclProto::Any => true,
             AclProto::Icmp => is_icmp,
         };
-        proto_ok
-            && (src & self.src_wildcard) == (self.src & self.src_wildcard)
-            && (dst & self.dst_wildcard) == (self.dst & self.dst_wildcard)
+        let src_ok = (src & !self.src_wildcard) == (self.src & !self.src_wildcard);
+        let dst_ok = if self.dst == 0 && self.dst_wildcard == 0 {
+            true
+        } else {
+            (dst & !self.dst_wildcard) == (self.dst & !self.dst_wildcard)
+        };
+        proto_ok && src_ok && dst_ok
+    }
+
+    /// 路由前缀匹配：只看源地址段（协议/目的不参与路由过滤）。
+    pub fn matches_route(&self, net: Ipv4Addr) -> bool {
+        (net & !self.src_wildcard) == (self.src & !self.src_wildcard)
     }
 }
 
@@ -322,9 +360,97 @@ pub struct RouterState {
     /// OSPF 计算出的动态路由（瞬态）
     #[serde(default)]
     pub ospf_routes: Vec<Route>,
+    /// BGP 配置与动态路由
+    #[serde(default)]
+    pub bgp: Option<BgpConfig>,
+    #[serde(default)]
+    pub bgp_routes: Vec<Route>,
+    /// IS-IS 配置与动态路由
+    #[serde(default)]
+    pub isis: Option<IsisConfig>,
+    #[serde(default)]
+    pub isis_routes: Vec<Route>,
+    /// VRF 表
+    #[serde(default)]
+    pub vrfs: Vec<Vrf>,
+    /// MPLS 静态 LSP
+    #[serde(default)]
+    pub mpls_lsps: Vec<StaticLsp>,
     /// VRRP 组（主备网关）
     #[serde(default)]
     pub vrrp: Vec<VrrpGroup>,
+    /// 路由策略（BGP 邻居 import/export 使用）
+    #[serde(default)]
+    pub route_policies: Vec<RoutePolicy>,
+}
+
+/// BGP 配置（AS、邻居、宣告网段、邻居策略）。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BgpConfig {
+    pub asn: u32,
+    /// (邻居 IP, 对端 AS)
+    pub neighbors: Vec<(Ipv4Addr, u32)>,
+    /// 本地宣告的网段 (网络, 前缀长度)
+    pub networks: Vec<(Ipv4Addr, u8)>,
+    /// 邻居路由策略绑定
+    #[serde(default)]
+    pub peer_policies: Vec<BgpPeerPolicy>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BgpPeerPolicy {
+    pub neighbor: Ipv4Addr,
+    /// true = import（入方向），false = export（出方向）
+    pub import: bool,
+    pub name: String,
+}
+
+/// 路由策略：按 seq 升序匹配，首个命中节点决定 permit/deny 与属性。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutePolicy {
+    pub name: String,
+    pub nodes: Vec<RoutePolicyNode>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutePolicyNode {
+    pub seq: u16,
+    pub permit: bool,
+    /// 匹配基础 ACL（ACL 判定 permit 视为命中）
+    pub match_acl: Option<u32>,
+    /// 命中后设置 BGP Local Preference
+    pub set_local_pref: Option<u32>,
+}
+
+/// VRF（虚拟路由转发表，简化：只有连接路由与静态路由）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Vrf {
+    pub id: u16,
+    pub name: String,
+    pub static_routes: Vec<Route>,
+}
+
+/// 静态 LSP 表项：ingress（net 匹配 + out_label）/ transit（in→out）/ egress（in→pop）。
+/// `vrf` 非空时表示 VPN 路由：ingress 按该 VRF 匹配 FEC 并压入 `vpn_label`（双标签），
+/// egress 把该标签投递到对应 VRF。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StaticLsp {
+    pub name: String,
+    pub net: Option<(Ipv4Addr, u8)>,
+    pub in_label: Option<u32>,
+    pub out_label: Option<u32>,
+    pub nexthop: Option<Ipv4Addr>,
+    #[serde(default)]
+    pub vrf: Option<String>,
+    #[serde(default)]
+    pub vpn_label: Option<u32>,
+}
+
+/// IS-IS 配置（简化：单区域 Level-1，NET 仅用于取 System ID）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IsisConfig {
+    pub net: String,
+    pub system_id: [u8; 6],
 }
 
 /// VRRP 组成员状态。
@@ -562,6 +688,18 @@ pub struct SviState {
 pub struct SwitchState {
     /// STP 实例（默认启用）
     pub stp: StpInstance,
+    /// DHCP Snooping 全局开关
+    #[serde(default)]
+    pub dhcp_snooping: bool,
+    /// DHCP Snooping 绑定表（瞬态）
+    #[serde(default)]
+    pub dhcp_bindings: Vec<DhcpSnoopingBinding>,
+    /// 端口安全已允许的 MAC
+    #[serde(default)]
+    pub secure_macs: HashMap<PortId, Vec<Mac>>,
+    /// 端口安全违规次数
+    #[serde(default)]
+    pub port_sec_violations: HashMap<PortId, u32>,
     /// 链路聚合组（id → 组）
     #[serde(default)]
     pub lags: HashMap<u16, LagGroup>,
@@ -677,6 +815,24 @@ pub struct Port {
     pub ipv6: Option<Ipv6Addr>,
     #[serde(default)]
     pub prefix6: u8,
+    /// DHCP Snooping 信任端口
+    #[serde(default)]
+    pub dhcp_trust: bool,
+    /// 端口安全
+    #[serde(default)]
+    pub port_security: Option<PortSecurity>,
+    /// 广播风暴抑制（每秒广播帧上限）
+    #[serde(default)]
+    pub broadcast_limit_pps: Option<u32>,
+    /// 接口入口限速（kbps）
+    #[serde(default)]
+    pub rate_limit_kbps: Option<u32>,
+    /// 是否参与 IS-IS
+    #[serde(default)]
+    pub isis_enable: bool,
+    /// 所属 VRF id（None = 全局表）
+    #[serde(default)]
+    pub vrf: Option<u16>,
     /// 入方向 ACL（路由器）
     pub acl_in: Option<u32>,
     /// 出方向 ACL（路由器）
@@ -903,6 +1059,12 @@ impl Device {
                 lag: None,
                 ipv6: None,
                 prefix6: 64,
+                dhcp_trust: false,
+                port_security: None,
+                broadcast_limit_pps: None,
+                rate_limit_kbps: None,
+                isis_enable: false,
+                vrf: None,
                 acl_in: None,
                 acl_out: None,
             })
@@ -946,10 +1108,16 @@ impl Device {
 
     /// 派生连接路由：路由器取每个配置了 IP 的物理口；交换机取每个启用且配置了 IP 的 SVI。
     pub fn connected_routes(&self) -> Vec<Route> {
+        self.connected_routes_vrf(None)
+    }
+
+    /// 某 VRF 的连接路由（None = 全局表；VRF 口不计入全局）。
+    pub fn connected_routes_vrf(&self, vrf: Option<u16>) -> Vec<Route> {
         match &self.state {
             DeviceState::Router(_) => self
                 .ports
                 .iter()
+                .filter(|p| p.vrf == vrf)
                 .filter_map(|p| {
                     let ip = p.ip?;
                     let mask = mask_from_prefix(p.prefix);
@@ -963,23 +1131,44 @@ impl Device {
                     })
                 })
                 .collect(),
-            DeviceState::Switch(sw) => sw
-                .svi
-                .iter()
-                .filter(|(_, s)| s.admin_up)
-                .map(|(vlan, s)| {
-                    let mask = mask_from_prefix(s.prefix);
-                    Route {
-                        dst: s.ip & mask,
-                        len: s.prefix,
-                        nexthop: s.ip,
-                        vlan: Some(*vlan),
-                        port: 0,
-                        src: RouteSrc::Connected,
-                    }
-                })
-                .collect(),
+            DeviceState::Switch(sw) => {
+                if vrf.is_some() {
+                    return vec![];
+                }
+                sw.svi
+                    .iter()
+                    .filter(|(_, s)| s.admin_up)
+                    .map(|(vlan, s)| {
+                        let mask = mask_from_prefix(s.prefix);
+                        Route {
+                            dst: s.ip & mask,
+                            len: s.prefix,
+                            nexthop: s.ip,
+                            vlan: Some(*vlan),
+                            port: 0,
+                            src: RouteSrc::Connected,
+                        }
+                    })
+                    .collect()
+            }
             _ => vec![],
+        }
+    }
+
+    /// 按名称查找 VRF id。
+    pub fn vrf_id(&self, name: &str) -> Option<u16> {
+        match &self.state {
+            DeviceState::Router(rs) => rs.vrfs.iter().find(|v| v.name == name).map(|v| v.id),
+            _ => None,
+        }
+    }
+
+    /// 端口所属 VRF 名称。
+    pub fn vrf_name_of_port(&self, port: PortId) -> Option<String> {
+        let id = self.port(port)?.vrf?;
+        match &self.state {
+            DeviceState::Router(rs) => rs.vrfs.iter().find(|v| v.id == id).map(|v| v.name.clone()),
+            _ => None,
         }
     }
 }
@@ -991,6 +1180,21 @@ pub fn port_mac(dev: DevId, port: PortId) -> Mac {
 
 /// STP 路径成本（802.1t 简表，本模拟器链路均按 1Gbps → 4）。
 pub const STP_COST_1G: u32 = 4;
+
+/// 解析 IS-IS NET（如 49.0001.0000.0000.0001.00），返回 System ID（中间 6 字节）。
+pub fn parse_isis_net(s: &str) -> Option<[u8; 6]> {
+    let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() < 16 {
+        return None;
+    }
+    // NET = 区域(可变) + System ID(12 hex) + NSEL(2 hex)
+    let sys = &hex[hex.len() - 14..hex.len() - 2];
+    let mut out = [0u8; 6];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&sys[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
 
 /// SVI 的确定性 MAC（02:00:00:01:00:xx，xx = VLAN 低 8 位）。
 pub fn svi_mac(vlan: VlanId) -> Mac {

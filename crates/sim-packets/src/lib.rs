@@ -34,6 +34,70 @@ pub const ETHERTYPE_VRRP: u16 = 0x0070;
 pub const VRRP_MULTICAST_MAC: Mac = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x12];
 /// IPv6 ethertype。
 pub const ETHERTYPE_IPV6: u16 = 0x86DD;
+/// BGP 在本模拟器中的类型标记（真实为 TCP 179）。
+pub const ETHERTYPE_BGP: u16 = 0x00B4;
+/// IS-IS 在本模拟器中的类型标记。
+pub const ETHERTYPE_ISIS: u16 = 0x00FE;
+/// MPLS 单播 ethertype。
+pub const ETHERTYPE_MPLS: u16 = 0x8847;
+
+/// MPLS 标签帧（简化：最多 2 层标签 + 内层 IPv4）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MplsPacket {
+    pub labels: [u32; 2],
+    pub depth: u8,
+    pub ip: Ipv4Packet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IsisKind {
+    Hello,
+    Lsp,
+}
+
+/// IS-IS 链路（复用 OSPF 的网段描述）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsisLsa {
+    pub system_id: [u8; 6],
+    pub links: [Option<OspfLink>; 8],
+    pub link_count: u8,
+    pub neighbors: [[u8; 6]; 8],
+    pub neighbor_count: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsisPacket {
+    pub kind: IsisKind,
+    pub system_id: [u8; 6],
+    pub src_ip: Ipv4Addr,
+    pub lsa: IsisLsa,
+}
+/// BGP 报文（简化：Open / Keepalive / Update；广播发送免 ARP）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BgpKind {
+    Open,
+    Keepalive,
+    Update,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BgpEntry {
+    pub net: Ipv4Addr,
+    pub len: u8,
+    pub path: [u32; 4],
+    pub path_len: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BgpPacket {
+    pub kind: BgpKind,
+    /// 发送方 AS
+    pub asn: u32,
+    /// 发送接口 IP
+    pub src_ip: Ipv4Addr,
+    pub entries: [Option<BgpEntry>; 8],
+    pub count: u8,
+}
 
 pub const DEFAULT_TTL: u8 = 64;
 
@@ -241,6 +305,12 @@ pub enum L3 {
     Vrrp(VrrpPacket),
     /// IPv6（含 ICMPv6/NDP）
     Ipv6(Ipv6Packet),
+    /// BGP（简化）
+    Bgp(BgpPacket),
+    /// IS-IS（简化）
+    Isis(IsisPacket),
+    /// MPLS 标签帧
+    Mpls(MplsPacket),
 }
 
 /// VRRP 通告（简化字段）。
@@ -475,6 +545,9 @@ impl EthernetFrame {
             L3::Ospf(_) => 120,          // OSPF 字段近似
             L3::Vrrp(_) => 40,           // VRRP 通告近似
             L3::Ipv6(_) => 40 + 8 + 16,  // IPv6 头 + ICMPv6 近似
+            L3::Bgp(_) => 19 + 32,       // BGP 头 + 条目近似
+            L3::Isis(_) => 27 + 32,      // IS-IS 头 + 条目近似
+            L3::Mpls(m) => 14 + 4 * m.depth as u32 + 20 + ICMP_DATA_SIZE + 4,
         };
         14 + payload + 4 + if self.vlan.is_some() { 4 } else { 0 }
     }

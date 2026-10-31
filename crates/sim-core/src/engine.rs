@@ -43,6 +43,12 @@ pub const OSPF_DEAD_NS: u64 = 6_000_000_000;
 /// VRRP 通告周期与 Master 失效时间。
 pub const VRRP_ADVERT_NS: u64 = 1_000_000_000;
 pub const VRRP_MASTER_DOWN_NS: u64 = 3_500_000_000;
+/// BGP Keepalive 周期与邻居失效时间（简化）。
+pub const BGP_KEEPALIVE_NS: u64 = 1_000_000_000;
+pub const BGP_HOLD_NS: u64 = 5_000_000_000;
+/// IS-IS Hello 周期与邻居失效时间（简化）。
+pub const ISIS_HELLO_NS: u64 = 2_000_000_000;
+pub const ISIS_DEAD_NS: u64 = 6_000_000_000;
 
 fn mac_is_broadcast(m: &Mac) -> bool {
     *m == BROADCAST_MAC
@@ -59,6 +65,9 @@ pub struct Stats {
     pub in_flight: usize,
     pub dropped: u64,
 }
+
+/// 端口 QoS 统计行：(端口, 广播上限, 限速 kbps, 限速丢弃, 风暴抑制丢弃)。
+pub type QosStat = (PortId, Option<u32>, Option<u32>, u64, u64);
 
 /// 远程登录（Telnet/SSH）失败原因。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +92,7 @@ struct CistSaved {
     priority: u16,
 }
 
+#[allow(clippy::large_enum_variant)] // 事件里直接携带帧，避免热路径上额外的分配
 enum EKind {
     Arrive {
         to_dev: DevId,
@@ -132,6 +142,14 @@ enum EKind {
         dev: DevId,
         sid: u16,
     },
+    /// BGP Keepalive/会话检查定时器
+    BgpTimer {
+        dev: DevId,
+    },
+    /// IS-IS Hello/老化定时器
+    IsisTimer {
+        dev: DevId,
+    },
 }
 
 /// OSPF 邻居（简化：仅记录存活、首次跳地址与接口）。
@@ -148,6 +166,73 @@ struct OspfRuntime {
     lsdb: std::collections::HashMap<Ipv4Addr, OspfLsa>,
     neighbors: std::collections::HashMap<Ipv4Addr, OspfNeighbor>,
     timer_pending: bool,
+}
+
+/// BGP 邻居会话状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BgpState {
+    Idle,
+    Established,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BgpSession {
+    remote_as: u32,
+    state: BgpState,
+    last_rx_ns: u64,
+}
+
+#[derive(Clone, Debug)]
+struct BgpLearned {
+    nexthop: Ipv4Addr,
+    path: Vec<u32>,
+    from: Ipv4Addr,
+    local_pref: u32,
+}
+
+#[derive(Default)]
+struct BgpRuntime {
+    sessions: std::collections::HashMap<Ipv4Addr, BgpSession>,
+    learned: std::collections::HashMap<(Ipv4Addr, u8), BgpLearned>,
+    timer_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IsisNb {
+    ip: Ipv4Addr,
+    port: PortId,
+    last_ns: u64,
+}
+
+#[derive(Default)]
+struct IsisRuntime {
+    lsdb: std::collections::HashMap<[u8; 6], IsisLsa>,
+    neighbors: std::collections::HashMap<[u8; 6], IsisNb>,
+    timer_pending: bool,
+}
+
+/// 端口 QoS 运行时（令牌桶 + 广播计数窗口）。
+#[derive(Clone, Copy, Debug)]
+struct QosState {
+    last_ns: u64,
+    tokens: f64,
+    window_ns: u64,
+    bcast: u32,
+    drops: u64,
+    bcast_drops: u64,
+}
+
+impl Default for QosState {
+    fn default() -> Self {
+        Self {
+            last_ns: 0,
+            tokens: f64::INFINITY,
+            window_ns: 0,
+            bcast: 0,
+            drops: 0,
+            bcast_drops: 0,
+        }
+    }
 }
 
 struct QEvent {
@@ -201,6 +286,9 @@ pub struct Engine {
     pub events_processed: u64,
     ospf: std::collections::HashMap<DevId, OspfRuntime>,
     vrrp_pending: std::collections::HashSet<DevId>,
+    qos: std::collections::HashMap<(DevId, PortId), QosState>,
+    bgp: std::collections::HashMap<DevId, BgpRuntime>,
+    isis: std::collections::HashMap<DevId, IsisRuntime>,
 }
 
 impl Engine {
@@ -215,6 +303,9 @@ impl Engine {
             events_processed: 0,
             ospf: std::collections::HashMap::new(),
             vrrp_pending: Default::default(),
+            qos: std::collections::HashMap::new(),
+            bgp: std::collections::HashMap::new(),
+            isis: std::collections::HashMap::new(),
         };
         // 启动时初始化 STP：全量重算 + 调度 hello
         eng.stp_recompute_all();
@@ -341,6 +432,8 @@ impl Engine {
                 EKind::VrrpTimer { dev } => self.on_vrrp_timer(dev),
                 EKind::Ping6Send { dev, sid, probe } => self.on_ping6_send(dev, sid, probe),
                 EKind::Ping6Done { dev, sid } => self.on_ping6_done(dev, sid),
+                EKind::BgpTimer { dev } => self.on_bgp_timer(dev),
+                EKind::IsisTimer { dev } => self.on_isis_timer(dev),
             }
         }
         self.stats()
@@ -456,6 +549,23 @@ impl Engine {
         };
         // STP 启用时，非 Forwarding 端口（按该 VLAN 的实例）丢弃数据帧（不学习）
         if self.stp_on(dev_id) && !self.can_forward(dev_id, in_port, vlan) {
+            self.dropped += 1;
+            return;
+        }
+        // QoS：入口限速 / 广播风暴抑制
+        if self.qos_ingress_drop(dev_id, in_port, &frame) {
+            self.dropped += 1;
+            return;
+        }
+        // DHCP Snooping：仅信任端口可下发服务器报文；同时学习绑定表
+        if let L3::Dhcp(dhcp) = frame.payload {
+            if self.dhcp_snooping_ingress(dev_id, in_port, vlan, &dhcp) {
+                self.dropped += 1;
+                return;
+            }
+        }
+        // 端口安全：超出最大 MAC 数按违规动作处理
+        if !self.port_security_allow(dev_id, in_port, frame.src) {
             self.dropped += 1;
             return;
         }
@@ -658,6 +768,9 @@ impl Engine {
             L3::Ospf(_) => {} // SVI 不跑 OSPF（简化）
             L3::Vrrp(_) => {} // 交换机不做 VRRP
             L3::Ipv6(_) => {} // IPv6 仅路由器/主机（简化）
+            L3::Bgp(_) => {}  // 交换机不参与 BGP
+            L3::Isis(_) => {} // 交换机不参与 IS-IS
+            L3::Mpls(_) => {} // 交换机不处理 MPLS
             L3::Dhcp(_) => {} // 交换机 SVI 不参与 DHCP（M2b）
         }
     }
@@ -753,6 +866,24 @@ impl Engine {
             self.ipv6_on_frame(dev_id, port, frame);
             return;
         }
+        if frame.ethertype == ETHERTYPE_BGP {
+            if let L3::Bgp(pkt) = frame.payload {
+                self.on_bgp_packet(dev_id, port, pkt);
+            }
+            return;
+        }
+        if frame.ethertype == ETHERTYPE_ISIS {
+            if let L3::Isis(pkt) = frame.payload {
+                self.on_isis_packet(dev_id, port, pkt);
+            }
+            return;
+        }
+        if frame.ethertype == ETHERTYPE_MPLS {
+            if let L3::Mpls(m) = frame.payload {
+                self.mpls_on_frame(dev_id, port, m);
+            }
+            return;
+        }
         let (my_mac, my_ip) = {
             let Some(d) = self.net.device(dev_id) else {
                 return;
@@ -780,6 +911,9 @@ impl Engine {
             L3::Ospf(_) => {} // OSPF 已在入口处理
             L3::Vrrp(_) => {} // VRRP 已在入口处理
             L3::Ipv6(_) => {} // IPv6 已在入口处理
+            L3::Bgp(_) => {}  // BGP 已在入口处理
+            L3::Isis(_) => {} // IS-IS 已在入口处理
+            L3::Mpls(_) => {} // MPLS 已在入口处理
             L3::Dhcp(dhcp) => {
                 // DHCP 广播：主机客户端 / 路由器服务器各自处理
                 match d_kind(&self.net, dev_id) {
@@ -957,12 +1091,21 @@ impl Engine {
         }
         // 路由器：NAT 入向还原优先（outside 口收到目的为出口 IP 的报文 → 还原目的后转发）
         if d_kind(&self.net, dev_id) == DeviceKind::Router {
+            let vrf = self
+                .net
+                .device(dev_id)
+                .and_then(|d| d.port(port))
+                .and_then(|p| p.vrf);
             let mut pkt2 = pkt;
-            if self.nat_check_ingress(dev_id, port, &mut pkt2) {
-                self.router_forward(dev_id, pkt2);
+            if vrf.is_none() && self.nat_check_ingress(dev_id, port, &mut pkt2) {
+                self.router_forward(dev_id, None, pkt2);
                 return;
             }
-            let vip_mac = self.vrrp_vip_owner(dev_id, port, pkt.dst);
+            let vip_mac = if vrf.is_none() {
+                self.vrrp_vip_owner(dev_id, port, pkt.dst)
+            } else {
+                None
+            };
             if Some(pkt.dst) == my_ip || vip_mac.is_some() {
                 if pkt.icmp.is_reply {
                     self.on_ping_reply(dev_id, pkt);
@@ -989,7 +1132,7 @@ impl Engine {
                 }
                 return;
             }
-            self.router_forward(dev_id, pkt);
+            self.router_forward(dev_id, vrf, pkt);
             return;
         }
         // 主机：本机交付或丢弃
@@ -1109,13 +1252,17 @@ impl Engine {
         }
     }
 
-    fn router_forward(&mut self, dev_id: DevId, mut pkt: Ipv4Packet) {
+    fn router_forward(&mut self, dev_id: DevId, vrf: Option<u16>, mut pkt: Ipv4Packet) {
         if pkt.ttl <= 1 {
             self.dropped += 1;
             return;
         }
         pkt.ttl -= 1;
-        let Some((port, nexthop, _vlan)) = self.net.lookup_route(dev_id, pkt.dst) else {
+        // VRF 入口：PE 的 VPN 路由下一跳位于全局 MPLS 域，先尝试压签
+        if vrf.is_some() && self.mpls_push(dev_id, pkt, vrf) {
+            return;
+        }
+        let Some((port, nexthop, _vlan)) = self.net.lookup_route_vrf(dev_id, vrf, pkt.dst) else {
             self.dropped += 1;
             return;
         };
@@ -1129,8 +1276,14 @@ impl Engine {
             self.dropped += 1;
             return;
         }
-        // NAT 出向改写（EasyIP/静态）
-        self.nat_egress(dev_id, port, &mut pkt);
+        // NAT 出向改写（EasyIP/静态；VRF 内不做 NAT）
+        if vrf.is_none() {
+            self.nat_egress(dev_id, port, &mut pkt);
+        }
+        // MPLS 入 LSP：命中 FEC 则压签发送
+        if self.mpls_push(dev_id, pkt, None) {
+            return;
+        }
         self.device_send_ip(dev_id, port, pkt, nexthop);
     }
 
@@ -1459,7 +1612,7 @@ impl Engine {
             };
             hs.next_ping_id = hs.next_ping_id.wrapping_add(1);
             hs.dhcp = Some(HostDhcp { discovering: true });
-            (hs.next_ping_id * 2654435761) | 1
+            hs.next_ping_id.wrapping_mul(2654435761) | 1
         };
         let pkt = Ipv4Packet {
             src: 0,
@@ -1807,6 +1960,969 @@ impl Engine {
         self.nat_ingress(dev_id, port, pkt)
     }
 
+    // ---------- 端口安全 / DHCP Snooping / QoS ----------
+
+    fn dhcp_snooping_ingress(
+        &mut self,
+        dev: DevId,
+        port: PortId,
+        vlan: VlanId,
+        dhcp: &DhcpPacket,
+    ) -> bool {
+        let (enabled, trusted) = {
+            let Some(d) = self.net.device(dev) else {
+                return false;
+            };
+            let DeviceState::Switch(sw) = &d.state else {
+                return false;
+            };
+            (
+                sw.dhcp_snooping,
+                d.port(port).map(|p| p.dhcp_trust).unwrap_or(false),
+            )
+        };
+        if !enabled {
+            return false;
+        }
+        if matches!(dhcp.op, DhcpOp::Offer | DhcpOp::Ack) && !trusted {
+            return true; // 非信任端口来的服务器报文丢弃
+        }
+        let ip = match dhcp.op {
+            DhcpOp::Request => dhcp.requested_ip,
+            DhcpOp::Ack => dhcp.offered_ip,
+            _ => 0,
+        };
+        if ip != 0 {
+            let Some(d) = self.net.device_mut(dev) else {
+                return false;
+            };
+            let DeviceState::Switch(sw) = &mut d.state else {
+                return false;
+            };
+            let b = DhcpSnoopingBinding {
+                mac: dhcp.client_mac,
+                ip,
+                vlan,
+                port,
+            };
+            if let Some(x) = sw.dhcp_bindings.iter_mut().find(|x| x.mac == b.mac) {
+                *x = b;
+            } else {
+                sw.dhcp_bindings.push(b);
+            }
+        }
+        false
+    }
+
+    fn port_security_allow(&mut self, dev: DevId, port: PortId, mac: Mac) -> bool {
+        let shutdown = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return true;
+            };
+            let Some(cfg) = d.port(port).and_then(|p| p.port_security) else {
+                return true;
+            };
+            let DeviceState::Switch(sw) = &mut d.state else {
+                return true;
+            };
+            let list = sw.secure_macs.entry(port).or_default();
+            if list.contains(&mac) {
+                return true;
+            }
+            if (list.len() as u16) < cfg.max {
+                list.push(mac);
+                return true;
+            }
+            *sw.port_sec_violations.entry(port).or_insert(0) += 1;
+            cfg.violation == PortSecViolation::Shutdown
+        };
+        if shutdown {
+            self.net.set_port_admin(dev, port, false);
+            self.stp_topology_changed();
+        }
+        false
+    }
+
+    fn qos_ingress_drop(&mut self, dev: DevId, port: PortId, frame: &EthernetFrame) -> bool {
+        let (limit, rate) = {
+            let Some(d) = self.net.device(dev) else {
+                return false;
+            };
+            let Some(p) = d.port(port) else {
+                return false;
+            };
+            (p.broadcast_limit_pps, p.rate_limit_kbps)
+        };
+        if limit.is_none() && rate.is_none() {
+            return false;
+        }
+        let now = self.now;
+        let size = frame.wire_size() as f64;
+        let st = self.qos.entry((dev, port)).or_insert_with(|| QosState {
+            last_ns: now,
+            ..Default::default()
+        });
+        let mut drop = false;
+        if let Some(rate) = rate {
+            let bps = rate as f64 * 1000.0 / 8.0;
+            let elapsed = now.saturating_sub(st.last_ns) as f64 / 1e9;
+            st.last_ns = now;
+            let burst = bps.max(size);
+            if st.tokens.is_infinite() {
+                st.tokens = burst;
+            }
+            st.tokens = (st.tokens + elapsed * bps).min(burst);
+            if st.tokens < size {
+                st.drops += 1;
+                drop = true;
+            } else {
+                st.tokens -= size;
+            }
+        }
+        if let Some(lim) = limit {
+            if frame.dst == BROADCAST_MAC {
+                if now.saturating_sub(st.window_ns) >= 1_000_000_000 {
+                    st.window_ns = now;
+                    st.bcast = 0;
+                }
+                st.bcast += 1;
+                if st.bcast > lim {
+                    st.bcast_drops += 1;
+                    drop = true;
+                }
+            }
+        }
+        drop
+    }
+
+    /// 供 show 使用：(端口, 广播上限, 限速 kbps, 限速丢弃, 风暴抑制丢弃)。
+    pub fn qos_stats_of(&self, dev: DevId) -> Vec<QosStat> {
+        let Some(d) = self.net.device(dev) else {
+            return vec![];
+        };
+        d.ports
+            .iter()
+            .filter(|p| p.broadcast_limit_pps.is_some() || p.rate_limit_kbps.is_some())
+            .map(|p| {
+                let st = self.qos.get(&(dev, p.idx)).copied().unwrap_or_default();
+                (
+                    p.idx,
+                    p.broadcast_limit_pps,
+                    p.rate_limit_kbps,
+                    st.drops,
+                    st.bcast_drops,
+                )
+            })
+            .collect()
+    }
+
+    pub fn dhcp_bindings_of(&self, dev: DevId) -> Vec<DhcpSnoopingBinding> {
+        match self.net.device(dev).map(|d| &d.state) {
+            Some(DeviceState::Switch(sw)) if sw.dhcp_snooping => sw.dhcp_bindings.clone(),
+            _ => vec![],
+        }
+    }
+
+    pub fn dhcp_snooping_on(&self, dev: DevId) -> bool {
+        matches!(self.net.device(dev).map(|d| &d.state), Some(DeviceState::Switch(sw)) if sw.dhcp_snooping)
+    }
+
+    pub fn port_security_of(&self, dev: DevId, port: PortId) -> Option<(PortSecurity, usize, u32)> {
+        let d = self.net.device(dev)?;
+        let DeviceState::Switch(sw) = &d.state else {
+            return None;
+        };
+        let cfg = d.port(port)?.port_security?;
+        let current = sw.secure_macs.get(&port).map(|v| v.len()).unwrap_or(0);
+        let viol = sw.port_sec_violations.get(&port).copied().unwrap_or(0);
+        Some((cfg, current, viol))
+    }
+
+    // ---------- BGP（eBGP 简化：广播报文 + 周期 Keepalive） ----------
+
+    pub fn bgp_config_changed(&mut self, dev: DevId) {
+        let Some(cfg) = self.bgp_config(dev) else {
+            return;
+        };
+        {
+            let rt = self.bgp.entry(dev).or_default();
+            for (ip, ras) in &cfg.neighbors {
+                let s = rt.sessions.entry(*ip).or_insert(BgpSession {
+                    remote_as: *ras,
+                    state: BgpState::Idle,
+                    last_rx_ns: 0,
+                });
+                if s.remote_as != *ras {
+                    s.remote_as = *ras;
+                    s.state = BgpState::Idle;
+                }
+            }
+            let valid: std::collections::HashSet<Ipv4Addr> =
+                cfg.neighbors.iter().map(|(i, _)| *i).collect();
+            rt.sessions.retain(|ip, _| valid.contains(ip));
+            rt.learned.retain(|_, l| valid.contains(&l.from));
+        }
+        self.bgp_recompute_routes(dev);
+        self.bgp_schedule(dev);
+        self.bgp_send_all(dev);
+    }
+
+    fn bgp_config(&self, dev: DevId) -> Option<BgpConfig> {
+        let d = self.net.device(dev)?;
+        let DeviceState::Router(rs) = &d.state else {
+            return None;
+        };
+        rs.bgp.clone()
+    }
+
+    /// 路由前缀是否命中基础 ACL（ACL permit = 命中）。
+    fn route_acl_permit(&self, dev: DevId, acl_no: u32, net: Ipv4Addr) -> bool {
+        let Some(d) = self.net.device(dev) else {
+            return false;
+        };
+        let DeviceState::Router(rs) = &d.state else {
+            return false;
+        };
+        let Some(acl) = rs.acls.iter().find(|a| a.number == acl_no) else {
+            return false;
+        };
+        for r in &acl.rules {
+            if r.matches_route(net) {
+                return r.permit;
+            }
+        }
+        false
+    }
+
+    /// 执行路由策略：按 seq 升序首个命中节点决定动作；无节点命中 = 隐式拒绝。
+    fn route_policy_decide(
+        &self,
+        dev: DevId,
+        name: &str,
+        net: Ipv4Addr,
+    ) -> Option<(bool, Option<u32>)> {
+        let d = self.net.device(dev)?;
+        let DeviceState::Router(rs) = &d.state else {
+            return None;
+        };
+        let rp = rs.route_policies.iter().find(|p| p.name == name)?;
+        let mut nodes: Vec<&RoutePolicyNode> = rp.nodes.iter().collect();
+        nodes.sort_by_key(|n| n.seq);
+        for node in nodes {
+            let matched = node
+                .match_acl
+                .is_none_or(|acl| self.route_acl_permit(dev, acl, net));
+            if matched {
+                return Some((node.permit, node.set_local_pref));
+            }
+        }
+        Some((false, None))
+    }
+
+    /// 邻居入向策略：未配置策略放行；配置了但策略不存在 = 拒绝。
+    fn bgp_import_decision(
+        &self,
+        dev: DevId,
+        neighbor: Ipv4Addr,
+        net: Ipv4Addr,
+    ) -> (bool, Option<u32>) {
+        let Some(cfg) = self.bgp_config(dev) else {
+            return (true, None);
+        };
+        let Some(pp) = cfg
+            .peer_policies
+            .iter()
+            .find(|p| p.import && p.neighbor == neighbor)
+        else {
+            return (true, None);
+        };
+        self.route_policy_decide(dev, &pp.name, net)
+            .unwrap_or((false, None))
+    }
+
+    /// 邻居出向策略：默认放行。
+    fn bgp_export_allowed(&self, dev: DevId, neighbor: Ipv4Addr, net: Ipv4Addr) -> bool {
+        let Some(cfg) = self.bgp_config(dev) else {
+            return true;
+        };
+        let Some(pp) = cfg
+            .peer_policies
+            .iter()
+            .find(|p| !p.import && p.neighbor == neighbor)
+        else {
+            return true;
+        };
+        self.route_policy_decide(dev, &pp.name, net)
+            .map(|(permit, _)| permit)
+            .unwrap_or(false)
+    }
+
+    /// 策略变更后清空已学习路由并重算，邻居下一轮 Update 会按新策略重新学习。
+    pub fn bgp_policy_changed(&mut self, dev: DevId) {
+        if let Some(rt) = self.bgp.get_mut(&dev) {
+            rt.learned.clear();
+        }
+        self.bgp_recompute_routes(dev);
+        self.bgp_send_all(dev);
+    }
+
+    fn bgp_schedule(&mut self, dev: DevId) {
+        let rt = self.bgp.entry(dev).or_default();
+        if !rt.timer_pending {
+            rt.timer_pending = true;
+            self.push(self.now + BGP_KEEPALIVE_NS, EKind::BgpTimer { dev });
+        }
+    }
+
+    fn bgp_entries_for(&self, dev: DevId, neighbor: Ipv4Addr) -> ([Option<BgpEntry>; 8], u8) {
+        let mut out = [None; 8];
+        let mut n = 0usize;
+        let Some(cfg) = self.bgp_config(dev) else {
+            return (out, 0);
+        };
+        let mut push = |net: Ipv4Addr, len: u8, path: Vec<u32>| {
+            if n >= 8 {
+                return;
+            }
+            let mut p = [0u32; 4];
+            let take = path.len().min(4);
+            p[..take].copy_from_slice(&path[..take]);
+            out[n] = Some(BgpEntry {
+                net,
+                len,
+                path: p,
+                path_len: take as u8,
+            });
+            n += 1;
+        };
+        for (net, len) in &cfg.networks {
+            if !self.bgp_export_allowed(dev, neighbor, *net) {
+                continue;
+            }
+            push(*net, *len, vec![cfg.asn]);
+        }
+        if let Some(rt) = self.bgp.get(&dev) {
+            for ((net, len), l) in &rt.learned {
+                if l.from == neighbor {
+                    continue;
+                }
+                if !self.bgp_export_allowed(dev, neighbor, *net) {
+                    continue;
+                }
+                let mut path = vec![cfg.asn];
+                path.extend(l.path.iter().copied());
+                push(*net, *len, path);
+            }
+        }
+        (out, n as u8)
+    }
+
+    fn bgp_send(
+        &mut self,
+        dev: DevId,
+        neighbor: Ipv4Addr,
+        kind: BgpKind,
+        entries: [Option<BgpEntry>; 8],
+        count: u8,
+    ) {
+        let Some(cfg) = self.bgp_config(dev) else {
+            return;
+        };
+        let Some((port, _nh, _vlan)) = self.net.lookup_route(dev, neighbor) else {
+            return;
+        };
+        let Some(d) = self.net.device(dev) else {
+            return;
+        };
+        let Some(p) = d.port(port) else {
+            return;
+        };
+        let Some(src_ip) = p.ip else {
+            return;
+        };
+        let frame = EthernetFrame {
+            dst: BROADCAST_MAC,
+            src: p.mac,
+            vlan: None,
+            ethertype: ETHERTYPE_BGP,
+            payload: L3::Bgp(BgpPacket {
+                kind,
+                asn: cfg.asn,
+                src_ip,
+                entries,
+                count,
+            }),
+        };
+        self.transmit_frame(dev, port, frame);
+    }
+
+    fn bgp_send_all(&mut self, dev: DevId) {
+        let neighbors: Vec<(Ipv4Addr, BgpState)> = self
+            .bgp
+            .get(&dev)
+            .map(|rt| rt.sessions.iter().map(|(ip, s)| (*ip, s.state)).collect())
+            .unwrap_or_default();
+        for (ip, state) in neighbors {
+            let (entries, count) = self.bgp_entries_for(dev, ip);
+            self.bgp_send(dev, ip, BgpKind::Open, [None; 8], 0);
+            if state == BgpState::Established {
+                self.bgp_send(dev, ip, BgpKind::Keepalive, [None; 8], 0);
+                self.bgp_send(dev, ip, BgpKind::Update, entries, count);
+            }
+        }
+    }
+
+    fn on_bgp_timer(&mut self, dev: DevId) {
+        if let Some(rt) = self.bgp.get_mut(&dev) {
+            rt.timer_pending = false;
+        }
+        let Some(cfg) = self.bgp_config(dev) else {
+            return;
+        };
+        let now = self.now;
+        // 会话老化
+        let mut lost: Vec<Ipv4Addr> = vec![];
+        {
+            let rt = self.bgp.entry(dev).or_default();
+            for (ip, s) in rt.sessions.iter_mut() {
+                if s.state == BgpState::Established
+                    && now.saturating_sub(s.last_rx_ns) > BGP_HOLD_NS
+                {
+                    s.state = BgpState::Idle;
+                    lost.push(*ip);
+                }
+            }
+            for ip in &lost {
+                rt.learned.retain(|_, l| l.from != *ip);
+            }
+        }
+        if !lost.is_empty() {
+            self.bgp_recompute_routes(dev);
+        }
+        // 周期发送：Open / Keepalive + Update
+        let neighbors: Vec<(Ipv4Addr, BgpState)> = self
+            .bgp
+            .get(&dev)
+            .map(|rt| rt.sessions.iter().map(|(ip, s)| (*ip, s.state)).collect())
+            .unwrap_or_default();
+        for (ip, state) in neighbors {
+            if state == BgpState::Idle {
+                self.bgp_send(dev, ip, BgpKind::Open, [None; 8], 0);
+            } else {
+                self.bgp_send(dev, ip, BgpKind::Keepalive, [None; 8], 0);
+                let (entries, count) = self.bgp_entries_for(dev, ip);
+                self.bgp_send(dev, ip, BgpKind::Update, entries, count);
+            }
+        }
+        let _ = cfg;
+        self.bgp_schedule(dev);
+    }
+
+    fn on_bgp_packet(&mut self, dev: DevId, _port: PortId, pkt: BgpPacket) {
+        let Some(cfg) = self.bgp_config(dev) else {
+            return;
+        };
+        let Some(&(_, remote_as)) = cfg.neighbors.iter().find(|(ip, _)| *ip == pkt.src_ip) else {
+            return;
+        };
+        if pkt.asn != remote_as {
+            return;
+        }
+        {
+            let rt = self.bgp.entry(dev).or_default();
+            let Some(s) = rt.sessions.get_mut(&pkt.src_ip) else {
+                return;
+            };
+            s.last_rx_ns = self.now;
+            if pkt.kind == BgpKind::Open {
+                s.state = BgpState::Established;
+            }
+            if s.state != BgpState::Established && pkt.kind != BgpKind::Open {
+                return;
+            }
+        }
+        if pkt.kind == BgpKind::Open {
+            let (entries, count) = self.bgp_entries_for(dev, pkt.src_ip);
+            self.bgp_send(dev, pkt.src_ip, BgpKind::Keepalive, [None; 8], 0);
+            self.bgp_send(dev, pkt.src_ip, BgpKind::Update, entries, count);
+            return;
+        }
+        if pkt.kind != BgpKind::Update {
+            return;
+        }
+        let mut changed = false;
+        let mut incoming: Vec<((Ipv4Addr, u8), Vec<u32>, u32)> = vec![];
+        for e in pkt.entries.iter().flatten() {
+            let path: Vec<u32> = e.path[..e.path_len as usize].to_vec();
+            if path.contains(&cfg.asn) {
+                continue; // AS_PATH 环路
+            }
+            let (permit, local_pref) = self.bgp_import_decision(dev, pkt.src_ip, e.net);
+            if !permit {
+                continue;
+            }
+            incoming.push(((e.net, e.len), path, local_pref.unwrap_or(100)));
+        }
+        {
+            let Some(rt) = self.bgp.get_mut(&dev) else {
+                return;
+            };
+            for (key, path, local_pref) in incoming {
+                let better = match rt.learned.get(&key) {
+                    None => true,
+                    Some(old) => {
+                        local_pref > old.local_pref
+                            || (local_pref == old.local_pref && path.len() < old.path.len())
+                    }
+                };
+                if better {
+                    rt.learned.insert(
+                        key,
+                        BgpLearned {
+                            nexthop: pkt.src_ip,
+                            path,
+                            from: pkt.src_ip,
+                            local_pref,
+                        },
+                    );
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.bgp_recompute_routes(dev);
+            // 向其它已建立邻居重发更新
+            let others: Vec<Ipv4Addr> = self
+                .bgp
+                .get(&dev)
+                .map(|rt| {
+                    rt.sessions
+                        .iter()
+                        .filter(|(ip, s)| **ip != pkt.src_ip && s.state == BgpState::Established)
+                        .map(|(ip, _)| *ip)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for ip in others {
+                let (entries, count) = self.bgp_entries_for(dev, ip);
+                self.bgp_send(dev, ip, BgpKind::Update, entries, count);
+            }
+        }
+    }
+
+    fn bgp_recompute_routes(&mut self, dev: DevId) {
+        let routes: Vec<Route> = self
+            .bgp
+            .get(&dev)
+            .map(|rt| {
+                rt.learned
+                    .iter()
+                    .map(|((net, len), l)| Route {
+                        dst: *net,
+                        len: *len,
+                        nexthop: l.nexthop,
+                        vlan: None,
+                        port: 0,
+                        src: RouteSrc::Bgp,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(d) = self.net.device_mut(dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                rs.bgp_routes = routes;
+            }
+        }
+    }
+
+    /// 供 show 使用：(邻居, 对端 AS, 是否 Established)。
+    pub fn bgp_sessions_of(&self, dev: DevId) -> Vec<(Ipv4Addr, u32, bool)> {
+        let mut v: Vec<(Ipv4Addr, u32, bool)> = self
+            .bgp
+            .get(&dev)
+            .map(|rt| {
+                rt.sessions
+                    .iter()
+                    .map(|(ip, s)| (*ip, s.remote_as, s.state == BgpState::Established))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_by_key(|x| x.0);
+        v
+    }
+
+    /// 供 show 使用：(网段, 前缀, AS_PATH, 下一跳, Local Preference)。
+    pub fn bgp_routes_of(&self, dev: DevId) -> Vec<(Ipv4Addr, u8, Vec<u32>, Ipv4Addr, u32)> {
+        let mut v: Vec<(Ipv4Addr, u8, Vec<u32>, Ipv4Addr, u32)> = self
+            .bgp
+            .get(&dev)
+            .map(|rt| {
+                rt.learned
+                    .iter()
+                    .map(|((net, len), l)| (*net, *len, l.path.clone(), l.nexthop, l.local_pref))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_by_key(|x| (x.0, x.1));
+        v
+    }
+
+    // ---------- IS-IS（单区域 Level-1 简化） ----------
+
+    pub fn isis_config_changed(&mut self, dev: DevId) {
+        if !self.isis_on(dev) {
+            return;
+        }
+        self.isis.entry(dev).or_default();
+        let lsa = self.isis_build_lsa(dev);
+        self.isis
+            .entry(dev)
+            .or_default()
+            .lsdb
+            .insert(lsa.system_id, lsa);
+        self.isis_recompute_all();
+        self.isis_flood(dev, lsa, None);
+        self.isis_send_hello(dev);
+        self.isis_schedule(dev);
+    }
+
+    fn isis_on(&self, dev: DevId) -> bool {
+        self.net
+            .device(dev)
+            .map(|d| matches!(&d.state, DeviceState::Router(rs) if rs.isis.is_some()))
+            .unwrap_or(false)
+    }
+
+    fn isis_ports(&self, dev: DevId) -> Vec<(PortId, Ipv4Addr, u8)> {
+        let Some(d) = self.net.device(dev) else {
+            return vec![];
+        };
+        d.ports
+            .iter()
+            .filter(|p| p.isis_enable && p.admin_up && p.link.is_some() && p.vrf.is_none())
+            .filter_map(|p| p.ip.map(|ip| (p.idx, ip, p.prefix)))
+            .collect()
+    }
+
+    fn isis_system_id(&self, dev: DevId) -> Option<[u8; 6]> {
+        let d = self.net.device(dev)?;
+        let DeviceState::Router(rs) = &d.state else {
+            return None;
+        };
+        rs.isis.as_ref().map(|c| c.system_id)
+    }
+
+    fn isis_build_lsa(&self, dev: DevId) -> IsisLsa {
+        let mut lsa = IsisLsa {
+            system_id: self.isis_system_id(dev).unwrap_or([0; 6]),
+            ..Default::default()
+        };
+        for (_, ip, prefix) in self.isis_ports(dev) {
+            if lsa.link_count as usize >= lsa.links.len() {
+                break;
+            }
+            let i = lsa.link_count as usize;
+            lsa.links[i] = Some(OspfLink {
+                net: ip & mask_from_prefix(prefix),
+                len: prefix,
+            });
+            lsa.link_count += 1;
+        }
+        if let Some(rt) = self.isis.get(&dev) {
+            let now = self.now;
+            for (sid, nb) in &rt.neighbors {
+                if now.saturating_sub(nb.last_ns) <= ISIS_DEAD_NS
+                    && (lsa.neighbor_count as usize) < lsa.neighbors.len()
+                {
+                    lsa.neighbors[lsa.neighbor_count as usize] = *sid;
+                    lsa.neighbor_count += 1;
+                }
+            }
+        }
+        lsa
+    }
+
+    fn isis_schedule(&mut self, dev: DevId) {
+        let rt = self.isis.entry(dev).or_default();
+        if !rt.timer_pending {
+            rt.timer_pending = true;
+            self.push(self.now + ISIS_HELLO_NS, EKind::IsisTimer { dev });
+        }
+    }
+
+    fn isis_send_hello(&mut self, dev: DevId) {
+        let lsa = self.isis_build_lsa(dev);
+        for (port, ip, _) in self.isis_ports(dev) {
+            let Some(mac) = self
+                .net
+                .device(dev)
+                .and_then(|d| d.port(port))
+                .map(|p| p.mac)
+            else {
+                continue;
+            };
+            let frame = EthernetFrame {
+                dst: BROADCAST_MAC,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_ISIS,
+                payload: L3::Isis(IsisPacket {
+                    kind: IsisKind::Hello,
+                    system_id: lsa.system_id,
+                    src_ip: ip,
+                    lsa,
+                }),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+    }
+
+    fn isis_flood(&mut self, dev: DevId, lsa: IsisLsa, skip: Option<PortId>) {
+        for (port, ip, _) in self.isis_ports(dev) {
+            if skip == Some(port) {
+                continue;
+            }
+            let Some(mac) = self
+                .net
+                .device(dev)
+                .and_then(|d| d.port(port))
+                .map(|p| p.mac)
+            else {
+                continue;
+            };
+            let frame = EthernetFrame {
+                dst: BROADCAST_MAC,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_ISIS,
+                payload: L3::Isis(IsisPacket {
+                    kind: IsisKind::Lsp,
+                    system_id: lsa.system_id,
+                    src_ip: ip,
+                    lsa,
+                }),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+    }
+
+    fn on_isis_timer(&mut self, dev: DevId) {
+        if !self.isis_on(dev) {
+            return;
+        }
+        if let Some(rt) = self.isis.get_mut(&dev) {
+            rt.timer_pending = false;
+        }
+        let now = self.now;
+        let expired: Vec<[u8; 6]> = self
+            .isis
+            .get(&dev)
+            .map(|rt| {
+                rt.neighbors
+                    .iter()
+                    .filter(|(_, nb)| now.saturating_sub(nb.last_ns) > ISIS_DEAD_NS)
+                    .map(|(sid, _)| *sid)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !expired.is_empty() {
+            if let Some(rt) = self.isis.get_mut(&dev) {
+                for sid in expired {
+                    rt.neighbors.remove(&sid);
+                }
+            }
+            let lsa = self.isis_build_lsa(dev);
+            if let Some(rt) = self.isis.get_mut(&dev) {
+                rt.lsdb.insert(lsa.system_id, lsa);
+            }
+            self.isis_flood(dev, lsa, None);
+            self.isis_recompute_all();
+        }
+        self.isis_send_hello(dev);
+        self.isis_schedule(dev);
+    }
+
+    fn on_isis_packet(&mut self, dev: DevId, port: PortId, pkt: IsisPacket) {
+        if !self.isis_on(dev) {
+            return;
+        }
+        if !self.isis_ports(dev).iter().any(|(p, _, _)| *p == port) {
+            return;
+        }
+        if pkt.system_id == [0; 6] || Some(pkt.system_id) == self.isis_system_id(dev) {
+            return;
+        }
+        let now = self.now;
+        let mut changed = false;
+        {
+            let rt = self.isis.entry(dev).or_default();
+            match rt.neighbors.get(&pkt.system_id) {
+                Some(nb) if now.saturating_sub(nb.last_ns) <= ISIS_DEAD_NS => {}
+                _ => changed = true,
+            }
+            rt.neighbors.insert(
+                pkt.system_id,
+                IsisNb {
+                    ip: pkt.src_ip,
+                    port,
+                    last_ns: now,
+                },
+            );
+            if pkt.lsa.system_id != [0; 6] && rt.lsdb.get(&pkt.lsa.system_id) != Some(&pkt.lsa) {
+                rt.lsdb.insert(pkt.lsa.system_id, pkt.lsa);
+                changed = true;
+            }
+        }
+        if changed {
+            let own = self.isis_build_lsa(dev);
+            if let Some(rt) = self.isis.get_mut(&dev) {
+                rt.lsdb.insert(own.system_id, own);
+            }
+            self.isis_flood(dev, pkt.lsa, Some(port));
+            self.isis_recompute_all();
+        }
+    }
+
+    fn isis_recompute_all(&mut self) {
+        let devs: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| matches!(&d.state, DeviceState::Router(rs) if rs.isis.is_some()))
+            .map(|d| d.id)
+            .collect();
+        for dev in &devs {
+            let lsa = self.isis_build_lsa(*dev);
+            self.isis
+                .entry(*dev)
+                .or_default()
+                .lsdb
+                .insert(lsa.system_id, lsa);
+        }
+        for dev in devs {
+            let routes = self.isis_spf(dev);
+            if let Some(d) = self.net.device_mut(dev) {
+                if let DeviceState::Router(rs) = &mut d.state {
+                    rs.isis_routes = routes;
+                }
+            }
+        }
+    }
+
+    fn isis_spf(&self, dev: DevId) -> Vec<Route> {
+        let Some(rt) = self.isis.get(&dev) else {
+            return vec![];
+        };
+        let Some(self_id) = self.isis_system_id(dev) else {
+            return vec![];
+        };
+        let mut dist: std::collections::HashMap<[u8; 6], u32> = Default::default();
+        let mut first: std::collections::HashMap<[u8; 6], [u8; 6]> = Default::default();
+        let mut done: std::collections::HashSet<[u8; 6]> = Default::default();
+        dist.insert(self_id, 0);
+        loop {
+            let next = dist
+                .iter()
+                .filter(|(sid, _)| !done.contains(*sid))
+                .min_by_key(|(_, d)| **d)
+                .map(|(sid, d)| (*sid, *d));
+            let Some((u, du)) = next else { break };
+            done.insert(u);
+            let Some(lsa) = rt.lsdb.get(&u) else { continue };
+            for i in 0..lsa.neighbor_count as usize {
+                let v = lsa.neighbors[i];
+                if v == [0; 6] || !rt.lsdb.contains_key(&v) {
+                    continue;
+                }
+                let nd = du + 1;
+                if nd < *dist.get(&v).unwrap_or(&u32::MAX) {
+                    dist.insert(v, nd);
+                    let hop = if u == self_id {
+                        v
+                    } else {
+                        *first.get(&u).unwrap_or(&v)
+                    };
+                    first.insert(v, hop);
+                }
+            }
+        }
+        let connected: std::collections::HashSet<(Ipv4Addr, u8)> = self
+            .net
+            .device(dev)
+            .map(|d| {
+                d.connected_routes()
+                    .iter()
+                    .map(|r| (r.dst, r.len))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut routes = vec![];
+        let mut seen: std::collections::HashSet<(Ipv4Addr, u8)> = Default::default();
+        for sid in dist.keys() {
+            if *sid == self_id {
+                continue;
+            }
+            let Some(hop) = first.get(sid) else { continue };
+            let Some(nb) = rt.neighbors.get(hop) else {
+                continue;
+            };
+            let Some(lsa) = rt.lsdb.get(sid) else {
+                continue;
+            };
+            for i in 0..lsa.link_count as usize {
+                let Some(link) = lsa.links[i] else { continue };
+                if connected.contains(&(link.net, link.len)) || !seen.insert((link.net, link.len)) {
+                    continue;
+                }
+                routes.push(Route {
+                    dst: link.net,
+                    len: link.len,
+                    nexthop: nb.ip,
+                    vlan: None,
+                    port: 0,
+                    src: RouteSrc::Isis,
+                });
+            }
+        }
+        routes
+    }
+
+    pub fn isis_neighbors_of(&self, dev: DevId) -> Vec<([u8; 6], Ipv4Addr, PortId)> {
+        let now = self.now;
+        let mut v: Vec<([u8; 6], Ipv4Addr, PortId)> = self
+            .isis
+            .get(&dev)
+            .map(|rt| {
+                rt.neighbors
+                    .iter()
+                    .filter(|(_, nb)| now.saturating_sub(nb.last_ns) <= ISIS_DEAD_NS)
+                    .map(|(sid, nb)| (*sid, nb.ip, nb.port))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_by_key(|x| x.0);
+        v
+    }
+
+    pub fn isis_lsdb_of(&self, dev: DevId) -> Vec<([u8; 6], u8, u8)> {
+        let mut v: Vec<([u8; 6], u8, u8)> = self
+            .isis
+            .get(&dev)
+            .map(|rt| {
+                rt.lsdb
+                    .values()
+                    .map(|l| (l.system_id, l.link_count, l.neighbor_count))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_by_key(|x| x.0);
+        v
+    }
+
+    pub fn isis_system_of(&self, dev: DevId) -> Option<[u8; 6]> {
+        self.isis_system_id(dev)
+    }
+
     // ---------- OSPF（单区域简化：Hello + Router-LSA 泛洪 + SPF） ----------
 
     /// 配置变化后启动/刷新 OSPF 进程。
@@ -1894,7 +3010,7 @@ impl Engine {
         };
         d.ports
             .iter()
-            .filter(|p| p.admin_up && p.link.is_some() && p.ip.is_some())
+            .filter(|p| p.admin_up && p.link.is_some() && p.ip.is_some() && p.vrf.is_none())
             .filter(|p| self.ospf_port_enabled(dev, p.idx))
             .map(|p| (p.idx, p.ip.unwrap(), p.prefix))
             .collect()
@@ -2706,6 +3822,186 @@ impl Engine {
             .any(|g| g.state == VrrpState::Master && g.port == port && vrrp_mac(g.vrid) == *mac)
     }
 
+    // ---------- MPLS（静态 LSP 简化） ----------
+
+    fn mpls_push(&mut self, dev: DevId, pkt: Ipv4Packet, vrf: Option<u16>) -> bool {
+        let lsp = {
+            let Some(d) = self.net.device(dev) else {
+                return false;
+            };
+            let DeviceState::Router(rs) = &d.state else {
+                return false;
+            };
+            let want_vrf = vrf
+                .and_then(|id| rs.vrfs.iter().find(|v| v.id == id))
+                .map(|v| v.name.clone());
+            rs.mpls_lsps
+                .iter()
+                .find(|l| {
+                    l.out_label.is_some()
+                        && l.in_label.is_none()
+                        && l.vrf == want_vrf
+                        && l.net
+                            .map(|(net, len)| (pkt.dst & mask_from_prefix(len)) == net)
+                            .unwrap_or(false)
+                })
+                .cloned()
+        };
+        let Some(lsp) = lsp else { return false };
+        let (Some(label), Some(nh)) = (lsp.out_label, lsp.nexthop) else {
+            return false;
+        };
+        let Some((port, _, _)) = self.net.lookup_route(dev, nh) else {
+            return false;
+        };
+        let Some(mac) = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(port))
+            .map(|p| p.mac)
+        else {
+            return false;
+        };
+        let vpn = lsp.vpn_label.filter(|l| *l != 0);
+        let frame = EthernetFrame {
+            dst: BROADCAST_MAC,
+            src: mac,
+            vlan: None,
+            ethertype: ETHERTYPE_MPLS,
+            payload: L3::Mpls(MplsPacket {
+                labels: [label, vpn.unwrap_or(0)],
+                depth: if vpn.is_some() { 2 } else { 1 },
+                ip: pkt,
+            }),
+        };
+        self.transmit_frame(dev, port, frame);
+        true
+    }
+
+    fn mpls_on_frame(&mut self, dev: DevId, port: PortId, m: MplsPacket) {
+        if m.depth == 0 {
+            self.mpls_deliver(dev, port, m.ip, None);
+            return;
+        }
+        let lsp = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Router(rs) = &d.state else {
+                return;
+            };
+            rs.mpls_lsps
+                .iter()
+                .find(|l| l.in_label == Some(m.labels[0]))
+                .cloned()
+        };
+        let Some(lsp) = lsp else {
+            self.dropped += 1;
+            return;
+        };
+        match (lsp.out_label, lsp.nexthop) {
+            (Some(out), Some(nh)) => {
+                let Some((out_port, _, _)) = self.net.lookup_route(dev, nh) else {
+                    self.dropped += 1;
+                    return;
+                };
+                let Some(mac) = self
+                    .net
+                    .device(dev)
+                    .and_then(|d| d.port(out_port))
+                    .map(|p| p.mac)
+                else {
+                    return;
+                };
+                let mut m2 = m;
+                m2.labels[0] = out;
+                let frame = EthernetFrame {
+                    dst: BROADCAST_MAC,
+                    src: mac,
+                    vlan: None,
+                    ethertype: ETHERTYPE_MPLS,
+                    payload: L3::Mpls(m2),
+                };
+                self.transmit_frame(dev, out_port, frame);
+            }
+            _ => {
+                // 弹签：若本标签是 VPN 标签则投递到对应 VRF；
+                // 否则在双标签场景下继续处理内层标签（外层为传输标签）。
+                let target_vrf = lsp
+                    .vrf
+                    .as_ref()
+                    .and_then(|name| self.net.device(dev).and_then(|d| d.vrf_id(name)));
+                if target_vrf.is_some() {
+                    self.mpls_deliver(dev, port, m.ip, target_vrf);
+                } else if m.depth > 1 {
+                    let mut inner = m;
+                    inner.labels[0] = inner.labels[1];
+                    inner.labels[1] = 0;
+                    inner.depth -= 1;
+                    self.mpls_on_frame(dev, port, inner);
+                } else {
+                    self.mpls_deliver(dev, port, m.ip, None);
+                }
+            }
+        }
+    }
+
+    fn mpls_deliver(&mut self, dev: DevId, port: PortId, pkt: Ipv4Packet, vrf: Option<u16>) {
+        let (my_ip, reply_port) = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            match vrf {
+                Some(vid) => d
+                    .ports
+                    .iter()
+                    .find(|p| p.vrf == Some(vid) && p.ip == Some(pkt.dst))
+                    .map(|p| (Some(pkt.dst), p.idx))
+                    .unwrap_or((None, port)),
+                None => (d.port(port).and_then(|p| p.ip), port),
+            }
+        };
+        if Some(pkt.dst) == my_ip {
+            if pkt.icmp.is_reply {
+                self.on_ping_reply(dev, pkt);
+            } else {
+                let my_mac = self
+                    .net
+                    .device(dev)
+                    .and_then(|d| d.port(reply_port))
+                    .map(|p| p.mac)
+                    .unwrap_or([0; 6]);
+                let reply = Ipv4Packet {
+                    src: pkt.dst,
+                    dst: pkt.src,
+                    ttl: DEFAULT_TTL,
+                    icmp: IcmpPacket {
+                        id: pkt.icmp.id,
+                        seq: pkt.icmp.seq,
+                        is_reply: true,
+                    },
+                };
+                let out = EthernetFrame {
+                    dst: BROADCAST_MAC,
+                    src: my_mac,
+                    vlan: None,
+                    ethertype: ETHERTYPE_IPV4,
+                    payload: L3::Ipv4(reply),
+                };
+                self.transmit_frame(dev, reply_port, out);
+            }
+        } else {
+            self.router_forward(dev, vrf, pkt);
+        }
+    }
+
+    pub fn mpls_lsps_of(&self, dev: DevId) -> Vec<StaticLsp> {
+        match self.net.device(dev).map(|d| &d.state) {
+            Some(DeviceState::Router(rs)) => rs.mpls_lsps.clone(),
+            _ => vec![],
+        }
+    }
+
     // ---------- 远程管理（Telnet / SSH） ----------
 
     /// 找到拥有该管理 IP 的设备（物理口或启用的 SVI）。
@@ -2892,6 +4188,26 @@ impl Engine {
             .collect();
         for dev in vrrp_devs {
             self.vrrp_config_changed(dev);
+        }
+        let bgp_devs: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| matches!(&d.state, DeviceState::Router(rs) if rs.bgp.is_some()))
+            .map(|d| d.id)
+            .collect();
+        for dev in bgp_devs {
+            self.bgp_config_changed(dev);
+        }
+        let isis_devs: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| matches!(&d.state, DeviceState::Router(rs) if rs.isis.is_some()))
+            .map(|d| d.id)
+            .collect();
+        for dev in isis_devs {
+            self.isis_config_changed(dev);
         }
     }
 

@@ -229,16 +229,24 @@ impl Net {
         best.map(|(_, _, port, nh)| (port, nh))
     }
 
-    /// 最长前缀匹配（连接路由 + 静态路由 + OSPF）。
-    /// 同长度优先连接 > 静态 > OSPF；静态/OSPF 的下一跳需落在某连接网段内。
-    /// 返回 (出端口, 下一跳, 出 VLAN)。
+    /// 最长前缀匹配（全局表）。
     pub fn lookup_route(
         &self,
         dev: DevId,
         dst: Ipv4Addr,
     ) -> Option<(PortId, Ipv4Addr, Option<VlanId>)> {
+        self.lookup_route_vrf(dev, None, dst)
+    }
+
+    /// 指定 VRF 的最长前缀匹配（None = 全局表）。VRF 内只用连接 + 静态路由。
+    pub fn lookup_route_vrf(
+        &self,
+        dev: DevId,
+        vrf: Option<u16>,
+        dst: Ipv4Addr,
+    ) -> Option<(PortId, Ipv4Addr, Option<VlanId>)> {
         let d = self.device(dev)?;
-        let connected = d.connected_routes();
+        let connected = d.connected_routes_vrf(vrf);
         // (前缀长度, 来源优先级, 端口, 下一跳, VLAN)
         let mut best: Option<(u8, u8, PortId, Ipv4Addr, Option<VlanId>)> = None;
         let mut consider =
@@ -253,15 +261,32 @@ impl Net {
             };
         for r in &connected {
             if (dst & sim_packets::mask_from_prefix(r.len)) == r.dst {
-                consider(r.len, 3, r.port, dst, r.vlan);
+                consider(r.len, 5, r.port, dst, r.vlan);
             }
         }
-        let (statics, ospf): (&[Route], &[Route]) = match &d.state {
-            DeviceState::Router(rs) => (&rs.static_routes, &rs.ospf_routes),
-            DeviceState::Switch(sw) => (&sw.static_routes, &[]),
-            _ => (&[], &[]),
+        let (statics, ospf, bgp, isis): (&[Route], &[Route], &[Route], &[Route]) = match &d.state {
+            DeviceState::Router(rs) => {
+                if let Some(id) = vrf {
+                    let st = rs
+                        .vrfs
+                        .iter()
+                        .find(|v| v.id == id)
+                        .map(|v| v.static_routes.as_slice())
+                        .unwrap_or(&[]);
+                    (st, &[], &[], &[])
+                } else {
+                    (
+                        &rs.static_routes,
+                        &rs.ospf_routes,
+                        &rs.bgp_routes,
+                        &rs.isis_routes,
+                    )
+                }
+            }
+            DeviceState::Switch(sw) => (&sw.static_routes, &[], &[], &[]),
+            _ => (&[], &[], &[], &[]),
         };
-        for (routes, rank) in [(statics, 2u8), (ospf, 1u8)] {
+        for (routes, rank) in [(statics, 4u8), (bgp, 3u8), (ospf, 2u8), (isis, 1u8)] {
             for r in routes {
                 if (dst & sim_packets::mask_from_prefix(r.len)) != r.dst {
                     continue;

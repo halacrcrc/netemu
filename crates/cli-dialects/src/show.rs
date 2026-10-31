@@ -195,13 +195,13 @@ struct RouteRow {
     iface: String,
 }
 
-fn route_rows(eng: &Engine, dev: DevId, dialect: Dialect) -> Vec<RouteRow> {
+fn route_rows(eng: &Engine, dev: DevId, dialect: Dialect, vrf: Option<u16>) -> Vec<RouteRow> {
     let Some(d) = eng.net.device(dev) else {
         return vec![];
     };
     let svi_name = |vlan: VlanId| ifname::svi_short(dialect, vlan);
     let mut rows: Vec<RouteRow> = d
-        .connected_routes()
+        .connected_routes_vrf(vrf)
         .iter()
         .map(|r| RouteRow {
             dst: ipv4_str(r.dst),
@@ -214,15 +214,32 @@ fn route_rows(eng: &Engine, dev: DevId, dialect: Dialect) -> Vec<RouteRow> {
             },
         })
         .collect();
-    let (statics, ospf): (&[Route], &[Route]) = match &d.state {
-        DeviceState::Router(rs) => (&rs.static_routes, &rs.ospf_routes),
-        DeviceState::Switch(sw) => (&sw.static_routes, &[]),
-        _ => (&[], &[]),
+    let (statics, ospf, bgp, isis): (&[Route], &[Route], &[Route], &[Route]) = match &d.state {
+        DeviceState::Router(rs) => {
+            if let Some(id) = vrf {
+                let st = rs
+                    .vrfs
+                    .iter()
+                    .find(|v| v.id == id)
+                    .map(|v| v.static_routes.as_slice())
+                    .unwrap_or(&[]);
+                (st, &[], &[], &[])
+            } else {
+                (
+                    &rs.static_routes,
+                    &rs.ospf_routes,
+                    &rs.bgp_routes,
+                    &rs.isis_routes,
+                )
+            }
+        }
+        DeviceState::Switch(sw) => (&sw.static_routes, &[], &[], &[]),
+        _ => (&[], &[], &[], &[]),
     };
     let mut add_dynamic = |routes: &[Route], src: RouteSrc| {
         for r in routes {
             // 出接口 = 下一跳所在连接网段
-            let port = d.connected_routes().iter().find_map(|c| {
+            let port = d.connected_routes_vrf(vrf).iter().find_map(|c| {
                 if (r.nexthop & mask_from_prefix(c.len)) == c.dst {
                     Some(c.port)
                 } else {
@@ -242,11 +259,15 @@ fn route_rows(eng: &Engine, dev: DevId, dialect: Dialect) -> Vec<RouteRow> {
     };
     add_dynamic(statics, RouteSrc::Static);
     add_dynamic(ospf, RouteSrc::Ospf);
+    add_dynamic(bgp, RouteSrc::Bgp);
+    add_dynamic(isis, RouteSrc::Isis);
     rows.sort_by(|a, b| {
         let rank = |s: RouteSrc| match s {
-            RouteSrc::Connected => 3,
-            RouteSrc::Static => 2,
-            RouteSrc::Ospf => 1,
+            RouteSrc::Connected => 5,
+            RouteSrc::Static => 4,
+            RouteSrc::Bgp => 3,
+            RouteSrc::Ospf => 2,
+            RouteSrc::Isis => 1,
         };
         b.len
             .cmp(&a.len)
@@ -258,17 +279,29 @@ fn route_rows(eng: &Engine, dev: DevId, dialect: Dialect) -> Vec<RouteRow> {
 
 /// `show ip route` / `display ip routing-table`。
 pub fn route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
-    let rows = route_rows(eng, dev, dialect);
+    let rows = route_rows(eng, dev, dialect, None);
+    render_route_rows(&rows, dialect)
+}
+
+/// 指定 VRF 的路由表。
+pub fn route_table_vrf(eng: &Engine, dev: DevId, dialect: Dialect, vrf: u16) -> String {
+    let rows = route_rows(eng, dev, dialect, Some(vrf));
+    render_route_rows(&rows, dialect)
+}
+
+fn render_route_rows(rows: &[RouteRow], dialect: Dialect) -> String {
     let mut out = String::new();
     match dialect {
         Dialect::Ios => {
             out.push_str("Codes: C - connected, S - static\n\n");
             out.push_str("Gateway of last resort is not set\n\n");
-            for r in &rows {
+            for r in rows {
                 let code = match r.src {
                     RouteSrc::Connected => 'C',
                     RouteSrc::Static => 'S',
                     RouteSrc::Ospf => 'O',
+                    RouteSrc::Bgp => 'B',
+                    RouteSrc::Isis => 'i',
                 };
                 if r.src == RouteSrc::Connected {
                     out.push_str(&format!(
@@ -295,11 +328,13 @@ pub fn route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                 "Destination/Mask", "Proto", "Pre", "Cost", "Flags", "NextHop", "Interface"
             ));
             out.push('\n');
-            for r in &rows {
+            for r in rows {
                 let (proto, pre, flags) = match r.src {
                     RouteSrc::Connected => ("Direct", 0, "D"),
                     RouteSrc::Static => ("Static", 60, "RD"),
                     RouteSrc::Ospf => ("OSPF", 10, "D"),
+                    RouteSrc::Bgp => ("BGP", 20, "D"),
+                    RouteSrc::Isis => ("ISIS", 115, "D"),
                 };
                 out.push_str(&format!(
                     "{:<19} {:<7} {:<4} {:<6} {:<6} {:<15} {}\n",
@@ -323,11 +358,13 @@ pub fn route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                 "{:<18} {:<7} {:<4} {:<5} {:<15} {}\n",
                 "Destination/Mask", "Proto", "Pre", "Cost", "NextHop", "Interface"
             ));
-            for r in &rows {
+            for r in rows {
                 let proto = match r.src {
                     RouteSrc::Connected => "Direct",
                     RouteSrc::Static => "Static",
                     RouteSrc::Ospf => "OSPF",
+                    RouteSrc::Bgp => "BGP",
+                    RouteSrc::Isis => "ISIS",
                 };
                 out.push_str(&format!(
                     "{:<18} {:<7} {:<4} {:<5} {:<15} {}\n",
@@ -337,6 +374,8 @@ pub fn route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                         RouteSrc::Connected => 0,
                         RouteSrc::Static => 60,
                         RouteSrc::Ospf => 10,
+                        RouteSrc::Bgp => 20,
+                        RouteSrc::Isis => 115,
                     },
                     0,
                     r.nexthop,
@@ -870,6 +909,144 @@ pub fn render_ping6_generic(s: &sim_core::device::Ping6Session) -> String {
     )
 }
 
+/// `show ip dhcp snooping binding` / `display dhcp snooping user-binding`。
+pub fn dhcp_snooping_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let rows = eng.dhcp_bindings_of(dev);
+    if rows.is_empty() {
+        return match dialect {
+            Dialect::Ios => "（无 DHCP Snooping 绑定）".into(),
+            _ => " Info: No DHCP snooping binding.\n".into(),
+        };
+    }
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!(
+                "{:<20}{:<18}{:<8}{}\n",
+                "MacAddress", "IPAddress", "VLAN", "Interface"
+            ));
+            for b in rows {
+                out.push_str(&format!(
+                    "{:<20}{:<18}{:<8}{}\n",
+                    sim_packets::mac_str_cisco(&b.mac),
+                    ipv4_str(b.ip),
+                    b.vlan,
+                    ifname::display(dialect, DeviceKind::Switch, b.port)
+                ));
+            }
+        }
+        _ => {
+            out.push_str(&format!(
+                " {:<20}{:<18}{:<8}{}\n",
+                "MAC Address", "IP Address", "VLAN", "Interface"
+            ));
+            for b in rows {
+                out.push_str(&format!(
+                    " {:<20}{:<18}{:<8}{}\n",
+                    sim_packets::mac_str_huawei(&b.mac),
+                    ipv4_str(b.ip),
+                    b.vlan,
+                    ifname::display(dialect, DeviceKind::Switch, b.port)
+                ));
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show port-security` / `display port-security`。
+pub fn port_security_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let mut any = false;
+    for p in &d.ports {
+        let Some((cfg, current, viol)) = eng.port_security_of(dev, p.idx) else {
+            continue;
+        };
+        if !any {
+            any = true;
+            if dialect == Dialect::Ios {
+                out.push_str(&format!(
+                    "{:<22}{:<8}{:<10}{:<12}{}\n",
+                    "Port", "Max", "Current", "Violations", "Action"
+                ));
+            } else {
+                out.push_str(&format!(
+                    " {:<20}{:<8}{:<10}{:<12}{}\n",
+                    "Interface", "Max", "Current", "Violations", "Action"
+                ));
+            }
+        }
+        out.push_str(&format!(
+            "{:<22}{:<8}{:<10}{:<12}{}\n",
+            ifname::display(dialect, DeviceKind::Switch, p.idx),
+            cfg.max,
+            current,
+            viol,
+            match cfg.violation {
+                sim_core::device::PortSecViolation::Shutdown => "shutdown",
+                sim_core::device::PortSecViolation::Restrict => "restrict",
+            }
+        ));
+    }
+    if !any {
+        return match dialect {
+            Dialect::Ios => "（未启用端口安全）".into(),
+            _ => " Info: Port security is disabled.\n".into(),
+        };
+    }
+    out.trim_end().to_string()
+}
+
+/// `show storm-control` / `display storm-control`（含入口限速统计）。
+pub fn qos_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let rows = eng.qos_stats_of(dev);
+    if rows.is_empty() {
+        return match dialect {
+            Dialect::Ios => "（未配置风暴抑制 / 限速）".into(),
+            _ => " Info: No QoS policy.\n".into(),
+        };
+    }
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!(
+                "{:<22}{:<14}{:<14}{:<10}{}\n",
+                "Interface", "BcastLimit", "RateLimit(kbps)", "Drops", "BcastDrops"
+            ));
+            for (port, bcast, rate, drops, bdrops) in rows {
+                out.push_str(&format!(
+                    "{:<22}{:<14}{:<14}{:<10}{}\n",
+                    ifname::display(dialect, DeviceKind::Switch, port),
+                    bcast.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                    rate.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                    drops,
+                    bdrops
+                ));
+            }
+        }
+        _ => {
+            out.push_str(&format!(
+                " {:<20}{:<14}{:<16}{:<10}{}\n",
+                "Interface", "BcastLimit", "RateLimit(kbps)", "Drops", "BcastDrops"
+            ));
+            for (port, bcast, rate, drops, bdrops) in rows {
+                out.push_str(&format!(
+                    " {:<20}{:<14}{:<16}{:<10}{}\n",
+                    ifname::display(dialect, DeviceKind::Switch, port),
+                    bcast.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                    rate.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                    drops,
+                    bdrops
+                ));
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
 /// `show vrrp` / `display vrrp`。
 pub fn vrrp_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
     let Some(d) = eng.net.device(dev) else {
@@ -924,6 +1101,353 @@ pub fn vrrp_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
             }
             if rs.vrrp.is_empty() {
                 out.push_str(" Info: No VRRP group.\n");
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show mpls lsp` / `display mpls lsp`。
+pub fn mpls_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let rows = eng.mpls_lsps_of(dev);
+    if rows.is_empty() {
+        return match dialect {
+            Dialect::Ios => "（无静态 LSP）".into(),
+            _ => " Info: No static LSP.\n".into(),
+        };
+    }
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!(
+                "{:<16}{:<10}{:<20}{:<10}{:<10}{:<14}{:<10}{}\n",
+                "Name", "Type", "FEC", "In", "Out", "NextHop", "VRF", "VPN"
+            ));
+            for l in rows {
+                let kind = if l.in_label.is_none() {
+                    "ingress"
+                } else if l.out_label.is_none() {
+                    "egress"
+                } else {
+                    "transit"
+                };
+                out.push_str(&format!(
+                    "{:<16}{:<10}{:<20}{:<10}{:<10}{:<14}{:<10}{}\n",
+                    l.name,
+                    kind,
+                    l.net
+                        .map(|(n, len)| format!("{}/{}", ipv4_str(n), len))
+                        .unwrap_or_else(|| "-".into()),
+                    l.in_label
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    l.out_label
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    l.nexthop.map(ipv4_str).unwrap_or_else(|| "-".into()),
+                    l.vrf.clone().unwrap_or_else(|| "-".into()),
+                    l.vpn_label
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".into())
+                ));
+            }
+        }
+        _ => {
+            out.push_str(&format!(
+                " {:<16}{:<10}{:<20}{:<8}{:<8}{:<14}{:<10}{}\n",
+                "Name", "Type", "FEC", "In", "Out", "NextHop", "VRF", "VPN"
+            ));
+            for l in rows {
+                let kind = if l.in_label.is_none() {
+                    "Ingress"
+                } else if l.out_label.is_none() {
+                    "Egress"
+                } else {
+                    "Transit"
+                };
+                out.push_str(&format!(
+                    " {:<16}{:<10}{:<20}{:<8}{:<8}{:<14}{:<10}{}\n",
+                    l.name,
+                    kind,
+                    l.net
+                        .map(|(n, len)| format!("{}/{}", ipv4_str(n), len))
+                        .unwrap_or_else(|| "-".into()),
+                    l.in_label
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    l.out_label
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    l.nexthop.map(ipv4_str).unwrap_or_else(|| "-".into()),
+                    l.vrf.clone().unwrap_or_else(|| "-".into()),
+                    l.vpn_label
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".into())
+                ));
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show isis neighbors` / `display isis peer`。
+pub fn isis_neighbors(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let sys = eng
+        .isis_system_of(dev)
+        .map(|s| {
+            s.iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_else(|| "-".into());
+    let rows = eng.isis_neighbors_of(dev);
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str("System Id      Interface        State     Holdtime\n");
+        }
+        _ => {
+            out.push_str(&format!(
+                "System ID: {}\n\n {:<22}{:<24}{}\n",
+                sys, "System ID", "Interface", "State"
+            ));
+        }
+    }
+    for (sid, _ip, port) in &rows {
+        let id = sid
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("");
+        if dialect == Dialect::Ios {
+            out.push_str(&format!(
+                "{:<14}{:<16}{:<9}{}\n",
+                id,
+                ifname::display(dialect, DeviceKind::Router, *port),
+                "UP",
+                30
+            ));
+        } else {
+            out.push_str(&format!(
+                " {:<22}{:<24}{}\n",
+                id,
+                ifname::display(dialect, DeviceKind::Router, *port),
+                "Up"
+            ));
+        }
+    }
+    if rows.is_empty() {
+        out.push_str(match dialect {
+            Dialect::Ios => "（无 IS-IS 邻居）",
+            _ => " Info: No IS-IS neighbor.\n",
+        });
+    }
+    out.trim_end().to_string()
+}
+
+/// `show isis database` / `display isis lsdb`。
+pub fn isis_lsdb(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let rows = eng.isis_lsdb_of(dev);
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => out.push_str(&format!(
+            "{:<16}{:<8}{}\n",
+            "System Id", "Links", "Neighbors"
+        )),
+        _ => out.push_str(&format!(
+            " {:<16}{:<8}{}\n",
+            "System ID", "Links", "Neighbors"
+        )),
+    }
+    for (sid, links, nbs) in &rows {
+        let id = sid
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("");
+        if dialect == Dialect::Ios {
+            out.push_str(&format!("{:<16}{:<8}{}\n", id, links, nbs));
+        } else {
+            out.push_str(&format!(" {:<16}{:<8}{}\n", id, links, nbs));
+        }
+    }
+    if rows.is_empty() {
+        out.push_str(match dialect {
+            Dialect::Ios => "（LSDB 为空）",
+            _ => " Info: The LSDB is empty.\n",
+        });
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ip bgp summary` / `display bgp peer`。
+pub fn bgp_summary(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Router(rs) = &d.state else {
+        return String::new();
+    };
+    let Some(cfg) = &rs.bgp else {
+        return match dialect {
+            Dialect::Ios => "% BGP is not configured.".into(),
+            _ => " Info: BGP is not configured.\n".into(),
+        };
+    };
+    let rid = ipv4_str(eng.ospf_router_id_of(dev));
+    let sessions = eng.bgp_sessions_of(dev);
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!(
+                "BGP router identifier {}, local AS number {}\n\n{:<17}{:<4}{:<8}{:<10}{}\n",
+                rid, cfg.asn, "Neighbor", "V", "AS", "MsgRcvd", "State"
+            ));
+            for (ip, asn, est) in sessions {
+                out.push_str(&format!(
+                    "{:<17}{:<4}{:<8}{:<10}{}\n",
+                    ipv4_str(ip),
+                    4,
+                    asn,
+                    "-",
+                    if est { "Established" } else { "Idle" }
+                ));
+            }
+        }
+        _ => {
+            out.push_str(&format!(
+                "BGP local router ID : {}\n Local AS number : {}\n\n {:<17}{:<8}{}\n",
+                rid, cfg.asn, "Peer", "AS", "State"
+            ));
+            for (ip, asn, est) in sessions {
+                out.push_str(&format!(
+                    " {:<17}{:<8}{}\n",
+                    ipv4_str(ip),
+                    asn,
+                    if est { "Established" } else { "Idle" }
+                ));
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ip bgp` / `display bgp routing-table`。
+pub fn bgp_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let rows = eng.bgp_routes_of(dev);
+    if rows.is_empty() {
+        return match dialect {
+            Dialect::Ios => "（无 BGP 路由）".into(),
+            _ => " Info: No BGP route.\n".into(),
+        };
+    }
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            out.push_str(&format!(
+                "{:<20}{:<16}{:<8}{}\n",
+                "Network", "Next Hop", "LocPrf", "AS Path"
+            ));
+            for (net, len, path, nh, lp) in rows {
+                out.push_str(&format!(
+                    "{:<20}{:<16}{:<8}{}\n",
+                    format!("{}/{}", ipv4_str(net), len),
+                    ipv4_str(nh),
+                    lp,
+                    path.iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+            }
+        }
+        _ => {
+            out.push_str(&format!(
+                " {:<20}{:<16}{:<8}{}\n",
+                "Network", "NextHop", "LocPrf", "AS_PATH"
+            ));
+            for (net, len, path, nh, lp) in rows {
+                out.push_str(&format!(
+                    " {:<20}{:<16}{:<8}{}\n",
+                    format!("{}/{}", ipv4_str(net), len),
+                    ipv4_str(nh),
+                    lp,
+                    path.iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show route-map` / `display route-policy`。
+pub fn route_policies(eng: &Engine, dev: DevId, dialect: Dialect, only: Option<&str>) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Router(rs) = &d.state else {
+        return String::new();
+    };
+    let mut list: Vec<&sim_core::device::RoutePolicy> = rs
+        .route_policies
+        .iter()
+        .filter(|p| only.is_none_or(|n| p.name == n))
+        .collect();
+    if list.is_empty() {
+        return match dialect {
+            Dialect::Ios => "% No route-map configured.".into(),
+            _ => " Info: No route-policy.\n".into(),
+        };
+    }
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            for rp in list {
+                let mut nodes: Vec<&sim_core::device::RoutePolicyNode> = rp.nodes.iter().collect();
+                nodes.sort_by_key(|n| n.seq);
+                for node in nodes {
+                    out.push_str(&format!(
+                        "route-map {} {} {}\n",
+                        rp.name,
+                        if node.permit { "permit" } else { "deny" },
+                        node.seq
+                    ));
+                    out.push_str("  Match clauses:\n");
+                    match node.match_acl {
+                        Some(acl) => out.push_str(&format!("    ip address {}\n", acl)),
+                        None => out.push_str("    (none)\n"),
+                    }
+                    out.push_str("  Set clauses:\n");
+                    match node.set_local_pref {
+                        Some(lp) => out.push_str(&format!("    local-preference {}\n", lp)),
+                        None => out.push_str("    (none)\n"),
+                    }
+                }
+            }
+        }
+        _ => {
+            for rp in list {
+                out.push_str(&format!("Route-policy: {}\n", rp.name));
+                let mut nodes: Vec<&sim_core::device::RoutePolicyNode> = rp.nodes.iter().collect();
+                nodes.sort_by_key(|n| n.seq);
+                for node in nodes {
+                    out.push_str(&format!(
+                        "  node {} {}:\n",
+                        node.seq,
+                        if node.permit { "permit" } else { "deny" }
+                    ));
+                    if let Some(acl) = node.match_acl {
+                        out.push_str(&format!("    if-match acl {}\n", acl));
+                    }
+                    if let Some(lp) = node.set_local_pref {
+                        out.push_str(&format!("    apply local-preference {}\n", lp));
+                    }
+                }
             }
         }
     }

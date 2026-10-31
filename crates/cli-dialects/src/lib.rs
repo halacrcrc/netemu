@@ -34,6 +34,9 @@ pub struct Trees {
     pub mst: Vec<cli_engine::CNode>,
     pub ospf: Vec<cli_engine::CNode>,
     pub ospf_area: Vec<cli_engine::CNode>,
+    pub bgp: Vec<cli_engine::CNode>,
+    pub isis: Vec<cli_engine::CNode>,
+    pub route_policy: Vec<cli_engine::CNode>,
 }
 
 impl Trees {
@@ -50,6 +53,9 @@ impl Trees {
             Mode::Mst => &self.mst,
             Mode::Ospf => &self.ospf,
             Mode::OspfArea => &self.ospf_area,
+            Mode::Bgp => &self.bgp,
+            Mode::Isis => &self.isis,
+            Mode::RoutePolicy => &self.route_policy,
         }
     }
 }
@@ -74,7 +80,7 @@ pub mod cmd {
     use super::*;
     use crate::show;
     use cli_engine::IfCtx;
-    use sim_core::device::{Acl, AclProto, AclRule};
+    use sim_core::device::{Acl, AclProto, AclRule, BgpPeerPolicy, RoutePolicy, RoutePolicyNode};
     use sim_packets::mask_from_prefix;
 
     pub fn hostname(c: &mut Ctx) -> Result<String, CliError> {
@@ -729,16 +735,24 @@ pub mod cmd {
         Ok(String::new())
     }
 
-    /// ACL 视图：`rule [n] {deny|permit} [icmp] source X W [destination X W]`
+    /// ACL 视图：`rule {deny|permit} [icmp] source X W [destination X W]`
     pub fn acl_rule(c: &mut Ctx) -> Result<String, CliError> {
+        acl_rule_with(c, None)
+    }
+
+    pub fn acl_rule_icmp(c: &mut Ctx) -> Result<String, CliError> {
+        acl_rule_with(c, Some(AclProto::Icmp))
+    }
+
+    fn acl_rule_with(c: &mut Ctx, forced: Option<AclProto>) -> Result<String, CliError> {
         let Some((no, _adv)) = c.sess.sub.acl else {
             return Err(CliError::Custom("no acl selected".into()));
         };
         let permit = c.word("action").eq_ignore_ascii_case("permit");
-        let proto = match c.val("proto") {
+        let proto = forced.unwrap_or(match c.val("proto") {
             Some(cli_engine::Val::Word(w)) if w.eq_ignore_ascii_case("icmp") => AclProto::Icmp,
             _ => AclProto::Any,
-        };
+        });
         let src = c.ipv4("src");
         let src_w = c.ipv4("src_wildcard");
         let dst = c.ipv4("dst");
@@ -766,15 +780,23 @@ pub mod cmd {
 
     /// IOS 全局：`access-list <n> {deny|permit} [icmp] A.B.C.D w [A.B.C.D w]`
     pub fn ios_access_list(c: &mut Ctx) -> Result<String, CliError> {
+        ios_access_list_with(c, None)
+    }
+
+    pub fn ios_access_list_icmp(c: &mut Ctx) -> Result<String, CliError> {
+        ios_access_list_with(c, Some(AclProto::Icmp))
+    }
+
+    fn ios_access_list_with(c: &mut Ctx, forced: Option<AclProto>) -> Result<String, CliError> {
         if c.device_kind() != DeviceKind::Router {
             return Err(CliError::Custom("Invalid input detected".into()));
         }
         let n = c.number("number").unwrap_or(0);
         let permit = c.word("action").eq_ignore_ascii_case("permit");
-        let proto = match c.val("proto") {
+        let proto = forced.unwrap_or(match c.val("proto") {
             Some(cli_engine::Val::Word(w)) if w.eq_ignore_ascii_case("icmp") => AclProto::Icmp,
             _ => AclProto::Any,
-        };
+        });
         let src = c.ipv4("src");
         let src_w = c.ipv4("src_wildcard");
         let dst = c.ipv4("dst");
@@ -1387,6 +1409,703 @@ pub mod cmd {
         Ok(show::ipv6_route_table(c.eng, c.dev, c.dialect))
     }
 
+    // ---------- 二层安全与 QoS ----------
+
+    /// 全局开启 DHCP Snooping。
+    pub fn dhcp_snooping_enable(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Switch(sw) = &mut d.state {
+                sw.dhcp_snooping = true;
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// 接口设为 DHCP Snooping 信任端口。
+    pub fn dhcp_snooping_trust(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.dhcp_trust = true;
+            }
+        }
+        Ok(String::new())
+    }
+
+    fn port_sec_upsert(
+        c: &mut Ctx,
+        f: impl FnOnce(&mut sim_core::device::PortSecurity),
+    ) -> Result<String, CliError> {
+        require_switch(c)?;
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(String::new());
+        };
+        let Some(p) = d.port_mut(port) else {
+            return Ok(String::new());
+        };
+        let cfg = p
+            .port_security
+            .get_or_insert(sim_core::device::PortSecurity {
+                max: 1,
+                violation: sim_core::device::PortSecViolation::Restrict,
+                sticky: false,
+            });
+        f(cfg);
+        Ok(String::new())
+    }
+
+    pub fn port_security_enable(c: &mut Ctx) -> Result<String, CliError> {
+        port_sec_upsert(c, |_| {})
+    }
+
+    pub fn port_security_max(c: &mut Ctx) -> Result<String, CliError> {
+        let n = c.number("max").unwrap_or(1);
+        if !(1..=1024).contains(&n) {
+            return Err(CliError::Custom("max-mac must be 1-1024".into()));
+        }
+        port_sec_upsert(c, |cfg| cfg.max = n as u16)
+    }
+
+    pub fn port_security_violation(c: &mut Ctx) -> Result<String, CliError> {
+        let w = c.word("action").to_lowercase();
+        let v = match w.as_str() {
+            "shutdown" => sim_core::device::PortSecViolation::Shutdown,
+            "restrict" => sim_core::device::PortSecViolation::Restrict,
+            _ => {
+                return Err(CliError::Custom(
+                    "violation must be shutdown or restrict".into(),
+                ))
+            }
+        };
+        port_sec_upsert(c, |cfg| cfg.violation = v)
+    }
+
+    pub fn port_security_sticky(c: &mut Ctx) -> Result<String, CliError> {
+        port_sec_upsert(c, |cfg| cfg.sticky = true)
+    }
+
+    /// 广播风暴抑制（每秒广播帧上限）。
+    pub fn storm_control(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        let pps = c.number("pps").unwrap_or(0);
+        if !(1..=1_000_000).contains(&pps) {
+            return Err(CliError::Custom("Invalid broadcast limit".into()));
+        }
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.broadcast_limit_pps = Some(pps);
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// 接口入口限速（kbps）。
+    pub fn rate_limit(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        let kbps = c.number("kbps").unwrap_or(0);
+        if !(1..=1_000_000).contains(&kbps) {
+            return Err(CliError::Custom("Invalid rate limit".into()));
+        }
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.rate_limit_kbps = Some(kbps);
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub fn show_dhcp_snooping(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        Ok(show::dhcp_snooping_table(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_port_security(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        Ok(show::port_security_table(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_qos(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        Ok(show::qos_table(c.eng, c.dev, c.dialect))
+    }
+
+    // ---------- BGP（eBGP 简化） ----------
+
+    pub fn bgp_enter(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let asn = c.number("asn").unwrap_or(0);
+        if asn == 0 {
+            return Err(CliError::Custom("Invalid AS number".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                match &mut rs.bgp {
+                    Some(b) => b.asn = asn,
+                    None => {
+                        rs.bgp = Some(sim_core::device::BgpConfig {
+                            asn,
+                            neighbors: vec![],
+                            networks: vec![],
+                            peer_policies: vec![],
+                        })
+                    }
+                }
+            }
+        }
+        c.sess.mode = Mode::Bgp;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    pub fn bgp_neighbor(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let ip = c.ipv4("ip");
+        let asn = c.number("asn").unwrap_or(0);
+        if ip == 0 || asn == 0 {
+            return Err(CliError::Custom("Invalid neighbor".into()));
+        }
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(String::new());
+        };
+        let DeviceState::Router(rs) = &mut d.state else {
+            return Ok(String::new());
+        };
+        let Some(bgp) = rs.bgp.as_mut() else {
+            return Err(CliError::Custom("BGP process not configured".into()));
+        };
+        if let Some(n) = bgp.neighbors.iter_mut().find(|(n, _)| *n == ip) {
+            n.1 = asn;
+        } else {
+            bgp.neighbors.push((ip, asn));
+        }
+        c.eng.bgp_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn bgp_network(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let net = c.ipv4("net");
+        let len = c.mask_len("mask");
+        if net == 0 {
+            return Err(CliError::Custom("Invalid network".into()));
+        }
+        let net = net & sim_packets::mask_from_prefix(len);
+        {
+            let Some(d) = c.eng.net.device_mut(c.dev) else {
+                return Ok(String::new());
+            };
+            let DeviceState::Router(rs) = &mut d.state else {
+                return Ok(String::new());
+            };
+            let Some(bgp) = rs.bgp.as_mut() else {
+                return Err(CliError::Custom("BGP process not configured".into()));
+            };
+            if !bgp.networks.contains(&(net, len)) {
+                bgp.networks.push((net, len));
+            }
+        }
+        c.eng.bgp_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn show_bgp_summary(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::bgp_summary(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_bgp_table(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::bgp_table(c.eng, c.dev, c.dialect))
+    }
+
+    // ---------- route-policy（BGP 邻居策略） ----------
+
+    /// IOS `route-map NAME permit|deny SEQ` / VRP `route-policy NAME permit|deny node SEQ`
+    pub fn route_policy_enter(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let name = c.word("name");
+        if name.is_empty() {
+            return Err(CliError::Custom("Route policy name is required".into()));
+        }
+        let action = c.word("action");
+        let permit = if action.eq_ignore_ascii_case("permit") {
+            true
+        } else if action.eq_ignore_ascii_case("deny") {
+            false
+        } else {
+            return Err(CliError::Custom("Action must be permit or deny".into()));
+        };
+        let seq = c.number("seq").unwrap_or(10);
+        if seq == 0 || seq > u16::MAX as u32 {
+            return Err(CliError::Custom("Node sequence must be 1-65535".into()));
+        }
+        let seq = seq as u16;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                let rp = match rs.route_policies.iter_mut().find(|p| p.name == name) {
+                    Some(p) => p,
+                    None => {
+                        rs.route_policies.push(RoutePolicy {
+                            name: name.clone(),
+                            nodes: vec![],
+                        });
+                        rs.route_policies.last_mut().unwrap()
+                    }
+                };
+                match rp.nodes.iter_mut().find(|n| n.seq == seq) {
+                    Some(n) => n.permit = permit,
+                    None => rp.nodes.push(RoutePolicyNode {
+                        seq,
+                        permit,
+                        match_acl: None,
+                        set_local_pref: None,
+                    }),
+                }
+            }
+        }
+        c.sess.sub.rp = Some((name, seq));
+        c.sess.mode = Mode::RoutePolicy;
+        c.sess.cur_if = None;
+        c.eng.bgp_policy_changed(c.dev);
+        Ok(String::new())
+    }
+
+    fn rp_current_node(c: &Ctx) -> Result<(String, u16), CliError> {
+        c.sess
+            .sub
+            .rp
+            .clone()
+            .ok_or_else(|| CliError::Custom("no route policy node selected".into()))
+    }
+
+    /// IOS `match ip address ACL` / VRP `if-match acl ACL`
+    pub fn route_policy_match_acl(c: &mut Ctx) -> Result<String, CliError> {
+        let (name, seq) = rp_current_node(c)?;
+        let acl = c.number("acl").unwrap_or(0);
+        if acl == 0 {
+            return Err(CliError::Custom("ACL number is required".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if let Some(node) = rs
+                    .route_policies
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                    .and_then(|p| p.nodes.iter_mut().find(|n| n.seq == seq))
+                {
+                    node.match_acl = Some(acl);
+                }
+            }
+        }
+        c.eng.bgp_policy_changed(c.dev);
+        Ok(String::new())
+    }
+
+    /// IOS `set local-preference N` / VRP `apply local-preference N`
+    pub fn route_policy_set_local_pref(c: &mut Ctx) -> Result<String, CliError> {
+        let (name, seq) = rp_current_node(c)?;
+        let lp = c
+            .number("pref")
+            .ok_or_else(|| CliError::Custom("Local preference is required".into()))?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if let Some(node) = rs
+                    .route_policies
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                    .and_then(|p| p.nodes.iter_mut().find(|n| n.seq == seq))
+                {
+                    node.set_local_pref = Some(lp);
+                }
+            }
+        }
+        c.eng.bgp_policy_changed(c.dev);
+        Ok(String::new())
+    }
+
+    /// IOS `neighbor IP route-map NAME in|out` / VRP `peer IP route-policy NAME import|export`
+    pub fn bgp_peer_policy(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let ip = c.ipv4("ip");
+        let name = c.word("policy");
+        let dir = c.word("dir");
+        if ip == 0 || name.is_empty() {
+            return Err(CliError::Custom("Invalid peer policy".into()));
+        }
+        let import = if matches!(dir.to_ascii_lowercase().as_str(), "in" | "import") {
+            true
+        } else if matches!(dir.to_ascii_lowercase().as_str(), "out" | "export") {
+            false
+        } else {
+            return Err(CliError::Custom("Direction must be in|out".into()));
+        };
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(String::new());
+        };
+        let DeviceState::Router(rs) = &mut d.state else {
+            return Ok(String::new());
+        };
+        let Some(bgp) = rs.bgp.as_mut() else {
+            return Err(CliError::Custom("BGP process not configured".into()));
+        };
+        if !bgp.neighbors.iter().any(|(n, _)| *n == ip) {
+            return Err(CliError::Custom("BGP neighbor not configured".into()));
+        }
+        bgp.peer_policies
+            .retain(|p| !(p.neighbor == ip && p.import == import));
+        bgp.peer_policies.push(BgpPeerPolicy {
+            neighbor: ip,
+            import,
+            name,
+        });
+        c.eng.bgp_policy_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn show_route_policy(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let name = c.word("name");
+        let only = if name.is_empty() {
+            None
+        } else {
+            Some(name.as_str())
+        };
+        Ok(show::route_policies(c.eng, c.dev, c.dialect, only))
+    }
+
+    // ---------- IS-IS（简化） ----------
+
+    pub fn isis_enter(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        c.sess.mode = Mode::Isis;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    pub fn isis_net(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let net = c.word("net");
+        let Some(sid) = sim_core::device::parse_isis_net(&net) else {
+            return Err(CliError::Custom(
+                "Invalid NET, e.g. 49.0001.0000.0000.0001.00".into(),
+            ));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                rs.isis = Some(sim_core::device::IsisConfig {
+                    net: net.clone(),
+                    system_id: sid,
+                });
+            }
+        }
+        c.eng.isis_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn isis_enable_if(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.isis_enable = true;
+            }
+        }
+        c.eng.isis_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn show_isis_neighbors(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::isis_neighbors(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_isis_db(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::isis_lsdb(c.eng, c.dev, c.dialect))
+    }
+
+    // ---------- VRF（简化：连接 + 静态路由） ----------
+
+    pub fn vrf_create(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let name = c.word("name");
+        if name.is_empty() {
+            return Err(CliError::Custom("VRF name required".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if !rs.vrfs.iter().any(|v| v.name == name) {
+                    let id = rs.vrfs.iter().map(|v| v.id).max().unwrap_or(0) + 1;
+                    rs.vrfs.push(sim_core::device::Vrf {
+                        id,
+                        name,
+                        static_routes: vec![],
+                    });
+                }
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub fn vrf_bind(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        let name = c.word("name");
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(String::new());
+        };
+        let id = match &d.state {
+            DeviceState::Router(rs) => rs.vrfs.iter().find(|v| v.name == name).map(|v| v.id),
+            _ => None,
+        };
+        let Some(id) = id else {
+            return Err(CliError::Custom("VRF not found".into()));
+        };
+        if let Some(p) = d.port_mut(port) {
+            p.vrf = Some(id);
+        }
+        Ok(String::new())
+    }
+
+    pub fn vrf_static(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let name = c.word("name");
+        let dst = c.ipv4("dst");
+        let len = c.mask_len("mask");
+        let nh = c.ipv4("nexthop");
+        if nh == 0 {
+            return Err(CliError::Custom("Invalid route".into()));
+        }
+        let net = dst & sim_packets::mask_from_prefix(len);
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(String::new());
+        };
+        let DeviceState::Router(rs) = &mut d.state else {
+            return Ok(String::new());
+        };
+        let Some(v) = rs.vrfs.iter_mut().find(|v| v.name == name) else {
+            return Err(CliError::Custom("VRF not found".into()));
+        };
+        if !v
+            .static_routes
+            .iter()
+            .any(|r| r.dst == net && r.len == len && r.nexthop == nh)
+        {
+            v.static_routes.push(sim_core::device::Route {
+                dst: net,
+                len,
+                nexthop: nh,
+                vlan: None,
+                port: 0,
+                src: sim_core::device::RouteSrc::Static,
+            });
+        }
+        Ok(String::new())
+    }
+
+    pub fn show_route_vrf(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let name = c.word("name");
+        let id = c
+            .eng
+            .net
+            .device(c.dev)
+            .and_then(|d| d.vrf_id(&name))
+            .ok_or_else(|| CliError::Custom("VRF not found".into()))?;
+        Ok(show::route_table_vrf(c.eng, c.dev, c.dialect, id))
+    }
+
+    // ---------- MPLS（静态 LSP） ----------
+
+    fn mpls_lsp_upsert(c: &mut Ctx, lsp: sim_core::device::StaticLsp) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        if lsp.vpn_label.is_some() && lsp.vrf.is_none() {
+            return Err(CliError::Custom("vpn-label requires a vrf".into()));
+        }
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(String::new());
+        };
+        if let Some(v) = &lsp.vrf {
+            if d.vrf_id(v).is_none() {
+                return Err(CliError::Custom("VRF not found".into()));
+            }
+        }
+        let DeviceState::Router(rs) = &mut d.state else {
+            return Ok(String::new());
+        };
+        if let Some(x) = rs.mpls_lsps.iter_mut().find(|x| x.name == lsp.name) {
+            *x = lsp;
+        } else {
+            rs.mpls_lsps.push(lsp);
+        }
+        Ok(String::new())
+    }
+
+    pub fn mpls_lsp_ingress(c: &mut Ctx) -> Result<String, CliError> {
+        let name = c.word("name");
+        let net = c.ipv4("net") & sim_packets::mask_from_prefix(c.mask_len("len"));
+        let len = c.mask_len("len");
+        let nh = c.ipv4("nexthop");
+        let out = c.number("out");
+        let vrf = c.word("vrf");
+        if name.is_empty() || net == 0 || nh == 0 || out.is_none() {
+            return Err(CliError::Custom("Invalid static LSP".into()));
+        }
+        mpls_lsp_upsert(
+            c,
+            sim_core::device::StaticLsp {
+                name,
+                net: Some((net, len)),
+                in_label: None,
+                out_label: out,
+                nexthop: Some(nh),
+                vrf: if vrf.is_empty() { None } else { Some(vrf) },
+                vpn_label: c.number("vpn"),
+            },
+        )
+    }
+
+    pub fn mpls_lsp_transit(c: &mut Ctx) -> Result<String, CliError> {
+        let name = c.word("name");
+        let inside = c.number("in");
+        let nh = c.ipv4("nexthop");
+        let out = c.number("out");
+        if name.is_empty() || inside.is_none() || nh == 0 || out.is_none() {
+            return Err(CliError::Custom("Invalid static LSP".into()));
+        }
+        mpls_lsp_upsert(
+            c,
+            sim_core::device::StaticLsp {
+                name,
+                net: None,
+                in_label: inside,
+                out_label: out,
+                nexthop: Some(nh),
+                vrf: None,
+                vpn_label: None,
+            },
+        )
+    }
+
+    pub fn mpls_lsp_egress(c: &mut Ctx) -> Result<String, CliError> {
+        let name = c.word("name");
+        let inside = c.number("in");
+        let vrf = c.word("vrf");
+        if name.is_empty() || inside.is_none() {
+            return Err(CliError::Custom("Invalid static LSP".into()));
+        }
+        mpls_lsp_upsert(
+            c,
+            sim_core::device::StaticLsp {
+                name,
+                net: None,
+                in_label: inside,
+                out_label: None,
+                nexthop: None,
+                vrf: if vrf.is_empty() { None } else { Some(vrf) },
+                vpn_label: None,
+            },
+        )
+    }
+
+    pub fn show_mpls(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::Router {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::mpls_table(c.eng, c.dev, c.dialect))
+    }
+
     // ---------- 显示 ----------
 
     pub fn show_acl(c: &mut Ctx) -> Result<String, CliError> {
@@ -1448,7 +2167,7 @@ pub mod cmd {
         let dst = c.ipv4("dst");
         let len = c.mask_len("mask");
         let nh = c.ipv4("nexthop");
-        if dst == 0 || nh == 0 {
+        if nh == 0 {
             return Err(CliError::Custom("Invalid route parameters".into()));
         }
         let net_dst = dst & mask_from_prefix(len);
@@ -1692,7 +2411,10 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
             Mode::Line => format!("{}(config-line)#", d.name),
             Mode::Aaa => format!("{}(config-aaa)#", d.name),
             Mode::Mst => format!("{}(config-mst)#", d.name),
-            Mode::Ospf | Mode::OspfArea => format!("{}(config-router)#", d.name),
+            Mode::Ospf | Mode::OspfArea | Mode::Bgp | Mode::Isis => {
+                format!("{}(config-router)#", d.name)
+            }
+            Mode::RoutePolicy => format!("{}(config-route-map)#", d.name),
         },
         Dialect::Vrp | Dialect::Comware => match sess.mode {
             Mode::Exec | Mode::Priv => format!("<{}>", d.name),
@@ -1730,6 +2452,19 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
             Mode::Mst => format!("[{}-mst-region]", d.name),
             Mode::Ospf => format!("[{}-ospf-1]", d.name),
             Mode::OspfArea => format!("[{}-ospf-1-area-0.0.0.0]", d.name),
+            Mode::Bgp => {
+                let asn = eng
+                    .net
+                    .device(dev)
+                    .and_then(|d| match &d.state {
+                        DeviceState::Router(rs) => rs.bgp.as_ref().map(|b| b.asn),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                format!("[{}-bgp-{}]", d.name, asn)
+            }
+            Mode::Isis => format!("[{}-isis-1]", d.name),
+            Mode::RoutePolicy => format!("[{}-route-policy]", d.name),
         },
     }
 }

@@ -92,6 +92,40 @@ VRRP 只实现单组主备：优先级高者 Master（平局比接口 IP），Ma
 
 不实现链路本地地址、SLAAC、DHCPv6、扩展头与分片：接口地址为全局单播（可多个接口各一个），NDP 用 solicited-node 组播完成 NS/NA，邻居缓存立即生效（无 DAD）；ICMPv6 仅 Echo/NS/NA；路由为连接路由 + 静态路由（下一跳需在连接网段），仅路由器转发、交换机 SVI 不参与 IPv6。主机通过属性面板或 wasm `set_host_v6` 配置，终端用 `ping6`。v6 ping 会话简化为"5 次发送 + 末次后 2s 结束"，不逐探针判定超时。
 
+### D20（M4 补充）二层安全与 QoS 采用可观测的简化模型
+
+DHCP Snooping：全局开关 + 端口信任；非信任端口的 Offer/Ack 直接丢弃，Request/Ack 学习 (MAC, IP, VLAN, 端口) 绑定表；无 Option 82、无速率限制、无绑定表强制校验（绑定仅展示）。
+
+端口安全：每端口最大 secure MAC 数、违规动作 restrict（丢帧）/ shutdown（关端口并触发 STP 重算），sticky 仅记录标记；MAC 表为会话级，不跨刷新持久化。
+
+QoS 只做**入口 policing**：广播帧每秒上限（storm control）与令牌桶限速（kbps，桶容量 1 秒流量）；不做 DSCP/CoS 分类、队列调度与拥塞管理。实现位于 `switch_ingress`（VLAN 归类之后、STP 丢弃之前），统计通过 `qos_stats_of` 暴露给 show。
+
+### D21（M5 补充）BGP 用广播报文模拟，仅 eBGP 单跳语义
+
+不做 TCP 179、iBGP、MED/community、路由反射与聚合：BGP 报文（Open/Keepalive/Update）以广播帧发送，邻居按源 IP 识别，1s 周期 Keepalive、5s 无包断会话。Update 携带固定 8 条路由（net/len + AS_PATH），接收方做 AS_PATH 环路检测，按最短 AS_PATH 选路并安装 `RouteSrc::Bgp`；来源优先级为直连 > 静态 > BGP > OSPF。配置（AS、邻居、network 宣告）进摘要持久化，学习到的路由为瞬态。LOCAL_PREF 与路由过滤由 D23 的 route-policy 补充。
+
+### D22（M5 补充）IS-IS / VRF / MPLS 的教学型简化
+
+IS-IS：单区域 Level-1，无 DIS/IIH 定时器细节与多级路由；Hello（广播）每 2s 携带本机 LSP，收到新 LSP 除入端口外泛洪；LSDB 跑 Dijkstra，网络需接口配置 IPv4（下一跳用），安装 `RouteSrc::Isis`（AD 115，优先级最低）。
+
+VRF：`Vrf` 只承载**连接路由 + 静态路由**，端口按 `vrf` 归属；入口按端口选择 VRF 表转发，NAT/动态协议/管理面只作用于全局表；跨 VRF 天然隔离。配置进摘要（端口保存 VRF 名称）。
+
+MPLS：只做**静态 LSP**：ingress（FEC→out-label）压签、transit 换签、egress 弹签；标签帧以广播 MAC 在链路上传输（免 LDP/RSVP 与 ARP 解析），最多 2 层标签。属于教学演示，不对应真实 LDP 行为。
+
+### D23（M5 补充）route-policy 只做 BGP 邻居策略：ACL 前缀匹配 + Local Preference
+
+`RoutePolicy` 由若干个 `RoutePolicyNode { seq, permit, match_acl, set_local_pref }` 组成，按 seq 升序匹配，首个命中节点决定 permit/deny 与属性；无节点命中 = 隐式拒绝。`match_acl` 只做**前缀匹配**：ACL 规则用 `matches_route` 仅比较源地址与通配符（协议、目的不参与），ACL 判定 permit 视为命中。策略绑定在 BGP 邻居的 import/export 方向：import 在接收 Update 时过滤并可设置 Local Preference，export 在发送 Update 前过滤（不携带 LOCAL_PREF，符合 eBGP 非传递语义）；引用不存在的策略按拒绝处理。Local Preference 参与最优路径比较（高者优先，其次 AS_PATH 短者），重新向邻居通告时重置为 100。策略变更时清空已学习路由并重算，等待邻居下一轮 Update 重新学习。
+
+命令：IOS `route-map NAME permit|deny SEQ` → `match ip address ACL` / `set local-preference N`，BGP 下 `neighbor IP route-map NAME in|out`；VRP/Comware `route-policy NAME permit|deny node SEQ` → `if-match acl N` / `apply local-preference N`，BGP 下 `peer IP route-policy NAME import|export`；`show route-map` / `display route-policy` 列出全部策略（当前不支持按名称过滤）。
+
+不做：MED、community、AS_PATH prepend、OSPF/IS-IS 的 filter-policy、策略嵌套/子策略、ACL 时间范围与高级匹配。另修正 ACL 通配符比较方向（此前比较了被忽略位），基础 ACL 未限制目的字段时不再误判目的地址。
+
+### D24（M5 补充）MPLS L3VPN 用静态双标签 + VRF 标签映射
+
+`StaticLsp` 增加 `vrf` 与 `vpn_label`：ingress 按 **VRF + FEC** 匹配，压入 `[传输标签, VPN 标签]`（depth=2）；P 只交换外层标签；出口 PE 的外层 egress LSP 无 `vrf`，弹掉外层后把内层 VPN 标签再查一次 LSP，命中带 `vrf` 的 egress 项即把裸 IPv4 报文投递到对应 VRF，再由 VRF 路由表发给 CE。VRF 入口的压签先于 VRF 查表（PE 的 VPN 路由下一跳位于全局 MPLS 域），因此不需要在 VRF 内解析远端 PE 下一跳。命令为 `static-lsp ingress … out-label N vrf NAME vpn-label M` / `static-lsp egress … incoming-label M vrf NAME`；`show/display mpls lsp` 增加 VRF 与 VPN 列。配置（含 vrf/vpn_label）进摘要。
+
+不做：MP-BGP VPNv4 路由分发、LDP/RSVP、PHP、VPN 实例 RD/RT、跨 VRF 泄漏；`vpn-label` 必须配合 `vrf`，标签值不做全局唯一性校验（教学拓扑由使用者保证）。大型园区实验复用既有 VLAN/LACP/SVI/OSPF/VRRP/NAT，不新增引擎能力；静态路由现已允许 `0.0.0.0/0` 默认路由（原先误判为非法）。
+
 ## 后果
 
 - 三方言首版交付慢一些（M0 即验证多方言架构），但 M1+ 平移成本递减。

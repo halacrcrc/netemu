@@ -1392,3 +1392,460 @@ fn ipv6_static_routes_between_routers() {
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].received, 5, "IPv6 静态路由应让两端互通: {:?}", r[0]);
 }
+
+// ---------- DHCP Snooping / 端口安全 / QoS ----------
+
+#[test]
+fn dhcp_snooping_requires_trusted_port() {
+    let mut net = Net::new();
+    let pc = net.add_device("PC1".into(), DeviceKind::Host, Dialect::Ios);
+    let sw = net.add_device("SW1".into(), DeviceKind::Switch, Dialect::Ios);
+    let r1 = net.add_device("R1".into(), DeviceKind::Router, Dialect::Ios);
+    net.add_link(pc, sw).unwrap(); // SW p0 客户
+    net.add_link(sw, r1).unwrap(); // SW p1 服务器（默认非信任）
+    net.set_port_admin(r1, 0, true);
+    net.set_port_ip(r1, 0, Some(ip("192.168.1.1")), 24);
+    if let DeviceState::Router(rs) = &mut net.device_mut(r1).unwrap().state {
+        rs.dhcp_pools.push(DhcpPool {
+            name: "LAN".into(),
+            network: ip("192.168.1.0"),
+            prefix: 24,
+            gateway: ip("192.168.1.1"),
+            dns: ip("192.168.1.1"),
+        });
+    }
+    if let DeviceState::Host(hs) = &mut net.device_mut(pc).unwrap().state {
+        hs.dhcp_enable = true;
+        hs.dhcp = Some(HostDhcp { discovering: false });
+    }
+    if let DeviceState::Switch(st) = &mut net.device_mut(sw).unwrap().state {
+        st.dhcp_snooping = true;
+    }
+    let mut eng = Engine::new(net);
+    converge(&mut eng);
+    // 服务器端口非信任：Offer/Ack 被丢弃，客户端拿不到地址
+    eng.dhcp_discover(pc);
+    converge(&mut eng);
+    assert_eq!(
+        eng.net.device(pc).unwrap().ports[0].ip,
+        None,
+        "非信任口应阻断 DHCP 服务器报文"
+    );
+    // 信任服务器端口后恢复
+    if let Some(d) = eng.net.device_mut(sw) {
+        d.ports[1].dhcp_trust = true;
+    }
+    eng.dhcp_discover(pc);
+    converge(&mut eng);
+    let got = eng.net.device(pc).unwrap().ports[0].ip;
+    assert_eq!(got, Some(ip("192.168.1.2")), "信任口应能获取地址");
+    let b = eng.dhcp_bindings_of(sw);
+    assert!(
+        b.iter().any(|x| x.ip == ip("192.168.1.2")),
+        "Snooping 绑定表应记录: {:?}",
+        b
+    );
+}
+
+#[test]
+fn port_security_limits_mac_count() {
+    let mut net = Net::new();
+    let pc = net.add_device("PC1".into(), DeviceKind::Host, Dialect::Ios);
+    let sw = net.add_device("SW1".into(), DeviceKind::Switch, Dialect::Ios);
+    net.add_link(pc, sw).unwrap();
+    if let Some(d) = net.device_mut(sw) {
+        d.ports[0].port_security = Some(PortSecurity {
+            max: 1,
+            violation: PortSecViolation::Restrict,
+            sticky: false,
+        });
+    }
+    let mut eng = Engine::new(net);
+    converge(&mut eng);
+    let mk = |src: Mac| EthernetFrame {
+        dst: BROADCAST_MAC,
+        src,
+        vlan: None,
+        ethertype: ETHERTYPE_ARP,
+        payload: L3::Arp(ArpPacket {
+            op: ArpOp::Request,
+            sender_mac: src,
+            sender_ip: ip("192.168.1.10"),
+            target_mac: ZERO_MAC,
+            target_ip: ip("192.168.1.11"),
+        }),
+    };
+    let mac1: Mac = [0x02, 0, 0, 0, 0x0a, 0x01];
+    let mac2: Mac = [0x02, 0, 0, 0, 0x0a, 0x02];
+    eng.transmit_frame(pc, 0, mk(mac1));
+    run_ms(&mut eng, 50);
+    eng.transmit_frame(pc, 0, mk(mac2));
+    run_ms(&mut eng, 50);
+    let (_, current, viol) = eng.port_security_of(sw, 0).unwrap();
+    assert_eq!(current, 1, "最多学习 1 个 MAC");
+    assert_eq!(viol, 1, "第二个 MAC 应触发违规");
+    assert!(
+        eng.net.device(sw).unwrap().ports[0].admin_up,
+        "restrict 不关端口"
+    );
+
+    // 改为 shutdown：再次违规应关闭端口
+    if let Some(d) = eng.net.device_mut(sw) {
+        d.ports[0].port_security = Some(PortSecurity {
+            max: 1,
+            violation: PortSecViolation::Shutdown,
+            sticky: false,
+        });
+    }
+    eng.transmit_frame(pc, 0, mk([0x02, 0, 0, 0, 0x0a, 0x03]));
+    run_ms(&mut eng, 50);
+    assert!(
+        !eng.net.device(sw).unwrap().ports[0].admin_up,
+        "shutdown 应关闭端口"
+    );
+}
+
+#[test]
+fn qos_storm_control_and_rate_limit_drop() {
+    let mut net = Net::new();
+    let pc = net.add_device("PC1".into(), DeviceKind::Host, Dialect::Ios);
+    let sw = net.add_device("SW1".into(), DeviceKind::Switch, Dialect::Ios);
+    net.add_link(pc, sw).unwrap();
+    if let Some(d) = net.device_mut(sw) {
+        d.ports[0].broadcast_limit_pps = Some(2);
+        d.ports[0].rate_limit_kbps = Some(1);
+    }
+    let mut eng = Engine::new(net);
+    converge(&mut eng);
+    let frame = EthernetFrame {
+        dst: BROADCAST_MAC,
+        src: [0x02, 0, 0, 0, 0x0b, 0x01],
+        vlan: None,
+        ethertype: ETHERTYPE_ARP,
+        payload: L3::Arp(ArpPacket {
+            op: ArpOp::Request,
+            sender_mac: [0x02, 0, 0, 0, 0x0b, 0x01],
+            sender_ip: ip("192.168.1.10"),
+            target_mac: ZERO_MAC,
+            target_ip: ip("192.168.1.11"),
+        }),
+    };
+    for _ in 0..6 {
+        eng.transmit_frame(pc, 0, frame);
+    }
+    run_ms(&mut eng, 10);
+    let stats = eng.qos_stats_of(sw);
+    assert_eq!(stats.len(), 1);
+    let (_, _, _, drops, bdrops) = stats[0];
+    assert!(bdrops > 0, "超过广播上限应丢弃");
+    assert!(drops > 0, "超过限速应丢弃");
+    assert!(eng.dropped > 0);
+}
+
+fn run_ms(eng: &mut Engine, ms: u64) {
+    eng.run_to_quiescence(ms * 1_000_000);
+}
+
+// ---------- BGP ----------
+
+#[test]
+fn bgp_ebgp_learns_and_pings() {
+    let mut net = Net::new();
+    let pc1 = net.add_device("PC1".into(), DeviceKind::Host, Dialect::Ios);
+    let r1 = net.add_device("R1".into(), DeviceKind::Router, Dialect::Ios);
+    let r2 = net.add_device("R2".into(), DeviceKind::Router, Dialect::Ios);
+    let r3 = net.add_device("R3".into(), DeviceKind::Router, Dialect::Ios);
+    let pc2 = net.add_device("PC2".into(), DeviceKind::Host, Dialect::Ios);
+    net.add_link(pc1, r1).unwrap();
+    net.add_link(r1, r2).unwrap();
+    net.add_link(r2, r3).unwrap();
+    net.add_link(r3, pc2).unwrap();
+    net.set_host(pc1, Some(ip("192.168.1.10")), 24, Some(ip("192.168.1.1")));
+    net.set_host(pc2, Some(ip("192.168.2.10")), 24, Some(ip("192.168.2.1")));
+    for (dev, port, addr) in [
+        (r1, 0, "192.168.1.1"),
+        (r1, 1, "10.0.0.1"),
+        (r2, 0, "10.0.0.2"),
+        (r2, 1, "10.0.1.1"),
+        (r3, 0, "10.0.1.2"),
+        (r3, 1, "192.168.2.1"),
+    ] {
+        net.set_port_admin(dev, port, true);
+        net.set_port_ip(dev, port, Some(ip(addr)), 24);
+    }
+    for (dev, asn, neighbors, networks) in [
+        (
+            r1,
+            65001u32,
+            vec![(ip("10.0.0.2"), 65002u32)],
+            vec![(ip("192.168.1.0"), 24u8)],
+        ),
+        (
+            r2,
+            65002,
+            vec![(ip("10.0.0.1"), 65001), (ip("10.0.1.2"), 65003)],
+            vec![],
+        ),
+        (
+            r3,
+            65003,
+            vec![(ip("10.0.1.1"), 65002)],
+            vec![(ip("192.168.2.0"), 24)],
+        ),
+    ] {
+        if let DeviceState::Router(rs) = &mut net.device_mut(dev).unwrap().state {
+            rs.bgp = Some(BgpConfig {
+                asn,
+                neighbors,
+                networks,
+                peer_policies: vec![],
+            });
+        }
+    }
+    let mut eng = Engine::new(net);
+    for dev in [r1, r2, r3] {
+        eng.bgp_config_changed(dev);
+    }
+    converge(&mut eng);
+
+    let d = eng.net.device(r1).unwrap().clone();
+    let DeviceState::Router(rs) = &d.state else {
+        panic!()
+    };
+    assert!(
+        rs.bgp_routes
+            .iter()
+            .any(|r| r.dst == ip("192.168.2.0") && r.len == 24),
+        "R1 应通过 BGP 学到 192.168.2.0/24: {:?}",
+        rs.bgp_routes
+    );
+    assert!(
+        eng.bgp_sessions_of(r1).iter().all(|(_, _, est)| *est),
+        "BGP 会话应 Established"
+    );
+
+    eng.start_ping(pc1, ip("192.168.2.10"));
+    eng.run_to_quiescence(PING_HORIZON_NS);
+    assert_eq!(
+        collect_pings(&mut eng, pc1).last().unwrap().received(),
+        5,
+        "eBGP 学到的路由应让两端互通"
+    );
+}
+
+// ---------- IS-IS ----------
+
+#[test]
+fn isis_learns_routes_and_pings() {
+    let mut net = Net::new();
+    let pc1 = net.add_device("PC1".into(), DeviceKind::Host, Dialect::Ios);
+    let r1 = net.add_device("R1".into(), DeviceKind::Router, Dialect::Ios);
+    let r2 = net.add_device("R2".into(), DeviceKind::Router, Dialect::Ios);
+    let r3 = net.add_device("R3".into(), DeviceKind::Router, Dialect::Ios);
+    let pc2 = net.add_device("PC2".into(), DeviceKind::Host, Dialect::Ios);
+    net.add_link(pc1, r1).unwrap();
+    net.add_link(r1, r2).unwrap();
+    net.add_link(r2, r3).unwrap();
+    net.add_link(r3, pc2).unwrap();
+    net.set_host(pc1, Some(ip("192.168.1.10")), 24, Some(ip("192.168.1.1")));
+    net.set_host(pc2, Some(ip("192.168.2.10")), 24, Some(ip("192.168.2.1")));
+    for (dev, port, addr) in [
+        (r1, 0, "192.168.1.1"),
+        (r1, 1, "10.0.0.1"),
+        (r2, 0, "10.0.0.2"),
+        (r2, 1, "10.0.1.1"),
+        (r3, 0, "10.0.1.2"),
+        (r3, 1, "192.168.2.1"),
+    ] {
+        net.set_port_admin(dev, port, true);
+        net.set_port_ip(dev, port, Some(ip(addr)), 24);
+    }
+    for (dev, sid) in [(r1, 1u8), (r2, 2), (r3, 3)] {
+        let d = net.device_mut(dev).unwrap();
+        if let DeviceState::Router(rs) = &mut d.state {
+            let mut system_id = [0u8; 6];
+            system_id[5] = sid;
+            rs.isis = Some(IsisConfig {
+                net: format!("49.0001.0000.0000.000{}.00", sid),
+                system_id,
+            });
+        }
+        if let Some(p) = net.device_mut(dev).unwrap().ports.get_mut(0) {
+            p.isis_enable = true;
+        }
+        if let Some(p) = net.device_mut(dev).unwrap().ports.get_mut(1) {
+            p.isis_enable = true;
+        }
+    }
+    let mut eng = Engine::new(net);
+    for dev in [r1, r2, r3] {
+        eng.isis_config_changed(dev);
+    }
+    converge(&mut eng);
+
+    let d = eng.net.device(r1).unwrap().clone();
+    let DeviceState::Router(rs) = &d.state else {
+        panic!()
+    };
+    assert!(
+        rs.isis_routes
+            .iter()
+            .any(|r| r.dst == ip("192.168.2.0") && r.len == 24),
+        "R1 应通过 IS-IS 学到 192.168.2.0/24: {:?}",
+        rs.isis_routes
+    );
+    assert!(!eng.isis_neighbors_of(r1).is_empty(), "R1 应有 IS-IS 邻居");
+
+    eng.start_ping(pc1, ip("192.168.2.10"));
+    eng.run_to_quiescence(PING_HORIZON_NS);
+    assert_eq!(
+        collect_pings(&mut eng, pc1).last().unwrap().received(),
+        5,
+        "IS-IS 动态路由应让两端互通"
+    );
+}
+
+// ---------- VRF ----------
+
+#[test]
+fn vrf_separates_routing_tables() {
+    let mut net = Net::new();
+    let r1 = net.add_device("R1".into(), DeviceKind::Router, Dialect::Ios);
+    let a = net.add_device("A".into(), DeviceKind::Host, Dialect::Ios);
+    let b = net.add_device("B".into(), DeviceKind::Host, Dialect::Ios);
+    let c = net.add_device("C".into(), DeviceKind::Host, Dialect::Ios);
+    net.add_link(a, r1).unwrap(); // R1 p0 (CUST1)
+    net.add_link(b, r1).unwrap(); // R1 p1 (CUST2)
+    net.add_link(c, r1).unwrap(); // R1 p2 (CUST1)
+    net.set_host(a, Some(ip("10.0.0.10")), 24, Some(ip("10.0.0.1")));
+    net.set_host(b, Some(ip("10.0.0.10")), 24, Some(ip("10.0.0.1")));
+    net.set_host(c, Some(ip("10.1.0.10")), 24, Some(ip("10.1.0.1")));
+    for (port, addr) in [(0usize, "10.0.0.1"), (1, "10.0.0.1"), (2, "10.1.0.1")] {
+        net.set_port_admin(r1, port, true);
+        net.set_port_ip(r1, port, Some(ip(addr)), 24);
+    }
+    {
+        let d = net.device_mut(r1).unwrap();
+        if let DeviceState::Router(rs) = &mut d.state {
+            rs.vrfs.push(Vrf {
+                id: 1,
+                name: "CUST1".into(),
+                static_routes: vec![],
+            });
+            rs.vrfs.push(Vrf {
+                id: 2,
+                name: "CUST2".into(),
+                static_routes: vec![],
+            });
+        }
+        d.ports[0].vrf = Some(1);
+        d.ports[2].vrf = Some(1);
+        d.ports[1].vrf = Some(2);
+    }
+    let mut eng = Engine::new(net);
+    converge(&mut eng);
+
+    // 同一 VRF 内的两个网段应互通
+    eng.start_ping(a, ip("10.1.0.10"));
+    eng.run_to_quiescence(PING_HORIZON_NS);
+    assert_eq!(
+        collect_pings(&mut eng, a).last().unwrap().received(),
+        5,
+        "CUST1 内跨网段应互通"
+    );
+    // 另一 VRF 中没有 10.1.0.0/24 的路由，应不可达
+    eng.start_ping(b, ip("10.1.0.10"));
+    eng.run_to_quiescence(PING_HORIZON_NS);
+    assert_eq!(
+        collect_pings(&mut eng, b).last().unwrap().received(),
+        0,
+        "不同 VRF 应隔离"
+    );
+}
+
+// ---------- MPLS ----------
+
+#[test]
+fn mpls_static_lsp_forwards() {
+    let mut net = Net::new();
+    let pc1 = net.add_device("PC1".into(), DeviceKind::Host, Dialect::Ios);
+    let r1 = net.add_device("R1".into(), DeviceKind::Router, Dialect::Ios);
+    let r2 = net.add_device("R2".into(), DeviceKind::Router, Dialect::Ios);
+    let r3 = net.add_device("R3".into(), DeviceKind::Router, Dialect::Ios);
+    let pc2 = net.add_device("PC2".into(), DeviceKind::Host, Dialect::Ios);
+    net.add_link(pc1, r1).unwrap();
+    let core1 = net.add_link(r1, r2).unwrap();
+    net.add_link(r2, r3).unwrap();
+    net.add_link(r3, pc2).unwrap();
+    net.set_host(pc1, Some(ip("192.168.1.10")), 24, Some(ip("192.168.1.1")));
+    net.set_host(pc2, Some(ip("192.168.2.10")), 24, Some(ip("192.168.2.1")));
+    for (dev, port, addr) in [
+        (r1, 0, "192.168.1.1"),
+        (r1, 1, "10.0.0.1"),
+        (r2, 0, "10.0.0.2"),
+        (r2, 1, "10.0.1.1"),
+        (r3, 0, "10.0.1.2"),
+        (r3, 1, "192.168.2.1"),
+    ] {
+        net.set_port_admin(dev, port, true);
+        net.set_port_ip(dev, port, Some(ip(addr)), 24);
+    }
+    // 去程静态路由 + 回程静态路由
+    net.add_static_route(r1, ip("192.168.2.0"), 24, ip("10.0.0.2"));
+    net.add_static_route(r3, ip("192.168.1.0"), 24, ip("10.0.1.1"));
+    net.add_static_route(r2, ip("192.168.1.0"), 24, ip("10.0.0.1"));
+    // 静态 LSP：R1 压 100 / R2 换 200 / R3 弹签
+    if let DeviceState::Router(rs) = &mut net.device_mut(r1).unwrap().state {
+        rs.mpls_lsps.push(StaticLsp {
+            name: "to-pc2".into(),
+            net: Some((ip("192.168.2.0"), 24)),
+            in_label: None,
+            out_label: Some(100),
+            nexthop: Some(ip("10.0.0.2")),
+            vrf: None,
+            vpn_label: None,
+        });
+    }
+    if let DeviceState::Router(rs) = &mut net.device_mut(r2).unwrap().state {
+        rs.mpls_lsps.push(StaticLsp {
+            name: "transit".into(),
+            net: None,
+            in_label: Some(100),
+            out_label: Some(200),
+            nexthop: Some(ip("10.0.1.2")),
+            vrf: None,
+            vpn_label: None,
+        });
+    }
+    if let DeviceState::Router(rs) = &mut net.device_mut(r3).unwrap().state {
+        rs.mpls_lsps.push(StaticLsp {
+            name: "egress".into(),
+            net: None,
+            in_label: Some(200),
+            out_label: None,
+            nexthop: None,
+            vrf: None,
+            vpn_label: None,
+        });
+    }
+    net.set_capture(core1, true);
+    let mut eng = Engine::new(net);
+    converge(&mut eng);
+    eng.start_ping(pc1, ip("192.168.2.10"));
+    eng.run_to_quiescence(PING_HORIZON_NS);
+    assert_eq!(
+        collect_pings(&mut eng, pc1).last().unwrap().received(),
+        5,
+        "静态 LSP 应让两端互通"
+    );
+    let mpls_seen = eng
+        .net
+        .link(core1)
+        .map(|l| {
+            l.capture_buf
+                .iter()
+                .any(|c| matches!(c.frame.payload, L3::Mpls(_)))
+        })
+        .unwrap_or(false);
+    assert!(mpls_seen, "去程应携带 MPLS 标签");
+}

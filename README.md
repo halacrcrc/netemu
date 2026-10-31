@@ -4,7 +4,7 @@
 
 > 目标：覆盖 HCIA/HCIP/HCIE、CCNA/CCNP 等课程体系（数通 / 安全 / 无线 / 数据中心），对同一知识点**同时讲解思科、华为、华三的命令写法**，并提供从简单办公网到大型园区网、数据中心的在线练习场，附带笔记与进度追踪。
 
-## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4 起步（OSPF/VRRP/IPv6）✅
+## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4（OSPF/VRRP/IPv6/安全/QoS）✅ + M5（BGP/IS-IS/VRF/MPLS/route-policy/L3VPN + 园区实验）✅
 
 **M0 = 可运行的骨架**：
 
@@ -83,14 +83,30 @@
 - **界面双语**：顶栏「EN / 中」一键切换，界面骨架、练习场、题库/课程/笔记的操作文案均为中英双语；课程与题目内容保持中文。
 - **URL 分享拓扑**：拓扑管理面板「复制分享链接」把工作区（含设备位置）压缩进 `#topo=`，打开链接即还原；同时补上导出/导入文件入口。分享链接优先于本地工作区。
 
-### M4 起步（OSPF / VRRP / IPv6）
+### M4（IP 进阶与二层安全）
 
 - **OSPF 单区域**：Hello（2s）建立邻居、Router-LSA 泛洪、SPF 计算动态路由（`O` 路由）；三方言配置（`router ospf 1` + `network … area 0` / `ospf 1` + `area 0` + `network`），`show/display ospf neighbor|peer / database|lsdb`。
 - **VRRP 主备**：优先级选举（平局比接口 IP）、1s 通告、3.5s 失效切换、虚拟 MAC 网关、Master 应答 VIP 的 ARP 与 ICMP；三方言配置与 `show/display vrrp`。
 - **IPv6**：接口 IPv6 地址、NDP（NS/NA + solicited-node 组播）、ICMPv6 ping6、连接/静态 v6 路由；三方言 `ipv6 address`、`ipv6 route`/`route-static`、`ping ipv6`、`show/display ipv6 interface brief|routing-table`；主机属性面板可直接配置 IPv6 地址/网关，PC 终端 `ping6`。
-- **英文内容**：四篇课程、103 道题库、6 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
+- **DHCP Snooping**：全局开关 + 信任端口；非信任口的 Offer/Ack 被丢弃，从 Request/Ack 学习绑定表（MAC/IP/VLAN/端口），`show ip dhcp snooping binding` / `display dhcp snooping user-binding`。
+- **端口安全**：最大 MAC 数、`restrict` / `shutdown` 违规动作、sticky 标记；超限帧丢弃与违规计数，`show/display port-security`。
+- **QoS 基础**：入方向广播风暴抑制（每秒广播上限）与令牌桶限速（kbps），显示丢弃/抑制计数；`storm-control` / `broadcast-suppression`、`rate-limit input` / `qos car|lr inbound cir`、`show/display storm-control|qos`。
+- **英文内容**：四篇课程、103 道题库、9 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
 
-**已验证**：87 个 Rust 测试全绿；浏览器端实测：OSPF 三路由器邻居 FULL + O 路由与 ping 连通、VRRP 主备状态与接口故障后 Backup 接管且虚拟网关仍通、IPv6 主机 `ping6` 5/5 与主机 IPv6 配置面板、EN 下课程/题库/实验内容与界面均为英文。
+### M5（BGP / IS-IS / VRF / MPLS / route-policy / L3VPN）
+
+- **eBGP 单跳会话**：Open／Keepalive 建立与保活、广播 Update 泛洪、AS_PATH 环路检测、按下一跳安装 `B` 路由（来源优先级：直连 > 静态 > BGP > OSPF）；邻居 5s 无包自动断开并撤销路由。
+- **IS-IS 单区域**：Hello 建邻、LSP 泛洪、SPF，安装 `i` 路由（优先级最低，115）；三方言 `router isis`/`isis 1` + `net`/`network-entity` + 接口使能，`show/display isis peer|lsdb`。
+- **VRF-lite**：每 VRF 独立连接/静态路由表与转发上下文，接口按端口归属 VRF；三方言 `vrf definition`/`ip vpn-instance`、接口绑定、`show/display ip route vrf|vpn-instance`；跨 VRF 隔离。
+- **MPLS-lite**：静态 LSP 的压签/换签/弹签，标签帧按 ILM 转发；三方言 `static-lsp ingress|transit|egress` 与 `show/display mpls lsp`。
+- **route-policy**：按 ACL 前缀匹配的路由策略（IOS `route-map` + `match ip address` + `set local-preference`；VRP/Comware `route-policy … node` + `if-match acl` + `apply local-preference`），绑定到 BGP 邻居的 import/export 方向（`neighbor … route-map … in|out` / `peer … route-policy … import|export`）；策略按 seq 升序首条命中决定 permit/deny，无命中隐式拒绝；Local Preference 参与 BGP 最优路径选择（高者优先，其次 AS_PATH 短者）；`show route-map` / `display route-policy` 从状态渲染。
+- **MPLS L3VPN-lite**：PE 上 VRF 隔离客户路由，入口按 VRF + FEC 压入“传输标签 + VPN 标签”（`static-lsp ingress … vrf CUST1 vpn-label 1001`），P 只交换外层标签，出口 PE 弹外层后按 VPN 标签把报文投递回 VRF（`static-lsp egress … vrf CUST1`）；支持 CE—PE—P—PE—CE 双向往返。
+- **实验七「BGP 路由策略」**：R1 宣告两个网段，R2 用 ACL + route-policy 只过滤受控前缀；判分验证“允许前缀可达、受控前缀不可达”。
+- **实验八「MPLS L3VPN」**：CE—PE—P—PE—CE 拓扑，配置双标签 VPN 与 VRF 映射，判分验证 LSP 与双向 ping。
+- **实验九「大型园区综合实验」**：双楼接入（VLAN + LACP 双链路）→ DSW SVI 间路由 → CORE1/CORE2 VRRP + OSPF → CORE1 NAT 上外网；一次串起 M2~M5。
+- 简化边界见 ADR D21/D22/D23/D24（无 TCP/iBGP、IS-IS 无 DIS/多级、VRF 无动态协议、L3VPN 无 MP-BGP/LDP、route-policy 仅 ACL 匹配与 Local Preference）。
+
+**已验证**：118 个 Rust 测试全绿；浏览器实测 BGP Established + `B` 路由、IS-IS 邻居 Up + LSDB、VRF 路由表隔离、MPLS 静态 LSP 展示、实验七 5/5、实验八 4/4、实验九 8/8（含 VRRP Master、OSPF 邻居、LACP、跨 VLAN 与 NAT 上网）。
 
 ## 本地开发
 
@@ -134,8 +150,8 @@ web/
 | M1 数通IA闭环（MVP） | VLAN/Trunk/SVI/静态路由（三方言）+ 校验引擎 + 报文查看器 + 办公网实验集 | ✅ |
 | M2 IA 补全 | STP ✅、RSTP ✅、MSTP ✅、DHCP ✅、ACL ✅、NAT ✅、题库/进度 ✅、LACP ✅、SSH ✅ | ✅ |
 | M3 内容+笔记+同步 | 课程管线 ✅、三厂商对照表 ✅、Gist 同步 ✅、PWA 离线 ✅ | ✅ |
-| M4 IP 进阶 | OSPF 多区域 → 单区域 ✅、VRRP ✅、IPv6 ✅、DHCP Snooping、端口安全、QoS 基础 | 进行中 |
-| M5 IE 数通 | BGP、IS-IS、route-policy、VRF、MPLS L3VPN + 大型园区实验 | |
+| M4 IP 进阶 | OSPF 单区域 ✅（多区域可选）、VRRP ✅、IPv6 ✅、DHCP Snooping ✅、端口安全 ✅、QoS 基础 ✅ | ✅ |
+| M5 IE 数通 | BGP ✅（eBGP 单跳）、IS-IS ✅（单区域）、VRF ✅（静态）、MPLS ✅（静态 LSP）、route-policy ✅、MPLS L3VPN ✅、大型园区实验 ✅ | ✅ |
 | M6 安全方向 | 防火墙三方言（ASA/USG/SecPath）、区域/策略、IPSec/SSL VPN | |
 | M7 无线方向 | AC/AP、CAPWAP、WLAN 安全 | |
 | M8 数据中心 | 堆叠/IRF/CSS、M-LAG、VXLAN EVPN + DC 实验；F5 LTM 基础 | |
