@@ -112,7 +112,7 @@ export function setPosition(id: number, pos: NodePos) {
 }
 
 export function resetPositions() {
-  for (const k of Object.keys(app.positions)) delete app.positions[k];
+  for (const k of Object.keys(app.positions)) delete app.positions[Number(k)];
 }
 
 export function clearTabs() {

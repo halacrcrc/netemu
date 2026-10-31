@@ -9,6 +9,7 @@
     getGistId,
     backupToGist,
     restoreFromGist,
+    applyBackup,
     type Note,
   } from '../lib/notes';
 
@@ -101,6 +102,7 @@
     try {
       saveToken(token.trim());
       const data = await restoreFromGist(token.trim());
+      applyBackup(data);
       applyLocal(data);
       syncMsg = '✓ 已从云端恢复（笔记已覆盖，题库/实验进度按次数合并）';
     } catch (e) {
