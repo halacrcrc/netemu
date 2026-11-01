@@ -333,6 +333,40 @@ pub enum L3 {
     Tcp(TcpPacket),
     /// IPsec 站点隧道（教学用 IP-in-IP，不做 ESP 加密）
     Ipsec(IpsecPacket),
+    /// CAPWAP（简化：AP 发现/加入、AC 下发 WLAN 配置）
+    Capwap(CapwapPacket),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapwapKind {
+    Discovery,
+    Join,
+    ConfigReset,
+    Config,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapwapPacket {
+    pub kind: CapwapKind,
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub ssid: [u8; 32],
+    pub psk: [u8; 32],
+    pub vlan: u16,
+    pub security: u8,
+}
+
+pub fn fixed_str(s: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(32);
+    out[..n].copy_from_slice(&bytes[..n]);
+    out
+}
+
+pub fn fixed_str_value(bytes: &[u8; 32]) -> String {
+    let n = bytes.iter().position(|b| *b == 0).unwrap_or(32);
+    String::from_utf8_lossy(&bytes[..n]).to_string()
 }
 
 /// 简化 IPsec 隧道报文：外层路由到对端，内层是受保护流量。
@@ -581,6 +615,7 @@ impl EthernetFrame {
             L3::Mpls(m) => 14 + 4 * m.depth as u32 + 20 + ICMP_DATA_SIZE + 4,
             L3::Tcp(_) => 20 + 20 + 8,
             L3::Ipsec(_) => 20 + 20 + ICMP_DATA_SIZE + 20,
+            L3::Capwap(_) => 20 + 8 + 64 + 2,
         };
         14 + payload + 4 + if self.vlan.is_some() { 4 } else { 0 }
     }

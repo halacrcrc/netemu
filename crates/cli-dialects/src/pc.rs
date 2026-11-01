@@ -47,6 +47,57 @@ pub fn exec(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> Str
             eng.start_tcp_probe(dev, target, port);
             String::new()
         }
+        "wifi" => {
+            let sub = toks.get(1).map(|t| t.0.to_lowercase()).unwrap_or_default();
+            if sub == "status" {
+                let Some(d) = eng.net.device(dev) else {
+                    return String::new();
+                };
+                if let DeviceState::Host(hs) = &d.state {
+                    return match &hs.wifi {
+                        Some(w) => {
+                            let ap = eng
+                                .net
+                                .device(w.ap)
+                                .map(|x| x.name.clone())
+                                .unwrap_or_else(|| "?".into());
+                            format!("Wi-Fi: 已连接 SSID {}（AP {}）", w.ssid, ap)
+                        }
+                        None => "Wi-Fi: 未连接".into(),
+                    };
+                }
+                return String::new();
+            }
+            if sub == "roam" {
+                return match eng.wifi_roam(dev) {
+                    Ok(ap) => {
+                        let ap_name = eng
+                            .net
+                            .device(ap)
+                            .map(|d| d.name.clone())
+                            .unwrap_or_else(|| "?".into());
+                        format!("Wi-Fi 已漫游到 AP {}", ap_name)
+                    }
+                    Err(e) => format!("Wi-Fi 漫游失败: {}", e),
+                };
+            }
+            if sub != "connect" || toks.len() < 3 {
+                return "用法: wifi connect <SSID> [口令] | wifi roam | wifi status".into();
+            }
+            let ssid = &toks[2].0;
+            let pass = toks.get(3).map(|t| t.0.as_str()).unwrap_or("");
+            match eng.wifi_connect(dev, ssid, pass) {
+                Ok(ap) => {
+                    let ap_name = eng
+                        .net
+                        .device(ap)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_else(|| "?".into());
+                    format!("Wi-Fi 已连接：{}（AP {}）", ssid, ap_name)
+                }
+                Err(e) => format!("Wi-Fi 连接失败: {}", e),
+            }
+        }
         "sslvpn" => {
             if toks.len() < 5 || !toks[1].0.eq_ignore_ascii_case("connect") {
                 return "用法: sslvpn connect <网关IP> <用户名> <口令>".into();
@@ -93,7 +144,7 @@ pub fn exec(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> Str
         }
         "arp" => arp_table(eng, dev),
         "help" | "?" => {
-            "可用命令:\n  ping <IP>       测试到目标 IP 的连通性\n  ping6 <IPv6>    测试 IPv6 连通性\n  tcp <IP> <端口> 发起 TCP 握手（22/80/443 开放）\n  sslvpn connect <网关IP> <用户> <口令> 建立 SSL VPN\n  telnet <IP>     用 Telnet 登录网络设备\n  ssh <IP>        用 SSH 登录网络设备\n  ipconfig        查看本机网络配置\n  ipconfig /renew 重新发起 DHCP 获取（或输入 dhcp）\n  arp             查看本机 ARP 缓存\n  help            显示本帮助".into()
+            "可用命令:\n  ping <IP>       测试到目标 IP 的连通性\n  ping6 <IPv6>    测试 IPv6 连通性\n  tcp <IP> <端口> 发起 TCP 握手（22/80/443 开放）\n  wifi connect <SSID> [口令]  连接无线 AP\n  wifi roam       漫游到同 SSID 的另一 AP\n  wifi status     查看无线连接状态\n  sslvpn connect <网关IP> <用户> <口令> 建立 SSL VPN\n  telnet <IP>     用 Telnet 登录网络设备\n  ssh <IP>        用 SSH 登录网络设备\n  ipconfig        查看本机网络配置\n  ipconfig /renew 重新发起 DHCP 获取（或输入 dhcp）\n  arp             查看本机 ARP 缓存\n  help            显示本帮助".into()
         }
         other => format!("未知命令: {}（输入 help 查看可用命令）", other),
     }

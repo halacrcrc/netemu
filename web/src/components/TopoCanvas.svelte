@@ -157,6 +157,8 @@
     Switch: 'var(--switch)',
     Host: 'var(--host)',
     Firewall: 'var(--firewall)',
+    AccessPoint: 'var(--ap)',
+    WlanController: 'var(--ac)',
   };
 
   const KIND_TEXT: Record<string, string> = {
@@ -164,6 +166,8 @@
     Switch: 'left.switch',
     Host: 'left.pc',
     Firewall: 'left.firewall',
+    AccessPoint: 'left.ap',
+    WlanController: 'left.ac',
   };
 </script>
 
@@ -274,6 +278,18 @@
               stroke-width="2"
             />
             <path d="M {NODE_W / 2 - 5} 25 h10 M {NODE_W / 2} 20 v10" stroke={KIND_COLOR[dev.kind]} stroke-width="1.6" />
+          {:else if dev.kind === 'AccessPoint'}
+            <circle cx={NODE_W / 2} cy={25} r="4" fill={KIND_COLOR[dev.kind]} />
+            <path
+              d="M {NODE_W / 2 - 10} 18 a14 14 0 0 1 20 0 M {NODE_W / 2 - 6} 22 a8 8 0 0 1 12 0"
+              fill="none"
+              stroke={KIND_COLOR[dev.kind]}
+              stroke-width="2"
+            />
+          {:else if dev.kind === 'WlanController'}
+            <rect x={NODE_W / 2 - 13} y={14} width="26" height="18" rx="3" fill="none" stroke={KIND_COLOR[dev.kind]} stroke-width="2" />
+            <circle cx={NODE_W / 2} cy={23} r="3" fill={KIND_COLOR[dev.kind]} />
+            <path d="M {NODE_W / 2 - 8} 36 h16" stroke={KIND_COLOR[dev.kind]} stroke-width="2" />
           {:else}
             <rect x={NODE_W / 2 - 11} y={12} width="22" height="14" rx="2" fill="none" stroke={KIND_COLOR[dev.kind]} stroke-width="2" />
             <path d="M {NODE_W / 2 - 5} 32 h10 M {NODE_W / 2} 26 v6" stroke={KIND_COLOR[dev.kind]} stroke-width="2" fill="none" />

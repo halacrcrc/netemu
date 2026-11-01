@@ -27,6 +27,10 @@ pub enum DeviceKind {
     Host,
     /// 防火墙：数据面复用路由器状态，额外提供安全区域与区域间策略。
     Firewall,
+    /// 无线接入点：二层桥接，另有 WLAN/CAPWAP 配置。
+    AccessPoint,
+    /// 无线控制器：复用路由器状态，负责 CAPWAP 与 WLAN 配置下发。
+    WlanController,
 }
 
 impl DeviceKind {
@@ -36,6 +40,8 @@ impl DeviceKind {
             DeviceKind::Switch => SWITCH_PORTS,
             DeviceKind::Host => HOST_PORTS,
             DeviceKind::Firewall => ROUTER_PORTS,
+            DeviceKind::AccessPoint => ROUTER_PORTS,
+            DeviceKind::WlanController => ROUTER_PORTS,
         }
     }
 }
@@ -809,6 +815,9 @@ pub struct HostDhcp {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HostState {
     pub gw: Option<Ipv4Addr>,
+    /// SSL VPN 已连接会话
+    #[serde(default)]
+    pub wifi: Option<WifiSession>,
     /// IPv6 默认网关
     #[serde(default)]
     pub gw6: Option<Ipv6Addr>,
@@ -847,6 +856,12 @@ pub struct HostState {
 pub struct VpnSession {
     pub gateway: Ipv4Addr,
     pub virtual_ip: Ipv4Addr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiSession {
+    pub ap: DevId,
+    pub ssid: String,
 }
 
 fn default_tcp_listeners() -> Vec<u16> {
@@ -1156,6 +1171,72 @@ pub struct Device {
     /// 管理面（远程登录认证）
     #[serde(default)]
     pub mgmt: MgmtState,
+    /// WLAN/CAPWAP 配置（AP 与 AC）
+    #[serde(default)]
+    pub wlan: WlanConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WlanSecurity {
+    #[default]
+    Open,
+    Wpa2Psk,
+    Wpa3Sae,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WlanProfile {
+    pub ssid: String,
+    pub security: WlanSecurity,
+    pub psk: Option<String>,
+    pub vlan: VlanId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WlanConfig {
+    #[serde(default)]
+    pub profiles: Vec<WlanProfile>,
+    /// 最近一次 `wlan ssid` 选中的配置对象（瞬态）
+    #[serde(default)]
+    pub selected: Option<String>,
+    /// AP 选路优先级（高者优先，用于漫游）
+    #[serde(default = "default_wlan_priority")]
+    pub priority: u8,
+    /// AP：静态指定的 AC 地址
+    #[serde(default)]
+    pub capwap_ac: Option<Ipv4Addr>,
+    /// AP：CAPWAP 已加入的 AC 地址
+    #[serde(default)]
+    pub ac_ip: Option<Ipv4Addr>,
+    #[serde(default)]
+    pub joined: bool,
+}
+
+fn default_wlan_priority() -> u8 {
+    100
+}
+
+impl WlanConfig {
+    pub fn profile(&self, ssid: &str) -> Option<&WlanProfile> {
+        self.profiles.iter().find(|p| p.ssid == ssid)
+    }
+
+    pub fn profile_mut(&mut self, ssid: &str) -> Option<&mut WlanProfile> {
+        self.profiles.iter_mut().find(|p| p.ssid == ssid)
+    }
+}
+
+impl Default for WlanConfig {
+    fn default() -> Self {
+        Self {
+            profiles: vec![],
+            selected: None,
+            priority: default_wlan_priority(),
+            capwap_ac: None,
+            ac_ip: None,
+            joined: false,
+        }
+    }
 }
 
 impl Device {
@@ -1164,7 +1245,10 @@ impl Device {
             .map(|idx| Port {
                 idx,
                 // 与真实设备一致：交换机端口与主机网卡默认开启，路由器接口需手工 no shutdown
-                admin_up: !matches!(kind, DeviceKind::Router | DeviceKind::Firewall),
+                admin_up: !matches!(
+                    kind,
+                    DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+                ),
                 mac: port_mac(id, idx),
                 speed_bps: PORT_SPEED_BPS,
                 ip: None,
@@ -1191,9 +1275,13 @@ impl Device {
             })
             .collect();
         let state = match kind {
-            DeviceKind::Router | DeviceKind::Firewall => {
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController => {
                 DeviceState::Router(RouterState::default())
             }
+            DeviceKind::AccessPoint => DeviceState::Switch(SwitchState {
+                vlans: vec![DEFAULT_VLAN],
+                ..Default::default()
+            }),
             DeviceKind::Switch => DeviceState::Switch(SwitchState {
                 vlans: vec![DEFAULT_VLAN],
                 ..Default::default()
@@ -1211,6 +1299,7 @@ impl Device {
             ports,
             state,
             mgmt: MgmtState::default(),
+            wlan: WlanConfig::default(),
         }
     }
 
@@ -1231,7 +1320,10 @@ impl Device {
     pub fn is_l3(&self) -> bool {
         matches!(
             self.kind,
-            DeviceKind::Router | DeviceKind::Switch | DeviceKind::Firewall
+            DeviceKind::Router
+                | DeviceKind::Switch
+                | DeviceKind::Firewall
+                | DeviceKind::WlanController
         )
     }
 

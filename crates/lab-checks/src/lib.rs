@@ -96,6 +96,14 @@ pub enum CheckKind {
     IpsecTunnel { dev: DevId, name: String },
     /// 检查主机已建立 SSL VPN 会话。
     VpnConnected { dev: DevId },
+    /// 检查 AP 已加入 AC。
+    WlanApJoined { ac: DevId, ap: DevId },
+    /// 检查 AC 的 SSID。
+    WlanSsid { ac: DevId, ssid: String },
+    /// 检查主机已关联 Wi-Fi。
+    WifiConnected { dev: DevId },
+    /// 检查主机当前关联的 AP。
+    WifiOnAp { dev: DevId, ap: DevId },
 }
 
 #[derive(Clone, Debug)]
@@ -495,6 +503,67 @@ fn run_one(eng: &mut Engine, c: &Check) -> CheckResult {
                 match connected {
                     Some(true) => "SSL VPN 已连接".into(),
                     _ => "SSL VPN 未连接".into(),
+                },
+            )
+        }
+        CheckKind::WlanApJoined { ac, ap } => {
+            let ac_ip = eng
+                .net
+                .device(*ac)
+                .and_then(|d| d.ports.iter().find_map(|p| p.ip));
+            let joined = eng.net.device(*ap).map(|d| match (&d.kind, ac_ip) {
+                (sim_core::device::DeviceKind::AccessPoint, Some(ip)) => {
+                    d.wlan.joined && d.wlan.ac_ip == Some(ip)
+                }
+                _ => false,
+            });
+            (
+                joined == Some(true),
+                match joined {
+                    Some(true) => "AP 已加入 AC".into(),
+                    _ => "AP 未加入 AC".into(),
+                },
+            )
+        }
+        CheckKind::WlanSsid { ac, ssid } => {
+            let actual = eng.net.device(*ac).and_then(|d| {
+                d.wlan
+                    .profiles
+                    .iter()
+                    .find(|p| p.ssid == *ssid)
+                    .map(|p| p.ssid.clone())
+            });
+            (
+                actual.as_deref() == Some(ssid.as_str()),
+                match actual {
+                    Some(s) => format!("SSID = {}", s),
+                    None => "未配置 SSID".into(),
+                },
+            )
+        }
+        CheckKind::WifiConnected { dev } => {
+            let connected = eng.net.device(*dev).map(|d| match &d.state {
+                sim_core::device::DeviceState::Host(hs) => hs.wifi.is_some(),
+                _ => false,
+            });
+            (
+                connected == Some(true),
+                match connected {
+                    Some(true) => "Wi-Fi 已关联".into(),
+                    _ => "Wi-Fi 未关联".into(),
+                },
+            )
+        }
+        CheckKind::WifiOnAp { dev, ap } => {
+            let current = eng.net.device(*dev).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Host(hs) => hs.wifi.as_ref().map(|w| w.ap),
+                _ => None,
+            });
+            (
+                current == Some(*ap),
+                match current {
+                    Some(a) => format!("当前关联 AP id={}", a),
+                    None => "未关联任何 AP".into(),
                 },
             )
         }

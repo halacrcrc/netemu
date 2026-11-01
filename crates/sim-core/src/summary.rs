@@ -121,6 +121,9 @@ pub struct DevSummary {
     /// SSL VPN 虚拟地址池
     #[serde(default)]
     pub sslvpn_pool: Option<(String, u8)>,
+    /// WLAN/CAPWAP 配置
+    #[serde(default)]
+    pub wlan: Option<WlanSummary>,
     /// IS-IS NET
     #[serde(default)]
     pub isis_net: Option<String>,
@@ -182,6 +185,22 @@ pub struct IpsecTunnelSummary {
     pub local_len: u8,
     pub remote_subnet: String,
     pub remote_len: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WlanSummary {
+    pub profiles: Vec<WlanProfileSummary>,
+    pub priority: u8,
+    pub capwap_ac: Option<String>,
+    pub joined: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WlanProfileSummary {
+    pub ssid: String,
+    pub security: String,
+    pub psk: Option<String>,
+    pub vlan: VlanId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,6 +548,31 @@ impl Net {
                         }
                         _ => None,
                     },
+                    wlan: if matches!(d.kind, DeviceKind::AccessPoint | DeviceKind::WlanController)
+                    {
+                        Some(WlanSummary {
+                            profiles: d
+                                .wlan
+                                .profiles
+                                .iter()
+                                .map(|p| WlanProfileSummary {
+                                    ssid: p.ssid.clone(),
+                                    security: match p.security {
+                                        WlanSecurity::Open => "open".into(),
+                                        WlanSecurity::Wpa2Psk => "wpa2-psk".into(),
+                                        WlanSecurity::Wpa3Sae => "wpa3-sae".into(),
+                                    },
+                                    psk: p.psk.clone(),
+                                    vlan: p.vlan,
+                                })
+                                .collect(),
+                            priority: d.wlan.priority,
+                            capwap_ac: d.wlan.capwap_ac.map(ipv4_str),
+                            joined: d.wlan.joined,
+                        })
+                    } else {
+                        None
+                    },
                     isis_net: match &d.state {
                         DeviceState::Router(rs) => rs.isis.as_ref().map(|i| i.net.clone()),
                         _ => None,
@@ -782,6 +826,25 @@ impl Net {
                         if let Some(net) = ipv4_from_str(net) {
                             rs.sslvpn_pool = Some((net, *len));
                         }
+                    }
+                    if let Some(w) = &ds.wlan {
+                        d.wlan.profiles = w
+                            .profiles
+                            .iter()
+                            .map(|p| WlanProfile {
+                                ssid: p.ssid.clone(),
+                                security: match p.security.as_str() {
+                                    "wpa2-psk" => WlanSecurity::Wpa2Psk,
+                                    "wpa3-sae" => WlanSecurity::Wpa3Sae,
+                                    _ => WlanSecurity::Open,
+                                },
+                                psk: p.psk.clone(),
+                                vlan: p.vlan,
+                            })
+                            .collect();
+                        d.wlan.priority = w.priority;
+                        d.wlan.capwap_ac = w.capwap_ac.as_ref().and_then(|s| ipv4_from_str(s));
+                        d.wlan.joined = w.joined;
                     }
                     if let Some(net) = &ds.isis_net {
                         if let Some(sid) = parse_isis_net(net) {

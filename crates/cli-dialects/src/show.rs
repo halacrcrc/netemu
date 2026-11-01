@@ -536,7 +536,7 @@ pub fn render_tcp_probe(p: &TcpProbe) -> String {
 pub fn is_l3_device(d: &Device) -> bool {
     matches!(
         d.kind,
-        DeviceKind::Router | DeviceKind::Switch | DeviceKind::Firewall
+        DeviceKind::Router | DeviceKind::Switch | DeviceKind::Firewall | DeviceKind::WlanController
     )
 }
 
@@ -1596,6 +1596,55 @@ pub fn sslvpn_sessions(eng: &Engine, dev: DevId, _dialect: Dialect) -> String {
     let mut out = String::from("Virtual IP      Client IP\n");
     for (v, c) in rows {
         out.push_str(&format!("{:<15} {}\n", ipv4_str(v), ipv4_str(c)));
+    }
+    out.trim_end().to_string()
+}
+
+/// `show wlan` / `display wlan`（AC 与 AP）。
+pub fn wlan_table(eng: &Engine, dev: DevId, _dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let mut out = String::from("WLAN profiles:\n");
+    if d.wlan.profiles.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for p in &d.wlan.profiles {
+        let sec = match p.security {
+            sim_core::device::WlanSecurity::Open => "open",
+            sim_core::device::WlanSecurity::Wpa2Psk => "wpa2-psk",
+            sim_core::device::WlanSecurity::Wpa3Sae => "wpa3-sae",
+        };
+        out.push_str(&format!(
+            "  SSID: {:<12} Security: {:<10} VLAN: {}\n",
+            p.ssid, sec, p.vlan
+        ));
+    }
+    match d.kind {
+        DeviceKind::WlanController => {
+            out.push_str("AP list:\n");
+            let aps = eng.wlan_aps_of(dev);
+            if aps.is_empty() {
+                out.push_str("  (none)\n");
+            }
+            for (name, ip, joined) in aps {
+                out.push_str(&format!(
+                    "  {:<10}{:<16}{}\n",
+                    name,
+                    ip.map(ipv4_str).unwrap_or_else(|| "-".into()),
+                    if joined { "Joined" } else { "Join" }
+                ));
+            }
+        }
+        DeviceKind::AccessPoint => {
+            out.push_str(&format!(
+                "AC: {}\nState: {}\nPriority: {}\n",
+                d.wlan.ac_ip.map(ipv4_str).unwrap_or_else(|| "-".into()),
+                if d.wlan.joined { "Joined" } else { "Idle" },
+                d.wlan.priority
+            ));
+        }
+        _ => {}
     }
     out.trim_end().to_string()
 }

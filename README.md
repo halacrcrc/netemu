@@ -4,7 +4,7 @@
 
 > 目标：覆盖 HCIA/HCIP/HCIE、CCNA/CCNP 等课程体系（数通 / 安全 / 无线 / 数据中心），对同一知识点**同时讲解思科、华为、华三的命令写法**，并提供从简单办公网到大型园区网、数据中心的在线练习场，附带笔记与进度追踪。
 
-## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4（OSPF/VRRP/IPv6/安全/QoS）✅ + M5（BGP/IS-IS/VRF/MPLS/route-policy/L3VPN + 园区实验）✅ + M6（防火墙/TCP 状态机/IPsec/SSL VPN）✅
+## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4（OSPF/VRRP/IPv6/安全/QoS）✅ + M5（BGP/IS-IS/VRF/MPLS/route-policy/L3VPN + 园区实验）✅ + M6（防火墙/TCP/IPsec/SSL VPN）✅ + M7（AC/AP/CAPWAP/多 SSID/WPA3/漫游）✅
 
 **M0 = 可运行的骨架**：
 
@@ -91,7 +91,7 @@
 - **DHCP Snooping**：全局开关 + 信任端口；非信任口的 Offer/Ack 被丢弃，从 Request/Ack 学习绑定表（MAC/IP/VLAN/端口），`show ip dhcp snooping binding` / `display dhcp snooping user-binding`。
 - **端口安全**：最大 MAC 数、`restrict` / `shutdown` 违规动作、sticky 标记；超限帧丢弃与违规计数，`show/display port-security`。
 - **QoS 基础**：入方向广播风暴抑制（每秒广播上限）与令牌桶限速（kbps），显示丢弃/抑制计数；`storm-control` / `broadcast-suppression`、`rate-limit input` / `qos car|lr inbound cir`、`show/display storm-control|qos`。
-- **英文内容**：四篇课程、103 道题库、12 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
+- **英文内容**：四篇课程、103 道题库、14 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
 
 ### M5（BGP / IS-IS / VRF / MPLS / route-policy / L3VPN）
 
@@ -124,6 +124,21 @@
 - 简化边界见 ADR D25/D26（无 ESP 加密/IKE、无 TCP 应用数据、SSL VPN 仅 ICMP 隧道）。
 
 **已验证**：128 个 Rust 测试全绿；实验十 5/5、实验十一 4/4、实验十二 2/2；TCP 握手/拒绝、ASA 默认策略、IPsec 隧道、SSL VPN 隧道均有端到端测试。
+
+### M7（无线：AC / AP / CAPWAP / 多 SSID / WPA3 / 漫游）
+
+- **AC/AP 设备**：拓扑编辑器新增 AccessPoint / WlanController，独立图标与颜色；AP 复用二层桥接状态，AC 复用路由器状态。
+- **CAPWAP**：AP 配置 `capwap ac <IP>` 后发送 Join，AC 回 Config 下发 SSID/安全/VLAN；AP 应用后把非 Trunk 端口划入 WLAN 业务 VLAN。
+- **WLAN 安全**：AC `wlan ssid CORP`、`wlan security wpa2 psk <口令>`、`wlan vlan 10`；PC `wifi connect <SSID> [口令]` / `wifi status`，WPA2 口令错误拒绝关联；未关联终端帧在 AP 入口被丢弃。
+- **展示**：AC/AP `show/display wlan`（SSID、安全、VLAN、AP 列表/Joined 状态）。
+- **实验十三「无线园区」**：AC—SW—AP—无线 PC + 有线服务器；判分验证 AP 注册、SSID、PC 关联、有线连通与未关联终端被丢弃。
+- **多 SSID**：AC 可配置多个 `wlan ssid`（各自安全/VLAN），CAPWAP 以 ConfigReset+Config 批量下发；客户端按 SSID 关联，AP 为每个客户端端口划分对应业务 VLAN，不同 SSID 默认隔离。
+- **WPA3-SAE**：`wlan security wpa3 sae <口令>`；客户端口令错误返回 WPA3 失败，与 WPA2 分开提示。
+- **无线漫游**：`wlan priority` 设置 AP 选路优先级；PC `wifi roam` 在同 SSID 的另一 AP 间切换（动态重关联、业务不中断）。
+- **实验十四「多 SSID / WPA3 / 漫游」**：CORP(WPA2/VLAN10) + GUEST(WPA3/VLAN20)、双 AP、PC1 漫游到 AP2；判分 9 项。
+- 简化边界见 ADR D27/D28（无 802.11 空口/信道/射频、CAPWAP 仅二层、WPA3 为口令校验而非完整 SAE、漫游为显式/重关联）。
+
+**已验证**：131 个 Rust 测试全绿；实验十三 5/5、实验十四 9/9。
 
 ## 本地开发
 
@@ -170,7 +185,7 @@ web/
 | M4 IP 进阶 | OSPF 单区域 ✅（多区域可选）、VRRP ✅、IPv6 ✅、DHCP Snooping ✅、端口安全 ✅、QoS 基础 ✅ | ✅ |
 | M5 IE 数通 | BGP ✅（eBGP 单跳）、IS-IS ✅（单区域）、VRF ✅（静态）、MPLS ✅（静态 LSP）、route-policy ✅、MPLS L3VPN ✅、大型园区实验 ✅ | ✅ |
 | M6 安全方向 | 防火墙设备/安全区域/区域策略 ✅、ASA 安全级别 ✅、TCP 状态机 ✅、IPsec 站点 VPN ✅、SSL VPN ✅ | ✅ |
-| M7 无线方向 | AC/AP、CAPWAP、WLAN 安全 | |
+| M7 无线方向 | AC/AP ✅、CAPWAP ✅、多 SSID ✅、WPA2/WPA3 ✅、无线 VLAN 隔离 ✅、漫游 ✅、实验十三/十四 ✅；信道/射频/802.1X/AP 冗余 | ✅ |
 | M8 数据中心 | 堆叠/IRF/CSS、M-LAG、VXLAN EVPN + DC 实验；F5 LTM 基础 | |
 | M9 打磨 | 大拓扑 Canvas 渲染、英文界面与内容（界面+课程/题库/实验文案 ✅）、社区内容贡献管线 | 进行中 |
 

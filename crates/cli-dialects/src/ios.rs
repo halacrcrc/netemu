@@ -173,6 +173,7 @@ fn show_branch() -> CNode {
             CNode::lit("sslvpn", "SSL VPN information")
                 .kid(CNode::lit("session", "SSL VPN sessions").run(cmd::show_sslvpn)),
         )
+        .kid(CNode::lit("wlan", "WLAN information").run(cmd::show_wlan))
         .kid(CNode::lit("spanning-tree", "Spanning tree topology").run(cmd::show_stp))
         .kid(CNode::lit("vrrp", "VRRP status").run(cmd::show_vrrp))
         .kid(CNode::lit("port-security", "Port security").run(cmd::show_port_security))
@@ -402,6 +403,44 @@ pub fn build() -> Trees {
                             .run(cmd::sslvpn_pool),
                     ),
                 ),
+            ),
+            CNode::lit("wlan", "WLAN configuration")
+                .kid(
+                    CNode::lit("ssid", "Set the SSID").kid(
+                        CNode::param(ParamKind::Word, "ssid", "SSID name").run(cmd::wlan_ssid),
+                    ),
+                )
+                .kid(
+                    CNode::lit("security", "WLAN security")
+                        .kid(CNode::lit("open", "Open network").run(cmd::wlan_security_open))
+                        .kid(
+                            CNode::lit("wpa2", "WPA2").kid(
+                                CNode::lit("psk", "Pre-shared key").kid(
+                                    CNode::param(ParamKind::Word, "psk", "Passphrase")
+                                        .run(cmd::wlan_security_wpa2),
+                                ),
+                            ),
+                        )
+                        .kid(
+                            CNode::lit("wpa3", "WPA3-SAE").kid(
+                                CNode::lit("sae", "SAE passphrase").kid(
+                                    CNode::param(ParamKind::Word, "psk", "Passphrase")
+                                        .run(cmd::wlan_security_wpa3),
+                                ),
+                            ),
+                        ),
+                )
+                .kid(
+                    CNode::lit("vlan", "Service VLAN").kid(
+                        CNode::param(ParamKind::Number, "vlan", "VLAN ID").run(cmd::wlan_vlan),
+                    ),
+                )
+                .kid(CNode::lit("priority", "AP selection priority").kid(
+                    CNode::param(ParamKind::Number, "priority", "0-255").run(cmd::wlan_priority),
+                )),
+            CNode::lit("capwap", "CAPWAP configuration").kid(
+                CNode::lit("ac", "Controller address")
+                    .kid(CNode::param(ParamKind::Ipv4, "ip", "AC IP").run(cmd::capwap_ac)),
             ),
             CNode::lit("router", "Enable a routing process")
                 .kid(

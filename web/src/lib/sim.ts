@@ -19,7 +19,13 @@ export interface StaticRouteSummary {
   nexthop: string;
 }
 
-export type DeviceKind = 'Router' | 'Switch' | 'Host' | 'Firewall';
+export type DeviceKind =
+  | 'Router'
+  | 'Switch'
+  | 'Host'
+  | 'Firewall'
+  | 'AccessPoint'
+  | 'WlanController';
 export type Dialect = 'Ios' | 'Vrp' | 'Comware';
 
 export interface DevSummary {

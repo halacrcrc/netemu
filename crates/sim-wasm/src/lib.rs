@@ -24,6 +24,8 @@ fn kind_from(s: &str) -> Option<DeviceKind> {
         "Switch" | "switch" => Some(DeviceKind::Switch),
         "Host" | "host" | "PC" | "pc" => Some(DeviceKind::Host),
         "Firewall" | "firewall" | "FW" | "fw" => Some(DeviceKind::Firewall),
+        "AccessPoint" | "accesspoint" | "AP" | "ap" => Some(DeviceKind::AccessPoint),
+        "WlanController" | "wlancontroller" | "AC" | "ac" => Some(DeviceKind::WlanController),
         _ => None,
     }
 }
@@ -69,6 +71,8 @@ impl Sim {
             DeviceKind::Switch => "Switch",
             DeviceKind::Host => "PC",
             DeviceKind::Firewall => "FW",
+            DeviceKind::AccessPoint => "AP",
+            DeviceKind::WlanController => "AC",
         };
         let n = self.kind_counts.entry(base.to_string()).or_insert(0);
         *n += 1;
@@ -282,6 +286,8 @@ impl Sim {
                 DeviceKind::Switch => "Switch",
                 DeviceKind::Host => "PC",
                 DeviceKind::Firewall => "FW",
+                DeviceKind::AccessPoint => "AP",
+                DeviceKind::WlanController => "AC",
             };
             if let Some(sfx) = d.name.strip_prefix(base) {
                 if let Ok(n) = sfx.parse::<u32>() {
@@ -423,6 +429,57 @@ impl Sim {
                     len,
                     src: None,
                 },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查主机当前关联的 AP。
+    pub fn check_wifi_on_ap(&mut self, dev: u32, ap: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::WifiOnAp { dev, ap },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 AP 已加入 AC。
+    pub fn check_wlan_ap_joined(&mut self, ac: u32, ap: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::WlanApJoined { ac, ap },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 AC 的 SSID。
+    pub fn check_wlan_ssid(&mut self, ac: u32, ssid: &str) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::WlanSsid {
+                    ac,
+                    ssid: ssid.to_string(),
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查主机 Wi-Fi 关联。
+    pub fn check_wifi_connected(&mut self, dev: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::WifiConnected { dev },
             }],
         );
         Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
@@ -840,6 +897,17 @@ impl Sim {
                             sim_packets::ipv4_str(i.dst),
                             sim_packets::ipv4_str(i.inner.src),
                             sim_packets::ipv4_str(i.inner.dst)
+                        ),
+                    ),
+                    L3::Capwap(c) => (
+                        "CAPWAP",
+                        format!(
+                            "{} → {}  {:?} ssid={} vlan={}",
+                            sim_packets::ipv4_str(c.src),
+                            sim_packets::ipv4_str(c.dst),
+                            c.kind,
+                            sim_packets::fixed_str_value(&c.ssid),
+                            c.vlan
                         ),
                     ),
                     L3::Bpdu(b) => (

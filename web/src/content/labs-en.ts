@@ -249,4 +249,51 @@ export const LABS_EN: Record<string, LabEn> = {
       'PC1 -> inside server reachable through the VPN',
     ],
   },
+'wlan-capwap': {
+    title: 'Lab 13 · Wireless Campus (AC + AP + CAPWAP + WPA2)',
+    brief:
+      'The AC manages the AP over CAPWAP: it pushes the SSID, security policy and service VLAN, and the AP bridges wireless clients into the wired VLAN. Only clients that associate with the correct WPA2 passphrase can reach the wired server.',
+    tasks: [
+      'AC1: interface g0/0/0 -> ip address 10.0.0.2 24 -> undo shutdown -> quit',
+      'AC1: wlan ssid CORP -> wlan security wpa2 psk Admin@123 -> wlan vlan 10',
+      'SW1: vlan batch 10; G0/0/2 toward the AP as trunk allowing vlan 10; G0/0/3 toward SRV as access VLAN10',
+      'AP1: G0/0/1 as trunk allowing vlan 10; interface vlanif 1 -> ip address 10.0.0.10 24 -> quit',
+      'AP1: capwap ac 10.0.0.2 — display wlan should show CORP / Joined',
+      'PC1: wifi connect CORP Admin@123 -> wifi status; PC2 tries a wrong passphrase (should fail)',
+      'PC1 ping 192.168.10.10 should succeed; PC2 is unassociated and its ping should fail',
+    ],
+    checkLabels: [
+      'AP1 registered with AC1',
+      'AC1 has SSID CORP',
+      'PC1 is associated over Wi-Fi',
+      'PC1 -> wired server reachable',
+      'PC2 (unassociated) cannot reach the server',
+    ],
+  },
+'wlan-advanced': {
+    title: 'Lab 14 · Multi-SSID / WPA3 / Wireless Roaming',
+    brief:
+      'The AC pushes two SSIDs: CORP (WPA2, VLAN10) and GUEST (WPA3-SAE, VLAN20). Both APs carry both WLANs and clients associate by AP priority; use wifi roam to move between APs without interrupting service, while SSID/VLAN isolation remains.',
+    tasks: [
+      'AC1: interface g0/0/0 -> ip address 10.0.0.2 24 -> undo shutdown -> quit',
+      'AC1: wlan ssid CORP -> wlan security wpa2 psk Admin@123 -> wlan vlan 10',
+      'AC1: wlan ssid GUEST -> wlan security wpa3 sae Guest@123 -> wlan vlan 20',
+      'SW1: vlan batch 10 20; G0/0/2 and G0/0/3 toward AP1/AP2 as trunk allowing vlan 10 20; G0/0/4 to SRV10 access VLAN10; G0/0/5 to SRV20 access VLAN20',
+      'AP1/AP2: G0/0/1 trunk allowing vlan 10 20; Vlanif1 10.0.0.10/24 and 10.0.0.11/24; wlan priority 200/100; capwap ac 10.0.0.2',
+      'PC1: wifi connect CORP Admin@123; PC2: wifi connect GUEST Guest@123 (a wrong passphrase should fail)',
+      'PC1 ping 192.168.10.10 and PC2 ping 192.168.20.10 should succeed; PC1 ping 192.168.20.10 should fail (SSID/VLAN isolation)',
+      'PC1: wifi roam — should move to AP2; pinging 192.168.10.10 should still succeed',
+    ],
+    checkLabels: [
+      'AP1 registered with AC1',
+      'AP2 registered with AC1',
+      'AC1 has both CORP and GUEST configured',
+      'PC1 is associated over Wi-Fi',
+      'PC2 is associated over Wi-Fi',
+      'PC1 roamed to AP2',
+      'PC1 -> CORP server reachable',
+      'PC2 -> GUEST server reachable',
+      'CORP -> GUEST cross-SSID isolated',
+    ],
+  },
 };

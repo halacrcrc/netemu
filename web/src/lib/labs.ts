@@ -25,6 +25,10 @@ export interface LabCheckDef {
     | { type: 'securityZone'; dev: string; port: number; zone: string }
     | { type: 'ipsecTunnel'; dev: string; name: string }
     | { type: 'vpnConnected'; dev: string }
+    | { type: 'wlanApJoined'; ac: string; ap: string }
+    | { type: 'wlanSsid'; ac: string; ssid: string }
+    | { type: 'wifiConnected'; dev: string }
+    | { type: 'wifiOnAp'; dev: string; ap: string }
     | {
         type: 'securityPolicy';
         dev: string;
@@ -203,6 +207,30 @@ export function runLabChecks(lab: LabDef): { label: string; passed: boolean; det
         out.push({ label: ck.label, passed: r.passed, detail: r.detail });
       } else if (ck.kind.type === 'routeExists') {
         const r = JSON.parse(sim.check_route(need(ck.kind.dev), ck.kind.net)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'wifiOnAp') {
+        const r = JSON.parse(sim.check_wifi_on_ap(need(ck.kind.dev), need(ck.kind.ap))) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'wlanApJoined') {
+        const r = JSON.parse(sim.check_wlan_ap_joined(need(ck.kind.ac), need(ck.kind.ap))) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'wlanSsid') {
+        const r = JSON.parse(sim.check_wlan_ssid(need(ck.kind.ac), ck.kind.ssid)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'wifiConnected') {
+        const r = JSON.parse(sim.check_wifi_connected(need(ck.kind.dev))) as {
           passed: boolean;
           detail: string;
         };
@@ -870,7 +898,131 @@ export const lab12: LabDef = {
   },
 };
 
-export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12];
+// ---------- 实验十三：无线园区（AC + AP + WPA2） ----------
+
+export const lab13: LabDef = {
+  id: 'wlan-capwap',
+  title: '实验十三 · 无线园区（AC + AP + CAPWAP + WPA2）',
+  brief:
+    'AC 通过 CAPWAP 管理 AP：AC 下发 SSID/安全策略/业务 VLAN，AP 注册后把无线终端桥接到有线 VLAN。只有通过 WPA2 口令关联的终端才能访问有线服务器。',
+  tasks: [
+    'AC1：interface g0/0/0 → ip address 10.0.0.2 24 → undo shutdown → quit',
+    'AC1：wlan ssid CORP → wlan security wpa2 psk Admin@123 → wlan vlan 10',
+    'SW1：vlan batch 10；G0/0/2 接 AP 配 trunk 并 allow-pass vlan 10；G0/0/3 接 SRV 配 access VLAN10',
+    'AP1：G0/0/1 配 trunk 并 allow-pass vlan 10；interface vlanif 1 → ip address 10.0.0.10 24 → quit',
+    'AP1：capwap ac 10.0.0.2 —— display wlan 应显示 CORP / Joined',
+    'PC1：wifi connect CORP Admin@123 → wifi status；PC2 用错误口令尝试（应失败）',
+    'PC1 ping 192.168.10.10 应通；PC2 未关联，ping 应不通',
+  ],
+  checks: [
+    { label: 'AP1 已注册到 AC1', kind: { type: 'wlanApJoined', ac: 'AC1', ap: 'AP1' } },
+    { label: 'AC1 已配置 SSID CORP', kind: { type: 'wlanSsid', ac: 'AC1', ssid: 'CORP' } },
+    { label: 'PC1 已完成 Wi-Fi 关联', kind: { type: 'wifiConnected', dev: 'PC1' } },
+    { label: 'PC1 → 有线服务器连通', kind: { type: 'ping', from: 'PC1', to: '192.168.10.10' } },
+    {
+      label: 'PC2（未关联）无法访问服务器',
+      kind: { type: 'ping', from: 'PC2', to: '192.168.10.10', expect: false },
+    },
+  ],
+  build: (sim) => {
+    const ac = sim.add_device('WlanController', 'Vrp');
+    const sw = sim.add_device('Switch', 'Vrp');
+    const ap = sim.add_device('AccessPoint', 'Vrp');
+    const pc1 = sim.add_device('Host', 'Ios');
+    const pc2 = sim.add_device('Host', 'Ios');
+    const srv = sim.add_device('Host', 'Ios');
+    sim.rename_device(ac, 'AC1');
+    sim.rename_device(sw, 'SW1');
+    sim.rename_device(ap, 'AP1');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(pc2, 'PC2');
+    sim.rename_device(srv, 'SRV');
+    sim.add_link(ac, sw); // SW1 p0 VLAN1
+    sim.add_link(sw, ap); // SW1 p1 trunk / AP1 p0
+    sim.add_link(ap, pc1); // AP1 p1
+    sim.add_link(ap, pc2); // AP1 p2
+    sim.add_link(sw, srv); // SW1 p2 access VLAN10
+    sim.set_host_config(pc1, '192.168.10.11', 24, '');
+    sim.set_host_config(pc2, '192.168.10.12', 24, '');
+    sim.set_host_config(srv, '192.168.10.10', 24, '');
+    setPosition(ac, { x: 60, y: 60 });
+    setPosition(sw, { x: 300, y: 150 });
+    setPosition(ap, { x: 520, y: 150 });
+    setPosition(pc1, { x: 450, y: 300 });
+    setPosition(pc2, { x: 620, y: 300 });
+    setPosition(srv, { x: 120, y: 300 });
+  },
+};
+
+// ---------- 实验十四：多 SSID / WPA3 / 漫游 ----------
+
+export const lab14: LabDef = {
+  id: 'wlan-advanced',
+  title: '实验十四 · 多 SSID / WPA3 / 无线漫游',
+  brief:
+    'AC 下发两个 SSID：CORP（WPA2、VLAN10）与 GUEST（WPA3-SAE、VLAN20）。两台 AP 都承载这两个 WLAN，客户端按 AP 优先级关联；用 wifi roam 在 AP 间漫游，业务不中断且不同 SSID 保持隔离。',
+  tasks: [
+    'AC1：interface g0/0/0 → ip address 10.0.0.2 24 → undo shutdown → quit',
+    'AC1：wlan ssid CORP → wlan security wpa2 psk Admin@123 → wlan vlan 10',
+    'AC1：wlan ssid GUEST → wlan security wpa3 sae Guest@123 → wlan vlan 20',
+    'SW1：vlan batch 10 20；G0/0/2、G0/0/3 接 AP1/AP2 配 trunk allow-pass vlan 10 20；G0/0/4 接 SRV10 access VLAN10；G0/0/5 接 SRV20 access VLAN20',
+    'AP1/AP2：G0/0/1 配 trunk allow-pass vlan 10 20；Vlanif1 分别 10.0.0.10/24、10.0.0.11/24；wlan priority 200/100；capwap ac 10.0.0.2',
+    'PC1：wifi connect CORP Admin@123；PC2：wifi connect GUEST Guest@123（错误口令应失败）',
+    'PC1 ping 192.168.10.10、PC2 ping 192.168.20.10 应通；PC1 ping 192.168.20.10 应不通（SSID/VLAN 隔离）',
+    'PC1：wifi roam —— 应漫游到 AP2，再次 ping 192.168.10.10 仍通',
+  ],
+  checks: [
+    { label: 'AP1 已注册到 AC1', kind: { type: 'wlanApJoined', ac: 'AC1', ap: 'AP1' } },
+    { label: 'AP2 已注册到 AC1', kind: { type: 'wlanApJoined', ac: 'AC1', ap: 'AP2' } },
+    { label: 'AC1 同时配置 CORP 与 GUEST', kind: { type: 'wlanSsid', ac: 'AC1', ssid: 'GUEST' } },
+    { label: 'PC1 已关联 Wi-Fi', kind: { type: 'wifiConnected', dev: 'PC1' } },
+    { label: 'PC2 已关联 Wi-Fi', kind: { type: 'wifiConnected', dev: 'PC2' } },
+    { label: 'PC1 漫游到 AP2', kind: { type: 'wifiOnAp', dev: 'PC1', ap: 'AP2' } },
+    { label: 'PC1 → CORP 服务器连通', kind: { type: 'ping', from: 'PC1', to: '192.168.10.10' } },
+    { label: 'PC2 → GUEST 服务器连通', kind: { type: 'ping', from: 'PC2', to: '192.168.20.10' } },
+    {
+      label: 'CORP → GUEST 跨 SSID 隔离',
+      kind: { type: 'ping', from: 'PC1', to: '192.168.20.10', expect: false },
+    },
+  ],
+  build: (sim) => {
+    const ac = sim.add_device('WlanController', 'Vrp');
+    const sw = sim.add_device('Switch', 'Vrp');
+    const ap1 = sim.add_device('AccessPoint', 'Vrp');
+    const ap2 = sim.add_device('AccessPoint', 'Vrp');
+    const pc1 = sim.add_device('Host', 'Ios');
+    const pc2 = sim.add_device('Host', 'Ios');
+    const srv10 = sim.add_device('Host', 'Ios');
+    const srv20 = sim.add_device('Host', 'Ios');
+    sim.rename_device(ac, 'AC1');
+    sim.rename_device(sw, 'SW1');
+    sim.rename_device(ap1, 'AP1');
+    sim.rename_device(ap2, 'AP2');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(pc2, 'PC2');
+    sim.rename_device(srv10, 'SRV10');
+    sim.rename_device(srv20, 'SRV20');
+    sim.add_link(ac, sw); // SW1 p0
+    sim.add_link(ap1, sw); // SW1 p1
+    sim.add_link(ap2, sw); // SW1 p2
+    sim.add_link(sw, srv10); // SW1 p3
+    sim.add_link(sw, srv20); // SW1 p4
+    sim.set_host_config(pc1, '192.168.10.11', 24, '');
+    sim.set_host_config(pc2, '192.168.20.22', 24, '');
+    sim.set_host_config(srv10, '192.168.10.10', 24, '');
+    sim.set_host_config(srv20, '192.168.20.10', 24, '');
+    setPosition(ac, { x: 40, y: 40 });
+    setPosition(sw, { x: 280, y: 160 });
+    setPosition(ap1, { x: 480, y: 60 });
+    setPosition(ap2, { x: 480, y: 260 });
+    setPosition(pc1, { x: 680, y: 40 });
+    setPosition(pc2, { x: 680, y: 280 });
+    setPosition(srv10, { x: 100, y: 320 });
+    setPosition(srv20, { x: 280, y: 380 });
+  },
+};
+
+export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12, lab13, lab14];
 
 // 合并英文文案
 for (const l of LABS) {

@@ -459,7 +459,9 @@ impl Engine {
             return;
         };
         match d.kind {
-            DeviceKind::Switch => self.switch_ingress(dev_id, port, frame),
+            DeviceKind::Switch | DeviceKind::AccessPoint => {
+                self.switch_ingress(dev_id, port, frame)
+            }
             _ => self.l3_ingress(dev_id, port, frame),
         }
     }
@@ -506,6 +508,20 @@ impl Engine {
 
     /// 三层交换机入方向：LACP/BPDU 截获 → VLAN 归类 → 学习 → SVI 截获 → 转发/洪泛。
     fn switch_ingress(&mut self, dev_id: DevId, in_port: PortId, frame: EthernetFrame) {
+        // 0. AP：未关联的无线终端帧直接丢弃
+        if !self.ap_client_allowed(dev_id, in_port) {
+            self.dropped += 1;
+            return;
+        }
+        // 0b. AP：CAPWAP 配置帧由 AP 本机处理
+        if d_kind(&self.net, dev_id) == DeviceKind::AccessPoint {
+            if let L3::Capwap(pkt) = frame.payload {
+                if self.local_ip_of(dev_id) == Some(pkt.dst) {
+                    self.capwap_ingress(dev_id, pkt);
+                    return;
+                }
+            }
+        }
         // 0a. LACP：先于 VLAN/STP 处理（聚合协商与端口状态无关）
         if frame.ethertype == ETHERTYPE_LACP {
             if let L3::Lacp(pdu) = frame.payload {
@@ -714,6 +730,7 @@ impl Engine {
         match frame.payload {
             L3::Tcp(tcp) => self.tcp_ingress(dev_id, in_port, tcp),
             L3::Ipsec(pkt) => self.ipsec_ingress(dev_id, in_port, pkt),
+            L3::Capwap(pkt) => self.capwap_ingress(dev_id, pkt),
             L3::Arp(arp) => {
                 if arp.sender_ip != 0 {
                     self.arp_learn(dev_id, in_port, Some(vlan), arp.sender_ip, arp.sender_mac);
@@ -910,6 +927,7 @@ impl Engine {
             L3::Ipv4(pkt) => self.ipv4_ingress(dev_id, port, my_mac, frame, pkt),
             L3::Tcp(tcp) => self.tcp_ingress(dev_id, port, tcp),
             L3::Ipsec(pkt) => self.ipsec_ingress(dev_id, port, pkt),
+            L3::Capwap(pkt) => self.capwap_ingress(dev_id, pkt),
             L3::Bpdu(_) => {} // 主机/路由器不处理 802.1D BPDU
             L3::Lacp(_) => {} // 主机/路由器不做链路聚合
             L3::Ospf(_) => {} // OSPF 已在入口处理
@@ -922,10 +940,10 @@ impl Engine {
                 // DHCP 广播：主机客户端 / 路由器服务器各自处理
                 match d_kind(&self.net, dev_id) {
                     DeviceKind::Host => self.dhcp_client_ingress(dev_id, port, dhcp),
-                    DeviceKind::Router | DeviceKind::Firewall => {
+                    DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController => {
                         self.dhcp_server_ingress(dev_id, port, dhcp)
                     }
-                    DeviceKind::Switch => {}
+                    DeviceKind::Switch | DeviceKind::AccessPoint => {}
                 }
             }
         }
@@ -1540,7 +1558,12 @@ impl Engine {
         let kind = d_kind(&self.net, dev);
         if !matches!(
             kind,
-            DeviceKind::Router | DeviceKind::Switch | DeviceKind::Host | DeviceKind::Firewall
+            DeviceKind::Router
+                | DeviceKind::Switch
+                | DeviceKind::Host
+                | DeviceKind::Firewall
+                | DeviceKind::WlanController
+                | DeviceKind::AccessPoint
         ) {
             return None;
         }
@@ -1904,7 +1927,11 @@ impl Engine {
         if Some(tcp.dst) == my_ip {
             match d_kind(&self.net, dev) {
                 DeviceKind::Host => self.host_tcp_ingress(dev, port, tcp),
-                DeviceKind::Router | DeviceKind::Firewall | DeviceKind::Switch => {
+                DeviceKind::Router
+                | DeviceKind::Firewall
+                | DeviceKind::Switch
+                | DeviceKind::AccessPoint
+                | DeviceKind::WlanController => {
                     let rst = TcpPacket {
                         src: tcp.dst,
                         dst: tcp.src,
@@ -1921,9 +1948,11 @@ impl Engine {
             return;
         }
         match d_kind(&self.net, dev) {
-            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::Switch => {
-                self.tcp_forward(dev, port, tcp)
-            }
+            DeviceKind::Router
+            | DeviceKind::Firewall
+            | DeviceKind::Switch
+            | DeviceKind::AccessPoint
+            | DeviceKind::WlanController => self.tcp_forward(dev, port, tcp),
             DeviceKind::Host => {}
         }
     }
@@ -2314,6 +2343,318 @@ impl Engine {
             Some(DeviceState::Router(rs)) => rs.sslvpn_clients.clone(),
             _ => vec![],
         }
+    }
+
+    // ---------- WLAN / CAPWAP（AP 注册 + SSID/WPA2 + 二层桥接） ----------
+
+    fn local_ip_of(&self, dev: DevId) -> Option<Ipv4Addr> {
+        let d = self.net.device(dev)?;
+        match &d.state {
+            DeviceState::Router(_) => d.ports.iter().find_map(|p| p.ip),
+            DeviceState::Switch(sw) => sw
+                .svi
+                .values()
+                .find(|s| s.admin_up)
+                .map(|s| s.ip)
+                .or_else(|| sw.svi.values().next().map(|s| s.ip)),
+            DeviceState::Host(_) => d.port(0).and_then(|p| p.ip),
+        }
+    }
+
+    fn ap_uplink(&self, dev: DevId) -> Option<PortId> {
+        let d = self.net.device(dev)?;
+        d.ports
+            .iter()
+            .find(|p| p.link.is_some() && p.mode == PortMode::Trunk)
+            .or_else(|| d.ports.iter().find(|p| p.link.is_some()))
+            .map(|p| p.idx)
+    }
+
+    fn capwap_send(&mut self, dev: DevId, dst: Ipv4Addr, pkt: CapwapPacket) {
+        let Some(src) = self.local_ip_of(dev) else {
+            return;
+        };
+        let Some(port) = (match d_kind(&self.net, dev) {
+            DeviceKind::AccessPoint => self.ap_uplink(dev),
+            _ => self.net.lookup_route(dev, dst).map(|(p, _, _)| p),
+        }) else {
+            return;
+        };
+        let Some(mac) = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(port))
+            .map(|p| p.mac)
+        else {
+            return;
+        };
+        let frame = EthernetFrame {
+            dst: BROADCAST_MAC,
+            src: mac,
+            vlan: None,
+            ethertype: ETHERTYPE_IPV4,
+            payload: L3::Capwap(CapwapPacket { src, ..pkt }),
+        };
+        self.transmit_frame(dev, port, frame);
+    }
+
+    /// AP 发送 CAPWAP Join（由 `capwap ac` 命令触发）。
+    pub fn capwap_start(&mut self, ap: DevId) {
+        let Some(ac_ip) = self.net.device(ap).and_then(|d| d.wlan.capwap_ac) else {
+            return;
+        };
+        let pkt = CapwapPacket {
+            kind: CapwapKind::Join,
+            src: 0,
+            dst: ac_ip,
+            ssid: [0; 32],
+            psk: [0; 32],
+            vlan: 0,
+            security: 0,
+        };
+        self.capwap_send(ap, ac_ip, pkt);
+    }
+
+    /// AC 配置变化：向已加入的 AP 重新下发 WLAN 配置（先 Reset 再逐个 profile）。
+    pub fn wlan_config_changed(&mut self, ac: DevId) {
+        let Some(ac_ip) = self.local_ip_of(ac) else {
+            return;
+        };
+        let profiles = self
+            .net
+            .device(ac)
+            .map(|d| d.wlan.profiles.clone())
+            .unwrap_or_default();
+        let aps: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| d.kind == DeviceKind::AccessPoint && d.wlan.ac_ip == Some(ac_ip))
+            .map(|d| d.id)
+            .collect();
+        for ap in aps {
+            let Some(ap_ip) = self.local_ip_of(ap) else {
+                continue;
+            };
+            self.capwap_send_config(ac, ap_ip, &profiles);
+        }
+    }
+
+    fn capwap_send_config(&mut self, ac: DevId, ap_ip: Ipv4Addr, profiles: &[WlanProfile]) {
+        let reset = CapwapPacket {
+            kind: CapwapKind::ConfigReset,
+            src: 0,
+            dst: ap_ip,
+            ssid: [0; 32],
+            psk: [0; 32],
+            vlan: 0,
+            security: 0,
+        };
+        self.capwap_send(ac, ap_ip, reset);
+        for p in profiles {
+            let pkt = CapwapPacket {
+                kind: CapwapKind::Config,
+                src: 0,
+                dst: ap_ip,
+                ssid: sim_packets::fixed_str(&p.ssid),
+                psk: sim_packets::fixed_str(p.psk.as_deref().unwrap_or("")),
+                vlan: p.vlan,
+                security: match p.security {
+                    WlanSecurity::Open => 0,
+                    WlanSecurity::Wpa2Psk => 1,
+                    WlanSecurity::Wpa3Sae => 2,
+                },
+            };
+            self.capwap_send(ac, ap_ip, pkt);
+        }
+    }
+
+    fn capwap_ingress(&mut self, dev: DevId, pkt: CapwapPacket) {
+        match d_kind(&self.net, dev) {
+            DeviceKind::WlanController if pkt.dst == self.local_ip_of(dev).unwrap_or(0) => {
+                let profiles = self
+                    .net
+                    .device(dev)
+                    .map(|d| d.wlan.profiles.clone())
+                    .unwrap_or_default();
+                self.capwap_send_config(dev, pkt.src, &profiles);
+            }
+            DeviceKind::AccessPoint if pkt.kind == CapwapKind::ConfigReset => {
+                if let Some(d) = self.net.device_mut(dev) {
+                    d.wlan.profiles.clear();
+                    d.wlan.ac_ip = Some(pkt.src);
+                    d.wlan.joined = false;
+                }
+            }
+            DeviceKind::AccessPoint if pkt.kind == CapwapKind::Config => {
+                let ssid = sim_packets::fixed_str_value(&pkt.ssid);
+                if ssid.is_empty() {
+                    return;
+                }
+                let psk = sim_packets::fixed_str_value(&pkt.psk);
+                let security = match pkt.security {
+                    1 => WlanSecurity::Wpa2Psk,
+                    2 => WlanSecurity::Wpa3Sae,
+                    _ => WlanSecurity::Open,
+                };
+                if let Some(d) = self.net.device_mut(dev) {
+                    if let DeviceState::Switch(sw) = &mut d.state {
+                        sw.ensure_vlan(pkt.vlan);
+                    }
+                    let profile = WlanProfile {
+                        ssid: ssid.clone(),
+                        security,
+                        psk: if psk.is_empty() { None } else { Some(psk) },
+                        vlan: pkt.vlan,
+                    };
+                    match d.wlan.profiles.iter_mut().find(|p| p.ssid == ssid) {
+                        Some(p) => *p = profile,
+                        None => d.wlan.profiles.push(profile),
+                    }
+                    d.wlan.ac_ip = Some(pkt.src);
+                    d.wlan.joined = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn ap_client_allowed(&self, dev: DevId, port: PortId) -> bool {
+        let Some(d) = self.net.device(dev) else {
+            return true;
+        };
+        if d.kind != DeviceKind::AccessPoint {
+            return true;
+        }
+        let Some(link) = d.port(port).and_then(|p| p.link) else {
+            return true;
+        };
+        let Some(l) = self.net.link(link) else {
+            return true;
+        };
+        let peer = if l.a.0 == dev { l.b.0 } else { l.a.0 };
+        match self.net.device(peer).map(|x| &x.state) {
+            Some(DeviceState::Host(hs)) => hs.wifi.as_ref().map(|w| w.ap == dev).unwrap_or(false),
+            _ => true,
+        }
+    }
+
+    /// PC 无线关联：直连 AP、SSID 匹配、WPA2 口令正确。
+    pub fn wifi_connect(&mut self, pc: DevId, ssid: &str, password: &str) -> Result<DevId, String> {
+        let candidates = self.wifi_candidates(ssid);
+        let Some((ap, profile)) = candidates.first().cloned() else {
+            return Err("SSID not found or AP not joined".into());
+        };
+        self.check_wlan_password(&profile, password)?;
+        self.wifi_associate(pc, ap, ssid)?;
+        Ok(ap)
+    }
+
+    /// 漫游：切换到另一个同 SSID 的 AP（高优先级优先）。
+    pub fn wifi_roam(&mut self, pc: DevId) -> Result<DevId, String> {
+        let Some((current, ssid)) = self.net.device(pc).and_then(|d| match &d.state {
+            DeviceState::Host(hs) => hs.wifi.as_ref().map(|w| (w.ap, w.ssid.clone())),
+            _ => None,
+        }) else {
+            return Err("not associated".into());
+        };
+        let next = self
+            .wifi_candidates(&ssid)
+            .into_iter()
+            .find(|(ap, _)| *ap != current);
+        let Some((ap, _profile)) = next else {
+            return Err("no other AP with the same SSID".into());
+        };
+        self.wifi_associate(pc, ap, &ssid)?;
+        Ok(ap)
+    }
+
+    fn wifi_candidates(&self, ssid: &str) -> Vec<(DevId, WlanProfile)> {
+        let mut out: Vec<(DevId, u8, WlanProfile)> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| d.kind == DeviceKind::AccessPoint && d.wlan.joined)
+            .filter_map(|d| {
+                d.wlan
+                    .profile(ssid)
+                    .map(|p| (d.id, d.wlan.priority, p.clone()))
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out.into_iter().map(|(id, _, p)| (id, p)).collect()
+    }
+
+    fn check_wlan_password(&self, profile: &WlanProfile, password: &str) -> Result<(), String> {
+        match profile.security {
+            WlanSecurity::Open => Ok(()),
+            WlanSecurity::Wpa2Psk if profile.psk.as_deref() == Some(password) => Ok(()),
+            WlanSecurity::Wpa3Sae if profile.psk.as_deref() == Some(password) => Ok(()),
+            WlanSecurity::Wpa2Psk => Err("invalid WPA2 password".into()),
+            WlanSecurity::Wpa3Sae => Err("invalid WPA3 password".into()),
+        }
+    }
+
+    fn wifi_associate(&mut self, pc: DevId, ap: DevId, ssid: &str) -> Result<(), String> {
+        let Some(d) = self.net.device(pc) else {
+            return Err("device not found".into());
+        };
+        if d.kind != DeviceKind::Host {
+            return Err("wifi client must be a host".into());
+        }
+        let Some(profile) = self
+            .net
+            .device(ap)
+            .and_then(|d| d.wlan.profile(ssid).cloned())
+        else {
+            return Err("SSID not found".into());
+        };
+        if let Some(link) = d.port(0).and_then(|p| p.link) {
+            self.net.remove_link(link);
+        }
+        let link = self.net.add_link(pc, ap).map_err(|_| "no free AP port")?;
+        let (_, ap_port) = {
+            let Some(l) = self.net.link(link) else {
+                return Err("link error".into());
+            };
+            if l.a.0 == ap {
+                (l.a.0, l.a.1)
+            } else {
+                (l.b.0, l.b.1)
+            }
+        };
+        if let Some(d) = self.net.device_mut(ap) {
+            if let DeviceState::Switch(sw) = &mut d.state {
+                sw.ensure_vlan(profile.vlan);
+            }
+            if let Some(p) = d.port_mut(ap_port) {
+                p.mode = PortMode::Access;
+                p.pvid = profile.vlan;
+                p.admin_up = true;
+            }
+        }
+        if let Some(d) = self.net.device_mut(pc) {
+            if let DeviceState::Host(hs) = &mut d.state {
+                hs.wifi = Some(WifiSession {
+                    ap,
+                    ssid: ssid.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// 供 show 使用：AC 下挂 AP（名称、管理 IP、是否已加入）。
+    pub fn wlan_aps_of(&self, ac: DevId) -> Vec<(String, Option<Ipv4Addr>, bool)> {
+        let Some(ac_ip) = self.local_ip_of(ac) else {
+            return vec![];
+        };
+        self.net
+            .devices
+            .iter()
+            .filter(|d| d.kind == DeviceKind::AccessPoint && d.wlan.ac_ip == Some(ac_ip))
+            .map(|d| (d.name.clone(), self.local_ip_of(d.id), d.wlan.joined))
+            .collect()
     }
 
     // ---------- DHCP（DORA 简化：Discover/Offer/Request/Ack） ----------
@@ -4051,7 +4392,10 @@ impl Engine {
         let kind = d_kind(&self.net, dev);
         if !matches!(
             kind,
-            DeviceKind::Router | DeviceKind::Host | DeviceKind::Firewall
+            DeviceKind::Router
+                | DeviceKind::Host
+                | DeviceKind::Firewall
+                | DeviceKind::WlanController
         ) {
             return None;
         }

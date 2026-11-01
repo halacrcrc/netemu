@@ -142,6 +142,18 @@ MPLS：只做**静态 LSP**：ingress（FEC→out-label）压签、transit 换�
 
 **SSL VPN**：防火墙 `sslvpn virtual-ip NET LEN` 定义虚拟地址池，复用本地用户认证；PC `sslvpn connect` 认证成功后获得虚拟 IP，访问非本地网段时封装到网关（内层源地址改为虚拟 IP），网关解封装后按内网路由转发；回程目的为虚拟 IP 时按客户端映射封装回真实 IP。仅 ICMP 隧道，不做 TLS/证书/隧道分片/资源授权。
 
+### D27（M7 起步）无线用 CAPWAP 配置面 + 二层桥接模拟
+
+`DeviceKind::AccessPoint` 复用 `SwitchState`（VLAN/桥接/MAC 学习），`DeviceKind::WlanController` 复用 `RouterState`（IP/路由）。AP 的 WLAN 配置存在 `Device.wlan`：SSID、Open/WPA2-PSK、业务 VLAN、CAPWAP AC 地址、joined 状态。CAPWAP 报文（Discovery/Join/Config）用广播 MAC 在二层泛洪，字段为固定长度数组；AP `capwap ac` 发 Join，AC 按自身 WLAN 配置回 Config，AP 应用并把非 Trunk 端口划入业务 VLAN。PC `wifi connect` 校验 SSID 与 PSK 后写入 `HostState.wifi`；AP 入口对本端主机检查关联，未关联帧丢弃。无线关联是瞬态，重载后需重新连接；WLAN 配置进摘要。
+
+不做：802.11 空口帧/速率/信道/射频、漫游/切换、WPA3/802.1X/EAP、多 SSID、AP 冗余与 AC 热备、CAPWAP 跨三层（DTLS/隧道），口令明文仅存本机（教学用途）。
+
+### D28（M7 补充）多 SSID、WPA3-SAE 与显式漫游
+
+`WlanConfig` 从单 SSID 改为 `profiles: Vec<WlanProfile>`（SSID/Open|WPA2-PSK|WPA3-SAE/口令/业务 VLAN）。AC 用 `wlan ssid` 创建并选中 profile，后续 `wlan security`/`wlan vlan` 作用于选中项；CAPWAP 下发改为 `ConfigReset` + 每条 profile 一个 `Config`，AP 收到 Reset 清空后逐条合并。客户端 `wifi connect` 在所有已加入且含该 SSID 的 AP 中按 `wlan priority` 选最高优先级 AP，动态建立 Host↔AP 链路，并把该 AP 端口划入 profile VLAN；不同 SSID 的客户端落在不同 VLAN，默认隔离。
+
+WPA3 是**口令校验**而非完整 SAE：`WlanSecurity::Wpa3Sae` 与 WPA2 分开校验/报错，不做 Dragonfly 握手、PMF 或过渡模式。漫游由 PC `wifi roam` 显式触发：移除当前 Host↔AP 链路，按同 SSID 选择另一 AP 重关联；不做 802.11r/k/v、信号强度/RSSI、AP 间隧道或自动触发（自动切换留待后续）。
+
 ## 后果
 
 - 三方言首版交付慢一些（M0 即验证多方言架构），但 M1+ 平移成本递减。

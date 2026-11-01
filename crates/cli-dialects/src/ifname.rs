@@ -62,7 +62,7 @@ pub fn resolve_if(dialect: Dialect, kind: DeviceKind, s: &str) -> Option<IfRef> 
         Dialect::Comware => "vlan-interface",
     };
     if let Some(rest) = lower.strip_prefix(svi_prefix) {
-        if kind != DeviceKind::Switch {
+        if !matches!(kind, DeviceKind::Switch | DeviceKind::AccessPoint) {
             return None;
         }
         let vlan: u16 = rest.parse().ok()?;
@@ -72,7 +72,7 @@ pub fn resolve_if(dialect: Dialect, kind: DeviceKind, s: &str) -> Option<IfRef> 
         return Some(IfRef::Svi(vlan));
     }
     // 聚合口命名（单 token 形式：Port-channel1 / Eth-Trunk1 / Bridge-Aggregation1）
-    if kind == DeviceKind::Switch {
+    if matches!(kind, DeviceKind::Switch | DeviceKind::AccessPoint) {
         let lag_prefixes: &[&str] = match dialect {
             Dialect::Ios => &["port-channel", "portchannel", "po"],
             Dialect::Vrp => &["eth-trunk"],
@@ -101,7 +101,7 @@ pub fn canonical(dialect: Dialect, kind: DeviceKind, idx: usize) -> String {
     match dialect {
         Dialect::Ios => format!("GigabitEthernet0/{}", idx),
         Dialect::Vrp => match kind {
-            DeviceKind::Router | DeviceKind::Firewall => {
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController => {
                 format!("GigabitEthernet0/0/{}", idx)
             }
             _ => format!("GigabitEthernet0/0/{}", idx + 1),
@@ -118,7 +118,9 @@ pub fn short(dialect: Dialect, kind: DeviceKind, idx: usize) -> String {
     match dialect {
         Dialect::Ios => format!("Gi0/{}", idx),
         Dialect::Vrp => match kind {
-            DeviceKind::Router | DeviceKind::Firewall => format!("GE0/0/{}", idx),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController => {
+                format!("GE0/0/{}", idx)
+            }
             _ => format!("GE0/0/{}", idx + 1),
         },
         Dialect::Comware => format!("GE1/0/{}", idx + 1),
@@ -169,12 +171,12 @@ pub fn resolve(dialect: Dialect, kind: DeviceKind, s: &str) -> Option<usize> {
     let within = |idx: usize| idx < kind.port_count();
     match (dialect, kind, nums.as_slice()) {
         (Dialect::Ios, _, [0, idx]) if within(*idx as usize) => Some(*idx as usize),
-        (Dialect::Vrp, DeviceKind::Router | DeviceKind::Firewall, [0, 0, idx])
-            if within(*idx as usize) =>
-        {
-            Some(*idx as usize)
-        }
-        (Dialect::Vrp, DeviceKind::Switch, [0, 0, idx])
+        (
+            Dialect::Vrp,
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController,
+            [0, 0, idx],
+        ) if within(*idx as usize) => Some(*idx as usize),
+        (Dialect::Vrp, DeviceKind::Switch | DeviceKind::AccessPoint, [0, 0, idx])
             if *idx >= 1 && within(*idx as usize - 1) =>
         {
             Some(*idx as usize - 1)

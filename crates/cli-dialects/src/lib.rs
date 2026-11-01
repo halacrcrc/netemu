@@ -90,7 +90,7 @@ pub mod cmd {
     use cli_engine::IfCtx;
     use sim_core::device::{
         Acl, AclProto, AclRule, BgpPeerPolicy, IpsecTunnel, RoutePolicy, RoutePolicyNode,
-        SecurityPolicy,
+        SecurityPolicy, WlanProfile, WlanSecurity,
     };
     use sim_packets::mask_from_prefix;
 
@@ -128,7 +128,10 @@ pub mod cmd {
     /// `interface vlan 10`（IOS）/ `interface vlanif 20`（VRP）/ `interface vlan-interface 20`（Comware）
     /// 两段式 SVI 接口名。
     pub fn interface_svi(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Switch {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Switch | DeviceKind::AccessPoint
+        ) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid interface type and number".into(),
                 _ => "Wrong parameter found at '^' position.".into(),
@@ -257,7 +260,10 @@ pub mod cmd {
         }
         match ifc {
             IfCtx::Physical(port) => {
-                if c.device_kind() == DeviceKind::Switch {
+                if matches!(
+                    c.device_kind(),
+                    DeviceKind::Switch | DeviceKind::AccessPoint
+                ) {
                     return Err(CliError::Custom(
                         "This command is not supported on Layer 2 interfaces".into(),
                     ));
@@ -324,7 +330,10 @@ pub mod cmd {
     // ---------- VLAN（交换机） ----------
 
     fn require_switch(c: &Ctx) -> Result<(), CliError> {
-        if c.device_kind() != DeviceKind::Switch {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Switch | DeviceKind::AccessPoint
+        ) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on switches".into(),
@@ -605,7 +614,10 @@ pub mod cmd {
 
     /// IOS `ip dhcp pool NAME` → Pool 模式；VRP/Comware `ip pool NAME` / `dhcp server ip-pool NAME`
     pub fn dhcp_pool_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on routers".into(),
@@ -703,7 +715,10 @@ pub mod cmd {
 
     /// VRP/Comware `acl [basic|advanced] <n>` → Acl 模式
     pub fn acl_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -799,7 +814,10 @@ pub mod cmd {
     }
 
     fn ios_access_list_with(c: &mut Ctx, forced: Option<AclProto>) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom("Invalid input detected".into()));
         }
         let n = c.number("number").unwrap_or(0);
@@ -1194,7 +1212,10 @@ pub mod cmd {
 
     /// `router ospf 1` / `ospf 1`
     pub fn ospf_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1206,7 +1227,10 @@ pub mod cmd {
 
     /// VRP/Comware 区域视图：`area 0` / `area 0.0.0.0`
     pub fn ospf_area_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1248,7 +1272,10 @@ pub mod cmd {
     }
 
     pub fn show_ospf_neighbor(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1257,7 +1284,10 @@ pub mod cmd {
     }
 
     pub fn show_ospf_db(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1345,7 +1375,10 @@ pub mod cmd {
     }
 
     pub fn show_vrrp(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1378,7 +1411,10 @@ pub mod cmd {
 
     /// IOS `ipv6 route 2001:db8:2::/64 2001:db8:1::2` / VRP `ipv6 route-static ...`
     pub fn ipv6_route(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1559,7 +1595,10 @@ pub mod cmd {
     // ---------- BGP（eBGP 简化） ----------
 
     pub fn bgp_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1589,7 +1628,10 @@ pub mod cmd {
     }
 
     pub fn bgp_neighbor(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1618,7 +1660,10 @@ pub mod cmd {
     }
 
     pub fn bgp_network(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1648,7 +1693,10 @@ pub mod cmd {
     }
 
     pub fn show_bgp_summary(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1657,7 +1705,10 @@ pub mod cmd {
     }
 
     pub fn show_bgp_table(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1669,7 +1720,10 @@ pub mod cmd {
 
     /// IOS `route-map NAME permit|deny SEQ` / VRP `route-policy NAME permit|deny node SEQ`
     pub fn route_policy_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1776,7 +1830,10 @@ pub mod cmd {
 
     /// IOS `neighbor IP route-map NAME in|out` / VRP `peer IP route-policy NAME import|export`
     pub fn bgp_peer_policy(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1818,7 +1875,10 @@ pub mod cmd {
     }
 
     pub fn show_route_policy(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2047,7 +2107,10 @@ pub mod cmd {
 
     /// `ipsec tunnel NAME local A remote B`
     pub fn ipsec_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2094,7 +2157,10 @@ pub mod cmd {
     }
 
     pub fn show_ipsec(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2122,10 +2188,144 @@ pub mod cmd {
         Ok(show::sslvpn_sessions(c.eng, c.dev, c.dialect))
     }
 
+    // ---------- WLAN / CAPWAP ----------
+
+    fn require_ac(c: &Ctx) -> Result<(), CliError> {
+        if c.device_kind() == DeviceKind::WlanController {
+            Ok(())
+        } else {
+            Err(CliError::Custom(
+                "WLAN configuration is only available on the AC".into(),
+            ))
+        }
+    }
+
+    /// AP：`capwap ac <ip>`
+    pub fn capwap_ac(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::AccessPoint {
+            return Err(CliError::Custom("Only an AP can join an AC".into()));
+        }
+        let ip = c.ipv4("ip");
+        if ip == 0 {
+            return Err(CliError::Custom("Invalid AC address".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.wlan.capwap_ac = Some(ip);
+            d.wlan.joined = false;
+        }
+        c.eng.capwap_start(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn wlan_ssid(c: &mut Ctx) -> Result<String, CliError> {
+        require_ac(c)?;
+        let ssid = c.word("ssid");
+        if ssid.is_empty() {
+            return Err(CliError::Custom("SSID is required".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if !d.wlan.profiles.iter().any(|p| p.ssid == ssid) {
+                d.wlan.profiles.push(WlanProfile {
+                    ssid: ssid.clone(),
+                    security: WlanSecurity::Open,
+                    psk: None,
+                    vlan: 1,
+                });
+            }
+            d.wlan.selected = Some(ssid);
+        }
+        c.eng.wlan_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    fn wlan_update_profile(c: &mut Ctx, f: impl FnOnce(&mut WlanProfile)) -> Result<(), CliError> {
+        let Some(ssid) = c
+            .eng
+            .net
+            .device(c.dev)
+            .and_then(|d| d.wlan.selected.clone())
+        else {
+            return Err(CliError::Custom("no SSID selected".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.wlan.profile_mut(&ssid) {
+                f(p);
+            }
+        }
+        c.eng.wlan_config_changed(c.dev);
+        Ok(())
+    }
+
+    pub fn wlan_security_open(c: &mut Ctx) -> Result<String, CliError> {
+        require_ac(c)?;
+        wlan_update_profile(c, |p| {
+            p.security = WlanSecurity::Open;
+            p.psk = None;
+        })?;
+        Ok(String::new())
+    }
+
+    pub fn wlan_security_wpa2(c: &mut Ctx) -> Result<String, CliError> {
+        require_ac(c)?;
+        let psk = c.word("psk");
+        if psk.is_empty() {
+            return Err(CliError::Custom("WPA2 PSK is required".into()));
+        }
+        wlan_update_profile(c, |p| {
+            p.security = WlanSecurity::Wpa2Psk;
+            p.psk = Some(psk);
+        })?;
+        Ok(String::new())
+    }
+
+    pub fn wlan_security_wpa3(c: &mut Ctx) -> Result<String, CliError> {
+        require_ac(c)?;
+        let psk = c.word("psk");
+        if psk.is_empty() {
+            return Err(CliError::Custom("WPA3 passphrase is required".into()));
+        }
+        wlan_update_profile(c, |p| {
+            p.security = WlanSecurity::Wpa3Sae;
+            p.psk = Some(psk);
+        })?;
+        Ok(String::new())
+    }
+
+    pub fn wlan_vlan(c: &mut Ctx) -> Result<String, CliError> {
+        require_ac(c)?;
+        let vlan = c.number("vlan").unwrap_or(0);
+        if !(1..=4094).contains(&vlan) {
+            return Err(CliError::Custom("Invalid VLAN".into()));
+        }
+        wlan_update_profile(c, |p| p.vlan = vlan as u16)?;
+        Ok(String::new())
+    }
+
+    /// AP：`wlan priority <n>`（漫游选路）
+    pub fn wlan_priority(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() != DeviceKind::AccessPoint {
+            return Err(CliError::Custom(
+                "WLAN priority is only available on APs".into(),
+            ));
+        }
+        let priority = c.number("priority").unwrap_or(100).min(255) as u8;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            d.wlan.priority = priority;
+        }
+        Ok(String::new())
+    }
+
+    pub fn show_wlan(c: &mut Ctx) -> Result<String, CliError> {
+        Ok(show::wlan_table(c.eng, c.dev, c.dialect))
+    }
+
     // ---------- IS-IS（简化） ----------
 
     pub fn isis_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2136,7 +2336,10 @@ pub mod cmd {
     }
 
     pub fn isis_net(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2160,7 +2363,10 @@ pub mod cmd {
     }
 
     pub fn isis_enable_if(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2178,7 +2384,10 @@ pub mod cmd {
     }
 
     pub fn show_isis_neighbors(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2187,7 +2396,10 @@ pub mod cmd {
     }
 
     pub fn show_isis_db(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2198,7 +2410,10 @@ pub mod cmd {
     // ---------- VRF（简化：连接 + 静态路由） ----------
 
     pub fn vrf_create(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2223,7 +2438,10 @@ pub mod cmd {
     }
 
     pub fn vrf_bind(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2249,7 +2467,10 @@ pub mod cmd {
     }
 
     pub fn vrf_static(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2289,7 +2510,10 @@ pub mod cmd {
     }
 
     pub fn show_route_vrf(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2307,7 +2531,10 @@ pub mod cmd {
     // ---------- MPLS（静态 LSP） ----------
 
     fn mpls_lsp_upsert(c: &mut Ctx, lsp: sim_core::device::StaticLsp) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2402,7 +2629,10 @@ pub mod cmd {
     }
 
     pub fn show_mpls(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2413,7 +2643,10 @@ pub mod cmd {
     // ---------- 显示 ----------
 
     pub fn show_acl(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on routers".into(),
@@ -2423,7 +2656,10 @@ pub mod cmd {
     }
 
     pub fn show_nat(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+        ) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on routers".into(),
