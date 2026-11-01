@@ -26,6 +26,9 @@ fn kind_from(s: &str) -> Option<DeviceKind> {
         "Firewall" | "firewall" | "FW" | "fw" => Some(DeviceKind::Firewall),
         "AccessPoint" | "accesspoint" | "AP" | "ap" => Some(DeviceKind::AccessPoint),
         "WlanController" | "wlancontroller" | "AC" | "ac" => Some(DeviceKind::WlanController),
+        "LoadBalancer" | "loadbalancer" | "LB" | "lb" | "F5" | "f5" => {
+            Some(DeviceKind::LoadBalancer)
+        }
         _ => None,
     }
 }
@@ -73,6 +76,7 @@ impl Sim {
             DeviceKind::Firewall => "FW",
             DeviceKind::AccessPoint => "AP",
             DeviceKind::WlanController => "AC",
+            DeviceKind::LoadBalancer => "LB",
         };
         let n = self.kind_counts.entry(base.to_string()).or_insert(0);
         *n += 1;
@@ -288,6 +292,7 @@ impl Sim {
                 DeviceKind::Firewall => "FW",
                 DeviceKind::AccessPoint => "AP",
                 DeviceKind::WlanController => "AC",
+                DeviceKind::LoadBalancer => "LB",
             };
             if let Some(sfx) = d.name.strip_prefix(base) {
                 if let Ok(n) = sfx.parse::<u32>() {
@@ -428,6 +433,122 @@ impl Sim {
                     dst,
                     len,
                     src: None,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 EVPN 路由。
+    pub fn check_evpn_route(&mut self, dev: u32, vtep: &str, vni: u32) -> Result<String, JsValue> {
+        let vtep =
+            sim_packets::ipv4_from_str(vtep).ok_or_else(|| JsValue::from_str("invalid VTEP"))?;
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::EvpnRoute { dev, vtep, vni },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 LTM 虚拟服务器。
+    pub fn check_ltm_virtual(
+        &mut self,
+        dev: u32,
+        name: &str,
+        vip: &str,
+        port: u32,
+    ) -> Result<String, JsValue> {
+        let vip =
+            sim_packets::ipv4_from_str(vip).ok_or_else(|| JsValue::from_str("invalid VIP"))?;
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::LtmVirtual {
+                    dev,
+                    name: name.to_string(),
+                    vip,
+                    port: port as u16,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 TCP 探测。
+    pub fn check_tcp_probe(
+        &mut self,
+        from: u32,
+        to: &str,
+        port: u32,
+        expect: bool,
+    ) -> Result<String, JsValue> {
+        let to =
+            sim_packets::ipv4_from_str(to).ok_or_else(|| JsValue::from_str("invalid target"))?;
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::TcpProbe {
+                    from,
+                    to,
+                    port: port as u16,
+                    expect,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查堆叠成员配置。
+    pub fn check_stack_member(
+        &mut self,
+        dev: u32,
+        domain: u32,
+        member: u32,
+    ) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::StackMember {
+                    dev,
+                    domain: domain as u16,
+                    member: member as u8,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 M-LAG domain。
+    pub fn check_mlag_domain(&mut self, dev: u32, domain: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::MlagDomain {
+                    dev,
+                    domain: domain as u16,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 VXLAN VNI 映射。
+    pub fn check_vxlan_vni(&mut self, dev: u32, vlan: u32, vni: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::VxlanVni {
+                    dev,
+                    vlan: vlan as u16,
+                    vni,
                 },
             }],
         );
@@ -908,6 +1029,27 @@ impl Sim {
                             c.kind,
                             sim_packets::fixed_str_value(&c.ssid),
                             c.vlan
+                        ),
+                    ),
+                    L3::Vxlan(v) => (
+                        "VXLAN",
+                        format!(
+                            "VNI {}  {} → {}  inner {} → {}",
+                            v.vni,
+                            sim_packets::ipv4_str(v.src),
+                            sim_packets::ipv4_str(v.dst),
+                            sim_packets::mac_str(&v.inner_src),
+                            sim_packets::mac_str(&v.inner_dst)
+                        ),
+                    ),
+                    L3::Evpn(e) => (
+                        "EVPN",
+                        format!(
+                            "VTEP {} VNI {} VLAN {} → {}",
+                            sim_packets::ipv4_str(e.vtep_ip),
+                            e.vni,
+                            e.vlan,
+                            sim_packets::ipv4_str(e.dst)
                         ),
                     ),
                     L3::Bpdu(b) => (

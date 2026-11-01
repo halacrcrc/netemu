@@ -1649,6 +1649,185 @@ pub fn wlan_table(eng: &Engine, dev: DevId, _dialect: Dialect) -> String {
     out.trim_end().to_string()
 }
 
+/// `show vxlan` / `display vxlan`。
+pub fn vxlan_table(eng: &Engine, dev: DevId) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Switch(sw) = &d.state else {
+        return String::new();
+    };
+    let mut out = format!(
+        "VTEP local: {}\nPeers:\n",
+        sw.vxlan.local.map(ipv4_str).unwrap_or_else(|| "-".into())
+    );
+    if sw.vxlan.peers.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for p in &sw.vxlan.peers {
+        out.push_str(&format!("  {}\n", ipv4_str(*p)));
+    }
+    out.push_str("VNI mappings:\n");
+    if sw.vxlan.mappings.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for (vni, vlan) in &sw.vxlan.mappings {
+        out.push_str(&format!("  VNI {} <-> VLAN {}\n", vni, vlan));
+    }
+    out.trim_end().to_string()
+}
+
+/// `show stack` / `display stack`。
+pub fn stack_table(eng: &Engine, dev: DevId) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Switch(sw) = &d.state else {
+        return String::new();
+    };
+    let Some(stack) = &sw.stack else {
+        return " Info: No stack configuration.".into();
+    };
+    let members: Vec<(String, u8, u16)> = eng
+        .net
+        .devices
+        .iter()
+        .filter_map(|x| match &x.state {
+            DeviceState::Switch(s) => s
+                .stack
+                .as_ref()
+                .filter(|z| z.domain == stack.domain)
+                .map(|z| (x.name.clone(), z.member, z.priority)),
+            _ => None,
+        })
+        .collect();
+    let master = members
+        .iter()
+        .max_by(|a, b| a.2.cmp(&b.2).then(b.1.cmp(&a.1)));
+    let mut out = format!("Stack domain: {}\n", stack.domain);
+    if let Some((name, member, _)) = master {
+        out.push_str(&format!("Master: {} (member {})\n", name, member));
+    }
+    out.push_str("Members:\n");
+    for (name, member, priority) in members {
+        out.push_str(&format!(
+            "  {:<10} member {:<3} priority {}\n",
+            name, member, priority
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// `show mlag` / `display mlag`。
+pub fn mlag_table(eng: &Engine, dev: DevId) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Switch(sw) = &d.state else {
+        return String::new();
+    };
+    let Some(m) = &sw.mlag else {
+        return " Info: No M-LAG configuration.".into();
+    };
+    let mac = [0x02, 0, 0, (m.domain >> 8) as u8, m.domain as u8, 0x02];
+    let links: Vec<String> = m
+        .peer_links
+        .iter()
+        .map(|p| ifname::display(d.dialect, d.kind, *p))
+        .collect();
+    format!(
+        "M-LAG domain: {}\nSystem MAC: {}\nPeer-link: {}",
+        m.domain,
+        sim_packets::mac_str(&mac),
+        if links.is_empty() {
+            "-".into()
+        } else {
+            links.join(", ")
+        }
+    )
+}
+
+/// `show evpn` / `display evpn`。
+pub fn evpn_table(eng: &Engine, dev: DevId) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Switch(sw) = &d.state else {
+        return String::new();
+    };
+    let mut out = format!(
+        "EVPN: {}\nPeers:\n",
+        if sw.evpn.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    if sw.evpn.peers.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for p in &sw.evpn.peers {
+        out.push_str(&format!("  {}\n", ipv4_str(*p)));
+    }
+    out.push_str("Routes:\n");
+    for r in eng.evpn_routes_of(dev) {
+        out.push_str(&format!(
+            "  VTEP {:<15} VNI {:<8} VLAN {}\n",
+            ipv4_str(r.vtep),
+            r.vni,
+            r.vlan
+        ));
+    }
+    if eng.evpn_routes_of(dev).is_empty() {
+        out.push_str("  (none)\n");
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ltm` / `display ltm`。
+pub fn ltm_table(eng: &Engine, dev: DevId) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let mut out = String::from("Virtual servers:\n");
+    for v in &d.ltm.virtuals {
+        out.push_str(&format!(
+            "  {:<10} {}:{} -> pool {}\n",
+            v.name,
+            ipv4_str(v.vip),
+            v.port,
+            v.pool
+        ));
+    }
+    if d.ltm.virtuals.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    out.push_str("Pools:\n");
+    for p in &d.ltm.pools {
+        out.push_str(&format!("  {}\n", p.name));
+        for m in &p.members {
+            out.push_str(&format!("    {}:{}\n", ipv4_str(m.ip), m.port));
+        }
+    }
+    out.push_str("Sessions:\n");
+    let sessions = eng.ltm_sessions_of(dev);
+    if sessions.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for s in sessions {
+        out.push_str(&format!(
+            "  {}:{} -> {}:{} via {}:{}\n",
+            ipv4_str(s.client_ip),
+            s.client_port,
+            ipv4_str(s.vip),
+            s.vip_port,
+            ipv4_str(s.member_ip),
+            s.member_port
+        ));
+    }
+    out.trim_end().to_string()
+}
+
 /// `show ip ospf neighbor` / `display ospf peer`。
 pub fn ospf_neighbors(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
     let Some(d) = eng.net.device(dev) else {

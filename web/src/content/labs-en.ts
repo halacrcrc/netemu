@@ -296,4 +296,100 @@ export const LABS_EN: Record<string, LabEn> = {
       'CORP -> GUEST cross-SSID isolated',
     ],
   },
+'vxlan-dc': {
+    title: 'Lab 15 · VXLAN Data Center Cross-DC Layer 2',
+    brief:
+      'Two data-center switches act as VTEPs and map local VLAN10 to VNI 10000 over an L3 underlay, extending Layer 2 across data centers. H1 and H2 are in the same subnet but different sites and can still reach each other directly.',
+    tasks: [
+      'DSW1: vlan batch 10 100; G0/0/1 to H1 access VLAN10; G0/0/2 to DSW2 access VLAN100',
+      'DSW1: interface vlanif 100 -> ip address 10.0.0.1 24 -> undo shutdown',
+      'DSW1: vxlan local 10.0.0.1 -> vxlan vni 10000 vlan 10 -> vxlan peer 10.0.0.2',
+      'DSW2: vlan batch 10 100; G0/0/1 to DSW1 access VLAN100; G0/0/2 to H2 access VLAN10',
+      'DSW2: interface vlanif 100 -> ip address 10.0.0.2 24 -> undo shutdown',
+      'DSW2: vxlan local 10.0.0.2 -> vxlan vni 10000 vlan 10 -> vxlan peer 10.0.0.1',
+      'display vxlan should show VNI 10000 <-> VLAN10 and the peer VTEP; H1 ping 192.168.10.20 should succeed',
+      '(Packet capture shows the VXLAN outer frame with the original Ethernet frame inside)',
+    ],
+    checkLabels: [
+      'DSW1 maps VNI 10000 to VLAN10',
+      'DSW2 maps VNI 10000 to VLAN10',
+      'H1 -> H2 cross-DC Layer 2 reachable',
+    ],
+  },
+'stack-irf': {
+    title: 'Lab 16 · Stacking / IRF (One Logical Switch)',
+    brief:
+      'Two switches share a stack domain and become one logical switch: member links are treated as internal fabric and are not blocked by STP, so PCs under different members communicate in the same VLAN.',
+    tasks: [
+      'SW1: stack domain 10 -> stack member 1 -> stack priority 200',
+      'SW2: stack domain 10 -> stack member 2 -> stack priority 100',
+      'SW1/SW2: vlan batch 10; PC-facing ports access VLAN10',
+      'SW1/SW2: interconnect ports as trunk allowing vlan 10',
+      'display stack should show domain 10, both members, and SW1 as Master',
+      'PC1 ping 192.168.10.12 should succeed (Layer 2 across stack members)',
+    ],
+    checkLabels: [
+      'SW1 is member 1 of stack domain 10',
+      'SW2 is member 2 of stack domain 10',
+      'PC1 -> PC2 reachable across stack members',
+    ],
+  },
+  'mlag-dc': {
+    title: 'Lab 17 · M-LAG Cross-Device Link Aggregation',
+    brief:
+      'Two DSWs form an M-LAG pair sharing one system MAC. Access switch SW1 dual-homes to both DSWs with LACP, both links forward at once, and the peer-link carries cross-device traffic.',
+    tasks: [
+      'SW1: vlan batch 10 -> stp disable (dual-homing does not rely on STP)',
+      'SW1: G0/0/1 to PC1 access VLAN10; G0/0/2 and G0/0/3 to DSW1/DSW2 as trunk allowing vlan 10',
+      'SW1: interface eth-trunk 1 -> mode lacp-static -> add G0/0/2 and G0/0/3',
+      'DSW1/DSW2: vlan batch 10; mlag domain 1; G0/0/1 to SW1 trunk allowing vlan 10; G0/0/2 interconnect trunk allowing vlan 10 and mlag peer-link',
+      'DSW1/DSW2: interface eth-trunk 1 -> mode lacp-static -> add G0/0/1',
+      'DSW2: G0/0/3 to PC2 access VLAN10',
+      'display mlag should show domain 1 and the shared System MAC; SW1 display eth-trunk 1 should select 2 members',
+      'PC1 ping 192.168.10.12 should succeed (both dual-homed links forward)',
+    ],
+    checkLabels: [
+      'DSW1 has M-LAG domain 1',
+      'DSW2 has M-LAG domain 1',
+      'SW1 dual-homed LACP selected 2 members',
+      'PC1 -> PC2 reachable through M-LAG',
+    ],
+  },
+'evpn-dc': {
+    title: 'Lab 18 · EVPN Control Plane (Automatic VTEP Discovery)',
+    brief:
+      'The two VTEPs no longer use static vxlan peers; they advertise EVPN routes (simplified Type-3) to learn each other’s VTEP and VNI, and the data plane automatically builds the VXLAN tunnel.',
+    tasks: [
+      'DSW1/DSW2: configure VLAN10/100, underlay SVI 10.0.0.1/2, VXLAN local and VNI 10000 <-> VLAN10 as in Lab 15',
+      'DSW1: evpn enable -> evpn peer 10.0.0.2 (do not configure a static vxlan peer)',
+      'DSW2: evpn enable -> evpn peer 10.0.0.1',
+      'display evpn should show the remote VTEP and VNI 10000 route learned through EVPN',
+      'display vxlan: the remote VTEP should appear automatically in Peers',
+      'H1 ping 192.168.10.20 should succeed (data plane uses the learned VTEP)',
+    ],
+    checkLabels: [
+      'DSW1 learned an EVPN route from DSW2',
+      'DSW2 learned an EVPN route from DSW1',
+      'H1 -> H2 reachable through EVPN-discovered VTEPs',
+    ],
+  },
+  'f5-ltm': {
+    title: 'Lab 19 · F5 LTM Load Balancing',
+    brief:
+      'The F5 load balancer exposes VIP 10.0.0.100:80 to clients with a two-member backend pool. Client TCP connections to the VIP are load-balanced round-robin with destination and return source translation.',
+    tasks: [
+      'LB1: G0/0/0 client side 10.0.0.1/24; G0/0/1 to SRV1 10.0.1.1/24; G0/0/2 to SRV2 10.0.2.1/24, all undo shutdown',
+      'LB1: ltm pool WEB member 10.0.1.10 80',
+      'LB1: ltm pool WEB member 10.0.2.11 80',
+      'LB1: ltm virtual VS vip 10.0.0.100 80 pool WEB',
+      'display ltm should show VS -> WEB and both pool members',
+      'PC1: run tcp 10.0.0.100 80 twice; both should report a successful connection',
+      'display ltm: two sessions should appear, pointing to different members (round-robin)',
+    ],
+    checkLabels: [
+      'LB1 virtual server VS = 10.0.0.100:80',
+      'PC1 first connection to the VIP succeeds',
+      'PC1 second connection to the VIP succeeds',
+    ],
+  },
 };

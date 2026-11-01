@@ -101,7 +101,10 @@ pub fn canonical(dialect: Dialect, kind: DeviceKind, idx: usize) -> String {
     match dialect {
         Dialect::Ios => format!("GigabitEthernet0/{}", idx),
         Dialect::Vrp => match kind {
-            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController => {
+            DeviceKind::Router
+            | DeviceKind::Firewall
+            | DeviceKind::WlanController
+            | DeviceKind::LoadBalancer => {
                 format!("GigabitEthernet0/0/{}", idx)
             }
             _ => format!("GigabitEthernet0/0/{}", idx + 1),
@@ -118,7 +121,10 @@ pub fn short(dialect: Dialect, kind: DeviceKind, idx: usize) -> String {
     match dialect {
         Dialect::Ios => format!("Gi0/{}", idx),
         Dialect::Vrp => match kind {
-            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController => {
+            DeviceKind::Router
+            | DeviceKind::Firewall
+            | DeviceKind::WlanController
+            | DeviceKind::LoadBalancer => {
                 format!("GE0/0/{}", idx)
             }
             _ => format!("GE0/0/{}", idx + 1),
@@ -173,7 +179,10 @@ pub fn resolve(dialect: Dialect, kind: DeviceKind, s: &str) -> Option<usize> {
         (Dialect::Ios, _, [0, idx]) if within(*idx as usize) => Some(*idx as usize),
         (
             Dialect::Vrp,
-            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController,
+            DeviceKind::Router
+            | DeviceKind::Firewall
+            | DeviceKind::WlanController
+            | DeviceKind::LoadBalancer,
             [0, 0, idx],
         ) if within(*idx as usize) => Some(*idx as usize),
         (Dialect::Vrp, DeviceKind::Switch | DeviceKind::AccessPoint, [0, 0, idx])

@@ -31,6 +31,8 @@ pub enum DeviceKind {
     AccessPoint,
     /// 无线控制器：复用路由器状态，负责 CAPWAP 与 WLAN 配置下发。
     WlanController,
+    /// 负载均衡器（F5 LTM 简化）：复用路由器状态。
+    LoadBalancer,
 }
 
 impl DeviceKind {
@@ -42,6 +44,7 @@ impl DeviceKind {
             DeviceKind::Firewall => ROUTER_PORTS,
             DeviceKind::AccessPoint => ROUTER_PORTS,
             DeviceKind::WlanController => ROUTER_PORTS,
+            DeviceKind::LoadBalancer => ROUTER_PORTS,
         }
     }
 }
@@ -760,9 +763,65 @@ pub struct SviState {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StackConfig {
+    pub domain: u16,
+    pub member: u8,
+    pub priority: u16,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MlagConfig {
+    pub domain: u16,
+    #[serde(default)]
+    pub peer_links: Vec<PortId>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EvpnConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub peers: Vec<Ipv4Addr>,
+    #[serde(default)]
+    pub routes: Vec<EvpnRoute>,
+    #[serde(skip)]
+    pub timer_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvpnRoute {
+    pub vtep: Ipv4Addr,
+    pub vni: u32,
+    pub vlan: VlanId,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct VxlanConfig {
+    #[serde(default)]
+    pub local: Option<Ipv4Addr>,
+    /// (VNI, 业务 VLAN)
+    #[serde(default)]
+    pub mappings: Vec<(u32, VlanId)>,
+    #[serde(default)]
+    pub peers: Vec<Ipv4Addr>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SwitchState {
     /// STP 实例（默认启用）
     pub stp: StpInstance,
+    /// 堆叠/IRF 配置
+    #[serde(default)]
+    pub stack: Option<StackConfig>,
+    /// M-LAG 配置
+    #[serde(default)]
+    pub mlag: Option<MlagConfig>,
+    /// VXLAN（EVPN 数据面简化）
+    #[serde(default)]
+    pub vxlan: VxlanConfig,
+    /// EVPN 控制面（简化 Type-3）
+    #[serde(default)]
+    pub evpn: EvpnConfig,
     /// DHCP Snooping 全局开关
     #[serde(default)]
     pub dhcp_snooping: bool,
@@ -1174,6 +1233,52 @@ pub struct Device {
     /// WLAN/CAPWAP 配置（AP 与 AC）
     #[serde(default)]
     pub wlan: WlanConfig,
+    /// F5 LTM 配置（LoadBalancer）
+    #[serde(default)]
+    pub ltm: LtmConfig,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LtmConfig {
+    #[serde(default)]
+    pub pools: Vec<LtmPool>,
+    #[serde(default)]
+    pub virtuals: Vec<LtmVirtual>,
+    #[serde(skip)]
+    pub sessions: Vec<LtmSession>,
+    #[serde(skip)]
+    pub rr: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtmPool {
+    pub name: String,
+    pub members: Vec<LtmMember>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtmMember {
+    pub ip: Ipv4Addr,
+    pub port: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtmVirtual {
+    pub name: String,
+    pub vip: Ipv4Addr,
+    pub port: u16,
+    pub pool: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtmSession {
+    pub client_ip: Ipv4Addr,
+    pub client_port: u16,
+    pub vip: Ipv4Addr,
+    pub vip_port: u16,
+    pub member_ip: Ipv4Addr,
+    pub member_port: u16,
+    pub last_ns: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1247,7 +1352,10 @@ impl Device {
                 // 与真实设备一致：交换机端口与主机网卡默认开启，路由器接口需手工 no shutdown
                 admin_up: !matches!(
                     kind,
-                    DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController
+                    DeviceKind::Router
+                        | DeviceKind::Firewall
+                        | DeviceKind::WlanController
+                        | DeviceKind::LoadBalancer
                 ),
                 mac: port_mac(id, idx),
                 speed_bps: PORT_SPEED_BPS,
@@ -1275,9 +1383,10 @@ impl Device {
             })
             .collect();
         let state = match kind {
-            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController => {
-                DeviceState::Router(RouterState::default())
-            }
+            DeviceKind::Router
+            | DeviceKind::Firewall
+            | DeviceKind::WlanController
+            | DeviceKind::LoadBalancer => DeviceState::Router(RouterState::default()),
             DeviceKind::AccessPoint => DeviceState::Switch(SwitchState {
                 vlans: vec![DEFAULT_VLAN],
                 ..Default::default()
@@ -1300,6 +1409,7 @@ impl Device {
             state,
             mgmt: MgmtState::default(),
             wlan: WlanConfig::default(),
+            ltm: LtmConfig::default(),
         }
     }
 
@@ -1324,6 +1434,7 @@ impl Device {
                 | DeviceKind::Switch
                 | DeviceKind::Firewall
                 | DeviceKind::WlanController
+                | DeviceKind::LoadBalancer
         )
     }
 

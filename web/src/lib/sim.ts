@@ -25,7 +25,8 @@ export type DeviceKind =
   | 'Host'
   | 'Firewall'
   | 'AccessPoint'
-  | 'WlanController';
+  | 'WlanController'
+  | 'LoadBalancer';
 export type Dialect = 'Ios' | 'Vrp' | 'Comware';
 
 export interface DevSummary {

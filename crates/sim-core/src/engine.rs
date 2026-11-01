@@ -49,6 +49,8 @@ pub const BGP_HOLD_NS: u64 = 5_000_000_000;
 /// IS-IS Hello 周期与邻居失效时间（简化）。
 pub const ISIS_HELLO_NS: u64 = 2_000_000_000;
 pub const ISIS_DEAD_NS: u64 = 6_000_000_000;
+/// EVPN 路由通告周期（简化）。
+pub const EVPN_INTERVAL_NS: u64 = 2_000_000_000;
 
 fn mac_is_broadcast(m: &Mac) -> bool {
     *m == BROADCAST_MAC
@@ -148,6 +150,10 @@ enum EKind {
     },
     /// IS-IS Hello/老化定时器
     IsisTimer {
+        dev: DevId,
+    },
+    /// EVPN 路由通告定时器
+    EvpnTimer {
         dev: DevId,
     },
 }
@@ -434,6 +440,7 @@ impl Engine {
                 EKind::Ping6Done { dev, sid } => self.on_ping6_done(dev, sid),
                 EKind::BgpTimer { dev } => self.on_bgp_timer(dev),
                 EKind::IsisTimer { dev } => self.on_isis_timer(dev),
+                EKind::EvpnTimer { dev } => self.on_evpn_timer(dev),
             }
         }
         self.stats()
@@ -467,7 +474,59 @@ impl Engine {
     }
 
     /// 端口能否转发该 VLAN 的数据帧（STP 实例 Forwarding + 聚合成员已选中）。
+    /// 堆叠/M-LAG 共享的系统 MAC（用于跨设备 LACP 呈现同一对端）。
+    fn fabric_system_mac(&self, dev: DevId) -> Option<Mac> {
+        let d = self.net.device(dev)?;
+        let DeviceState::Switch(sw) = &d.state else {
+            return None;
+        };
+        if let Some(s) = &sw.stack {
+            return Some([0x02, 0, 0, (s.domain >> 8) as u8, s.domain as u8, 0x01]);
+        }
+        if let Some(m) = &sw.mlag {
+            return Some([0x02, 0, 0, (m.domain >> 8) as u8, m.domain as u8, 0x02]);
+        }
+        None
+    }
+
+    /// 堆叠（同 domain 的成员间）或 M-LAG peer-link 视为内部链路，STP 不阻塞。
+    fn is_fabric_link(&self, dev: DevId, port: PortId) -> bool {
+        let Some(d) = self.net.device(dev) else {
+            return false;
+        };
+        let DeviceState::Switch(sw) = &d.state else {
+            return false;
+        };
+        if sw
+            .mlag
+            .as_ref()
+            .is_some_and(|m| m.peer_links.contains(&port))
+        {
+            return true;
+        }
+        let Some(link) = d.port(port).and_then(|p| p.link) else {
+            return false;
+        };
+        let Some(l) = self.net.link(link) else {
+            return false;
+        };
+        let peer = if l.a.0 == dev { l.b.0 } else { l.a.0 };
+        let Some(pd) = self.net.device(peer) else {
+            return false;
+        };
+        let DeviceState::Switch(psw) = &pd.state else {
+            return false;
+        };
+        match (&sw.stack, &psw.stack) {
+            (Some(a), Some(b)) => a.domain != 0 && a.domain == b.domain,
+            _ => false,
+        }
+    }
+
     fn can_forward(&self, dev_id: DevId, port: PortId, vlan: VlanId) -> bool {
+        if self.is_fabric_link(dev_id, port) {
+            return true;
+        }
         let Some(d) = self.net.device(dev_id) else {
             return false;
         };
@@ -485,7 +544,7 @@ impl Engine {
         }
         match &d.state {
             DeviceState::Switch(sw) => {
-                if !sw.stp.enabled {
+                if sw.stack.is_some() || sw.mlag.is_some() || !sw.stp.enabled {
                     return true;
                 }
                 let inst = if sw.stp.mode == StpMode::Mstp {
@@ -502,7 +561,8 @@ impl Engine {
     fn stp_on(&self, dev_id: DevId) -> bool {
         matches!(
             self.net.device(dev_id).map(|d| &d.state),
-            Some(DeviceState::Switch(sw)) if sw.stp.enabled
+            Some(DeviceState::Switch(sw))
+                if sw.stp.enabled && sw.stack.is_none() && sw.mlag.is_none()
         )
     }
 
@@ -522,6 +582,16 @@ impl Engine {
                 }
             }
         }
+        // 0c. VXLAN：VTEP 解封装（仅本机 VTEP 地址）
+        if let L3::Vxlan(vx) = frame.payload {
+            self.vxlan_on_frame(dev_id, in_port, vx);
+            return;
+        }
+        // 0d. EVPN：控制面路由
+        if let L3::Evpn(e) = frame.payload {
+            self.evpn_on_packet(dev_id, e);
+            return;
+        }
         // 0a. LACP：先于 VLAN/STP 处理（聚合协商与端口状态无关）
         if frame.ethertype == ETHERTYPE_LACP {
             if let L3::Lacp(pdu) = frame.payload {
@@ -536,6 +606,11 @@ impl Engine {
                 let logical = self.logical_port(dev_id, in_port);
                 if self.stp_on(dev_id) {
                     self.stp_on_bpdu(dev_id, logical, bpdu);
+                } else if matches!(
+                    self.net.device(dev_id).map(|d| &d.state),
+                    Some(DeviceState::Switch(sw)) if sw.stack.is_some() || sw.mlag.is_some()
+                ) {
+                    // 堆叠/M-LAG 成员不参与 STP，BPDU 直接丢弃，避免泛洪成环
                 } else {
                     // STP 关闭：BPDU 当作未知组播洪泛（广播风暴演示的一部分）
                     for p in self.logical_ports(dev_id) {
@@ -564,7 +639,10 @@ impl Engine {
             }
         };
         // STP 启用时，非 Forwarding 端口（按该 VLAN 的实例）丢弃数据帧（不学习）
-        if self.stp_on(dev_id) && !self.can_forward(dev_id, in_port, vlan) {
+        if self.stp_on(dev_id)
+            && !self.is_fabric_link(dev_id, in_port)
+            && !self.can_forward(dev_id, in_port, vlan)
+        {
             self.dropped += 1;
             return;
         }
@@ -585,6 +663,8 @@ impl Engine {
             self.dropped += 1;
             return;
         }
+        // VXLAN：向远端 VTEP 复制封装（本地转发继续）
+        self.vxlan_encap(dev_id, in_port, vlan, &frame);
         // 2. 学习 + 查表（学习到聚合组的逻辑端口，避免成员间漂移）
         let logical_in = self.logical_port(dev_id, in_port);
         let (dst_port, svi_ip, _port_count) = {
@@ -614,13 +694,27 @@ impl Engine {
             }
         }
         // 4. 二层转发 / 洪泛（出方向过滤非 Forwarding 端口——STP 阻塞的关键）
+        let from_fabric = self.is_fabric_link(dev_id, in_port);
         let out_ports: Vec<PortId> = match dst_port {
             Some(p) if p != logical_in && self.can_forward(dev_id, p, vlan) => vec![p],
             Some(_) => vec![], // 已知单播但源同端口或不可转发：丢弃
             None => self
                 .logical_ports(dev_id)
                 .into_iter()
-                .filter(|&p| p != logical_in && self.can_forward(dev_id, p, vlan))
+                .filter(|&p| {
+                    if from_fabric
+                        && self
+                            .net
+                            .device(dev_id)
+                            .and_then(|d| d.port(p))
+                            .and_then(|p| p.lag)
+                            .is_some()
+                    {
+                        // M-LAG peer-link 水平分割：peer 来的广播不再回送跨设备 LAG
+                        return false;
+                    }
+                    p != logical_in && self.can_forward(dev_id, p, vlan)
+                })
                 .collect(),
         };
         for p in out_ports {
@@ -710,6 +804,20 @@ impl Engine {
         }
     }
 
+    fn flood_in_vlan_except(
+        &mut self,
+        dev_id: DevId,
+        vlan: VlanId,
+        frame: EthernetFrame,
+        exclude: PortId,
+    ) {
+        for p in self.logical_ports(dev_id) {
+            if p != exclude && self.can_forward(dev_id, p, vlan) {
+                self.l2_egress(dev_id, p, vlan, frame);
+            }
+        }
+    }
+
     // ---------- 三层交换机（SVI） ----------
 
     fn switch_l3_ingress(
@@ -731,6 +839,8 @@ impl Engine {
             L3::Tcp(tcp) => self.tcp_ingress(dev_id, in_port, tcp),
             L3::Ipsec(pkt) => self.ipsec_ingress(dev_id, in_port, pkt),
             L3::Capwap(pkt) => self.capwap_ingress(dev_id, pkt),
+            L3::Vxlan(_) => {}
+            L3::Evpn(_) => {}
             L3::Arp(arp) => {
                 if arp.sender_ip != 0 {
                     self.arp_learn(dev_id, in_port, Some(vlan), arp.sender_ip, arp.sender_mac);
@@ -928,21 +1038,24 @@ impl Engine {
             L3::Tcp(tcp) => self.tcp_ingress(dev_id, port, tcp),
             L3::Ipsec(pkt) => self.ipsec_ingress(dev_id, port, pkt),
             L3::Capwap(pkt) => self.capwap_ingress(dev_id, pkt),
-            L3::Bpdu(_) => {} // 主机/路由器不处理 802.1D BPDU
-            L3::Lacp(_) => {} // 主机/路由器不做链路聚合
-            L3::Ospf(_) => {} // OSPF 已在入口处理
-            L3::Vrrp(_) => {} // VRRP 已在入口处理
-            L3::Ipv6(_) => {} // IPv6 已在入口处理
-            L3::Bgp(_) => {}  // BGP 已在入口处理
-            L3::Isis(_) => {} // IS-IS 已在入口处理
-            L3::Mpls(_) => {} // MPLS 已在入口处理
+            L3::Vxlan(_) => {} // 仅交换机 VTEP 处理
+            L3::Evpn(_) => {}  // EVPN 仅交换机处理
+            L3::Bpdu(_) => {}  // 主机/路由器不处理 802.1D BPDU
+            L3::Lacp(_) => {}  // 主机/路由器不做链路聚合
+            L3::Ospf(_) => {}  // OSPF 已在入口处理
+            L3::Vrrp(_) => {}  // VRRP 已在入口处理
+            L3::Ipv6(_) => {}  // IPv6 已在入口处理
+            L3::Bgp(_) => {}   // BGP 已在入口处理
+            L3::Isis(_) => {}  // IS-IS 已在入口处理
+            L3::Mpls(_) => {}  // MPLS 已在入口处理
             L3::Dhcp(dhcp) => {
                 // DHCP 广播：主机客户端 / 路由器服务器各自处理
                 match d_kind(&self.net, dev_id) {
                     DeviceKind::Host => self.dhcp_client_ingress(dev_id, port, dhcp),
-                    DeviceKind::Router | DeviceKind::Firewall | DeviceKind::WlanController => {
-                        self.dhcp_server_ingress(dev_id, port, dhcp)
-                    }
+                    DeviceKind::Router
+                    | DeviceKind::Firewall
+                    | DeviceKind::WlanController
+                    | DeviceKind::LoadBalancer => self.dhcp_server_ingress(dev_id, port, dhcp),
                     DeviceKind::Switch | DeviceKind::AccessPoint => {}
                 }
             }
@@ -975,6 +1088,25 @@ impl Engine {
                 let frame = EthernetFrame {
                     dst: arp.sender_mac,
                     src: vmac,
+                    vlan: None,
+                    ethertype: ETHERTYPE_ARP,
+                    payload: L3::Arp(reply),
+                };
+                self.transmit_frame(dev_id, port, frame);
+                return;
+            }
+            // F5 LTM：虚拟服务器 VIP 用本端口 MAC 应答 ARP
+            if self.ltm_owns_vip(dev_id, arp.target_ip) {
+                let reply = ArpPacket {
+                    op: ArpOp::Reply,
+                    sender_mac: my_mac,
+                    sender_ip: arp.target_ip,
+                    target_mac: arp.sender_mac,
+                    target_ip: arp.sender_ip,
+                };
+                let frame = EthernetFrame {
+                    dst: arp.sender_mac,
+                    src: my_mac,
                     vlan: None,
                     ethertype: ETHERTYPE_ARP,
                     payload: L3::Arp(reply),
@@ -1104,7 +1236,7 @@ impl Engine {
         // 入方向 ACL（先于一切转发与本机处理；DHCP 不走 Ipv4 路径天然豁免）
         if matches!(
             d_kind(&self.net, dev_id),
-            DeviceKind::Router | DeviceKind::Firewall
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::LoadBalancer
         ) {
             let acl_no = self
                 .net
@@ -1119,7 +1251,7 @@ impl Engine {
         // 路由器/防火墙：NAT 入向还原优先（outside 口收到目的为出口 IP 的报文 → 还原目的后转发）
         if matches!(
             d_kind(&self.net, dev_id),
-            DeviceKind::Router | DeviceKind::Firewall
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::LoadBalancer
         ) {
             let vrf = self
                 .net
@@ -1564,6 +1696,7 @@ impl Engine {
                 | DeviceKind::Firewall
                 | DeviceKind::WlanController
                 | DeviceKind::AccessPoint
+                | DeviceKind::LoadBalancer
         ) {
             return None;
         }
@@ -1931,7 +2064,8 @@ impl Engine {
                 | DeviceKind::Firewall
                 | DeviceKind::Switch
                 | DeviceKind::AccessPoint
-                | DeviceKind::WlanController => {
+                | DeviceKind::WlanController
+                | DeviceKind::LoadBalancer => {
                     let rst = TcpPacket {
                         src: tcp.dst,
                         dst: tcp.src,
@@ -1952,7 +2086,8 @@ impl Engine {
             | DeviceKind::Firewall
             | DeviceKind::Switch
             | DeviceKind::AccessPoint
-            | DeviceKind::WlanController => self.tcp_forward(dev, port, tcp),
+            | DeviceKind::WlanController
+            | DeviceKind::LoadBalancer => self.tcp_forward(dev, port, tcp),
             DeviceKind::Host => {}
         }
     }
@@ -2085,6 +2220,12 @@ impl Engine {
             return;
         }
         tcp.ttl -= 1;
+        if d_kind(&self.net, dev) == DeviceKind::LoadBalancer
+            && self.ltm_translate(dev, &mut tcp).is_none()
+        {
+            self.dropped += 1;
+            return;
+        }
         let vrf = self
             .net
             .device(dev)
@@ -2655,6 +2796,330 @@ impl Engine {
             .filter(|d| d.kind == DeviceKind::AccessPoint && d.wlan.ac_ip == Some(ac_ip))
             .map(|d| (d.name.clone(), self.local_ip_of(d.id), d.wlan.joined))
             .collect()
+    }
+
+    // ---------- VXLAN（EVPN 数据面简化：静态 VTEP 对端 + VNI） ----------
+
+    fn vxlan_encap(&mut self, dev: DevId, in_port: PortId, vlan: VlanId, frame: &EthernetFrame) {
+        let (local, vni, peers, known) = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &d.state else {
+                return;
+            };
+            let Some(local) = sw.vxlan.local else {
+                return;
+            };
+            let Some((vni, _)) = sw.vxlan.mappings.iter().find(|(_, v)| *v == vlan) else {
+                return;
+            };
+            let peers = sw.vxlan.peers.clone();
+            let known = sw.mac_table.contains_key(&(vlan, frame.dst));
+            (local, *vni, peers, known)
+        };
+        if peers.is_empty() || known {
+            return;
+        }
+        let payload = match frame.payload {
+            L3::Ipv4(p) => VxlanPayload::Ipv4(p),
+            L3::Arp(a) => VxlanPayload::Arp(a),
+            _ => return,
+        };
+        for peer in peers {
+            let Some((port, _, out_vlan)) = self.net.lookup_route(dev, peer) else {
+                continue;
+            };
+            let src_mac = out_vlan.map(svi_mac).unwrap_or_else(|| {
+                self.net
+                    .device(dev)
+                    .and_then(|d| d.port(port))
+                    .map(|p| p.mac)
+                    .unwrap_or([0; 6])
+            });
+            let vx = VxlanPacket {
+                src: local,
+                dst: peer,
+                ttl: DEFAULT_TTL,
+                vni,
+                inner_src: frame.src,
+                inner_dst: frame.dst,
+                inner_vlan: frame.vlan,
+                payload,
+            };
+            let outer = EthernetFrame {
+                dst: BROADCAST_MAC,
+                src: src_mac,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV4,
+                payload: L3::Vxlan(vx),
+            };
+            match out_vlan {
+                Some(v) => self.flood_in_vlan_except(dev, v, outer, in_port),
+                None if port != in_port => self.transmit_frame(dev, port, outer),
+                None => {}
+            }
+        }
+    }
+
+    fn vxlan_on_frame(&mut self, dev: DevId, in_port: PortId, vx: VxlanPacket) {
+        let (local, vlan) = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &d.state else {
+                return;
+            };
+            let Some(local) = sw.vxlan.local else {
+                return;
+            };
+            let Some((_, vlan)) = sw.vxlan.mappings.iter().find(|(v, _)| *v == vx.vni) else {
+                self.dropped += 1;
+                return;
+            };
+            (local, *vlan)
+        };
+        if vx.dst != local && vx.dst != 0xffff_ffff {
+            return;
+        }
+        let (ethertype, payload) = match vx.payload {
+            VxlanPayload::Ipv4(p) => (ETHERTYPE_IPV4, L3::Ipv4(p)),
+            VxlanPayload::Arp(a) => (ETHERTYPE_ARP, L3::Arp(a)),
+        };
+        let inner = EthernetFrame {
+            dst: vx.inner_dst,
+            src: vx.inner_src,
+            vlan: None,
+            ethertype,
+            payload,
+        };
+        let learned = self.net.device(dev).and_then(|d| match &d.state {
+            DeviceState::Switch(sw) => sw.mac_table.get(&(vlan, vx.inner_dst)).copied(),
+            _ => None,
+        });
+        if let Some(p) = learned {
+            if p != in_port {
+                self.l2_egress(dev, p, vlan, inner);
+            }
+            return;
+        }
+        for p in self.logical_ports(dev) {
+            if p != in_port && self.can_forward(dev, p, vlan) {
+                self.l2_egress(dev, p, vlan, inner);
+            }
+        }
+    }
+
+    // ---------- EVPN 控制面（简化 Type-3：VTEP + VNI 路由） ----------
+
+    pub fn evpn_config_changed(&mut self, dev: DevId) {
+        let enabled = matches!(
+            self.net.device(dev).map(|d| &d.state),
+            Some(DeviceState::Switch(sw)) if sw.evpn.enabled
+        );
+        if !enabled {
+            return;
+        }
+        self.evpn_schedule(dev);
+        self.evpn_send(dev);
+    }
+
+    fn evpn_schedule(&mut self, dev: DevId) {
+        let need = {
+            let Some(d) = self.net.device_mut(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &mut d.state else {
+                return;
+            };
+            if !sw.evpn.enabled || sw.evpn.timer_pending {
+                false
+            } else {
+                sw.evpn.timer_pending = true;
+                true
+            }
+        };
+        if need {
+            self.push(self.now + EVPN_INTERVAL_NS, EKind::EvpnTimer { dev });
+        }
+    }
+
+    fn on_evpn_timer(&mut self, dev: DevId) {
+        if let Some(d) = self.net.device_mut(dev) {
+            if let DeviceState::Switch(sw) = &mut d.state {
+                sw.evpn.timer_pending = false;
+            }
+        }
+        self.evpn_send(dev);
+        self.evpn_schedule(dev);
+    }
+
+    fn evpn_send(&mut self, dev: DevId) {
+        let (local, peers, mappings) = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Switch(sw) = &d.state else {
+                return;
+            };
+            let Some(local) = sw.vxlan.local else {
+                return;
+            };
+            (local, sw.evpn.peers.clone(), sw.vxlan.mappings.clone())
+        };
+        if peers.is_empty() || mappings.is_empty() {
+            return;
+        }
+        for peer in peers {
+            let Some((_, _, out_vlan)) = self.net.lookup_route(dev, peer) else {
+                continue;
+            };
+            let src_mac = out_vlan.map(svi_mac).unwrap_or([0; 6]);
+            for (vni, vlan) in &mappings {
+                let pkt = EvpnPacket {
+                    src: local,
+                    dst: peer,
+                    vtep_ip: local,
+                    vni: *vni,
+                    vlan: *vlan,
+                };
+                let frame = EthernetFrame {
+                    dst: BROADCAST_MAC,
+                    src: src_mac,
+                    vlan: None,
+                    ethertype: ETHERTYPE_IPV4,
+                    payload: L3::Evpn(pkt),
+                };
+                if let Some(v) = out_vlan {
+                    self.flood_in_vlan(dev, v, frame);
+                }
+            }
+        }
+    }
+
+    fn evpn_on_packet(&mut self, dev: DevId, p: EvpnPacket) {
+        let local = self.net.device(dev).and_then(|d| match &d.state {
+            DeviceState::Switch(sw) => sw.vxlan.local,
+            _ => None,
+        });
+        let Some(local) = local else {
+            return;
+        };
+        if p.dst != local && p.dst != 0xffff_ffff {
+            return;
+        }
+        if p.vtep_ip == local {
+            return;
+        }
+        if let Some(d) = self.net.device_mut(dev) {
+            if let DeviceState::Switch(sw) = &mut d.state {
+                let route = EvpnRoute {
+                    vtep: p.vtep_ip,
+                    vni: p.vni,
+                    vlan: p.vlan,
+                };
+                match sw
+                    .evpn
+                    .routes
+                    .iter_mut()
+                    .find(|r| r.vtep == route.vtep && r.vni == route.vni)
+                {
+                    Some(r) => *r = route,
+                    None => sw.evpn.routes.push(route),
+                }
+                if !sw.vxlan.peers.contains(&p.vtep_ip) {
+                    sw.vxlan.peers.push(p.vtep_ip);
+                }
+            }
+        }
+    }
+
+    pub fn evpn_routes_of(&self, dev: DevId) -> Vec<EvpnRoute> {
+        match self.net.device(dev).map(|d| &d.state) {
+            Some(DeviceState::Switch(sw)) => sw.evpn.routes.clone(),
+            _ => vec![],
+        }
+    }
+
+    // ---------- F5 LTM（虚拟服务器 / 池 / TCP 负载均衡） ----------
+
+    fn ltm_translate(&mut self, dev: DevId, tcp: &mut TcpPacket) -> Option<()> {
+        let now = self.now;
+        let Some(d) = self.net.device_mut(dev) else {
+            return Some(());
+        };
+        if d.kind != DeviceKind::LoadBalancer {
+            return Some(());
+        }
+        let virtual_cfg = d
+            .ltm
+            .virtuals
+            .iter()
+            .find(|v| v.vip == tcp.dst && v.port == tcp.dst_port)
+            .cloned();
+        if let Some(v) = virtual_cfg {
+            let members = d
+                .ltm
+                .pools
+                .iter()
+                .find(|p| p.name == v.pool)
+                .map(|p| p.members.clone())
+                .unwrap_or_default();
+            if let Some(s) = d.ltm.sessions.iter_mut().find(|s| {
+                s.client_ip == tcp.src
+                    && s.client_port == tcp.src_port
+                    && s.vip == v.vip
+                    && s.vip_port == v.port
+            }) {
+                tcp.dst = s.member_ip;
+                tcp.dst_port = s.member_port;
+                s.last_ns = now;
+                return Some(());
+            }
+            let is_syn = tcp.flags & TCP_SYN != 0 && tcp.flags & TCP_ACK == 0;
+            if !is_syn || members.is_empty() {
+                return None;
+            }
+            let idx = d.ltm.rr % members.len();
+            d.ltm.rr = d.ltm.rr.wrapping_add(1);
+            let m = members[idx];
+            d.ltm.sessions.push(LtmSession {
+                client_ip: tcp.src,
+                client_port: tcp.src_port,
+                vip: v.vip,
+                vip_port: v.port,
+                member_ip: m.ip,
+                member_port: m.port,
+                last_ns: now,
+            });
+            tcp.dst = m.ip;
+            tcp.dst_port = m.port;
+            return Some(());
+        }
+        let reverse = d.ltm.sessions.iter().find(|s| {
+            s.member_ip == tcp.src
+                && s.member_port == tcp.src_port
+                && s.client_ip == tcp.dst
+                && s.client_port == tcp.dst_port
+        });
+        if let Some(s) = reverse {
+            tcp.src = s.vip;
+            tcp.src_port = s.vip_port;
+        }
+        Some(())
+    }
+
+    fn ltm_owns_vip(&self, dev: DevId, ip: Ipv4Addr) -> bool {
+        self.net.device(dev).is_some_and(|d| {
+            d.kind == DeviceKind::LoadBalancer && d.ltm.virtuals.iter().any(|v| v.vip == ip)
+        })
+    }
+
+    pub fn ltm_sessions_of(&self, dev: DevId) -> Vec<LtmSession> {
+        self.net
+            .device(dev)
+            .map(|d| d.ltm.sessions.clone())
+            .unwrap_or_default()
     }
 
     // ---------- DHCP（DORA 简化：Discover/Offer/Request/Ack） ----------
@@ -5285,6 +5750,16 @@ impl Engine {
         for dev in isis_devs {
             self.isis_config_changed(dev);
         }
+        let evpn_devs: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| matches!(&d.state, DeviceState::Switch(sw) if sw.evpn.enabled))
+            .map(|d| d.id)
+            .collect();
+        for dev in evpn_devs {
+            self.evpn_config_changed(dev);
+        }
     }
 
     /// 加载拓扑后初始化聚合状态。
@@ -5407,7 +5882,9 @@ impl Engine {
     }
 
     fn lacp_send_group(&mut self, dev: DevId, gid: u16) {
-        let my_mac = port_mac(dev, 0);
+        let my_mac = self
+            .fabric_system_mac(dev)
+            .unwrap_or_else(|| port_mac(dev, 0));
         let members: Vec<(PortId, Mac, LacpPartner, LagMode)> = {
             let Some(d) = self.net.device(dev) else {
                 return;

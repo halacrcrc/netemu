@@ -154,6 +154,24 @@ MPLS：只做**静态 LSP**：ingress（FEC→out-label）压签、transit 换�
 
 WPA3 是**口令校验**而非完整 SAE：`WlanSecurity::Wpa3Sae` 与 WPA2 分开校验/报错，不做 Dragonfly 握手、PMF 或过渡模式。漫游由 PC `wifi roam` 显式触发：移除当前 Host↔AP 链路，按同 SSID 选择另一 AP 重关联；不做 802.11r/k/v、信号强度/RSSI、AP 间隧道或自动触发（自动切换留待后续）。
 
+### D29（M8 起步）VXLAN 用静态 VTEP + 二层帧封装
+
+`SwitchState.vxlan: VxlanConfig { local, mappings(VNI↔VLAN), peers }`；命令 `vxlan local`、`vxlan peer`、`vxlan vni N vlan V`。交换机收到本地 VLAN 的广播/未知单播且该 VLAN 有 VNI 映射时，复制一份封装为 `VxlanPacket`（外层 src/dst VTEP + VNI + 内层 MAC/VLAN + Ipv4/Arp 载荷），通过 Underlay 路由按 VLAN 泛洪到对端；对端 VTEP 匹配 VNI/VLAN 后解封装，按内层目的 MAC 查本地表或泛洪（排除入口端口）注入。只为 ICMP/ARP 载荷建模，不封装 TCP；Underlay 需能路由到对端 VTEP（本实验用直连 VLAN100）。
+
+不做：EVPN BGP 控制面（Route Type 2/3/5、MAC/IP 学习分发）、ARP 代理/未知单播抑制、多租户 VRF 映射、VXLAN-GPO/EVPN 多归、堆叠/IRF/CSS 与 M-LAG；这些作为 M8 后续。
+
+### D30（M8 补充）堆叠/IRF 与 M-LAG 用共享系统 MAC + fabric 链路模拟
+
+`SwitchState.stack { domain, member, priority }` 与 `mlag { domain, peer_links }`。同一 stack domain 的成员间链路、以及显式 `mlag peer-link` 端口被视为 **fabric 链路**：不参与 STP、始终可转发；堆叠/M-LAG 交换机不跑 STP，BPDU 直接丢弃（避免关 STP 后 BPDU 泛洪成环）。LACP 发送时若交换机属于 stack/M-LAG，actor system 使用由 domain 派生的共享系统 MAC（`02:00:00:<domain>:01|02`），使接入交换机的跨设备 LACP 把两台成员视为同一对端并同时选中。M-LAG peer-link 做水平分割：从 peer-link 进入的广播/未知单播不再回送跨设备 LAG，避免接入 LAG 的 MAC 被反射帧覆盖。
+
+堆叠/IRF/CSS 为简化：不做真实堆叠协议、成员选举报文、配置同步、分裂检测（split-brain），Master 仅按 priority/member 排序展示；M-LAG 不做一致性检查、DFS/双主检测、peer-link 故障隔离与静态/动态 MAC 同步。实验十七在接入交换机上 `stp disable`，符合 M-LAG 双归不依赖 STP 的常见做法。
+
+### D31（M8 补充）EVPN 用简化 Type-3 通告，F5 LTM 用 TCP 轮询与地址转换
+
+EVPN：交换机 `evpn enable` + `evpn peer <IP>`，每 2s 向 EVPN peer 通告本端 VTEP 与每个 VNI/VLAN（简化 Type-3），对端学习后写入 `evpn.routes` 并自动把 VTEP 加入 `vxlan.peers`；不需要静态 `vxlan peer`。不做真实 BGP EVPN 会话/Route Target/RT-2 MAC-IP/RT-5 IP Prefix/ARP 代理，数据面仍由 VXLAN 泛洪完成。EVPN 报文沿用广播 MAC 与 Underlay VLAN。
+
+F5 LTM：新增 `DeviceKind::LoadBalancer`（复用 RouterState），Device 增加 `ltm`（pool/virtual；会话瞬态）。`ltm pool NAME member IP PORT`、`ltm virtual NAME vip IP PORT pool NAME`；TCP 连接命中 VIP 时按池成员轮询选择，DNAT 到成员并记录会话，回程按会话把源地址改回 VIP；VIP 由本端口 MAC 应答 ARP。不做健康检查、持久化/源地址保持、SSL 卸载、iRules、SNAT pool、F5 tmsh 方言；仅 TCP 负载均衡（复用 D26 的 TCP 状态机）。
+
 ## 后果
 
 - 三方言首版交付慢一些（M0 即验证多方言架构），但 M1+ 平移成本递减。

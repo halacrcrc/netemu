@@ -4,7 +4,7 @@
 
 > 目标：覆盖 HCIA/HCIP/HCIE、CCNA/CCNP 等课程体系（数通 / 安全 / 无线 / 数据中心），对同一知识点**同时讲解思科、华为、华三的命令写法**，并提供从简单办公网到大型园区网、数据中心的在线练习场，附带笔记与进度追踪。
 
-## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4（OSPF/VRRP/IPv6/安全/QoS）✅ + M5（BGP/IS-IS/VRF/MPLS/route-policy/L3VPN + 园区实验）✅ + M6（防火墙/TCP/IPsec/SSL VPN）✅ + M7（AC/AP/CAPWAP/多 SSID/WPA3/漫游）✅
+## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4（OSPF/VRRP/IPv6/安全/QoS）✅ + M5（BGP/IS-IS/VRF/MPLS/route-policy/L3VPN + 园区实验）✅ + M6（防火墙/TCP/IPsec/SSL VPN）✅ + M7（AC/AP/CAPWAP/多 SSID/WPA3/漫游）✅ + M8（VXLAN/EVPN/堆叠/M-LAG/F5 LTM）✅
 
 **M0 = 可运行的骨架**：
 
@@ -91,7 +91,7 @@
 - **DHCP Snooping**：全局开关 + 信任端口；非信任口的 Offer/Ack 被丢弃，从 Request/Ack 学习绑定表（MAC/IP/VLAN/端口），`show ip dhcp snooping binding` / `display dhcp snooping user-binding`。
 - **端口安全**：最大 MAC 数、`restrict` / `shutdown` 违规动作、sticky 标记；超限帧丢弃与违规计数，`show/display port-security`。
 - **QoS 基础**：入方向广播风暴抑制（每秒广播上限）与令牌桶限速（kbps），显示丢弃/抑制计数；`storm-control` / `broadcast-suppression`、`rate-limit input` / `qos car|lr inbound cir`、`show/display storm-control|qos`。
-- **英文内容**：四篇课程、103 道题库、14 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
+- **英文内容**：四篇课程、103 道题库、19 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
 
 ### M5（BGP / IS-IS / VRF / MPLS / route-policy / L3VPN）
 
@@ -140,6 +140,19 @@
 
 **已验证**：131 个 Rust 测试全绿；实验十三 5/5、实验十四 9/9。
 
+### M8（VXLAN / EVPN / 堆叠 / IRF / M-LAG / F5 LTM）
+
+- **VTEP/VNI**：三层交换机作为 VTEP，`vxlan local <IP>`、`vxlan peer <IP>`、`vxlan vni <VNI> vlan <VLAN>`；`show/display vxlan` 展示本端 VTEP、对端与 VNI 映射。
+- **数据面**：本地 VLAN 的广播/未知单播按 VNI 封装为 VXLAN（外层 IP + 内层以太帧），对端 VTEP 解封装后按 VLAN 注入本地端口；同网段主机跨 DC 二层互通，抓包可见外层 VXLAN 帧。
+- **EVPN 控制面**：`evpn enable` + `evpn peer`，VTEP 周期性通告 VNI/VLAN 路由（简化 Type-3），对端自动学习远端 VTEP 并加入 `vxlan.peers`；`display evpn` 显示 EVPN 路由。实验十八验证不配静态 peer 也能跨 DC 通。
+- **堆叠/IRF/CSS**：`stack domain` + `stack member` + `stack priority`；同 domain 成员间链路视为内部 fabric，不参与 STP；一台逻辑设备跨成员二层转发，`display stack` 显示 Master/成员。
+- **M-LAG**：`mlag domain` + 接口 `mlag peer-link`；两台交换机共享系统 MAC（跨设备 LACP 呈现同一对端），peer-link 作为内部链路并做水平分割，接入交换机可 LACP 双归两台成员，双链路同时转发。
+- **F5 LTM**：新增 LoadBalancer 设备，`ltm pool NAME member IP PORT` 与 `ltm virtual NAME vip IP PORT pool NAME`；TCP 连接按轮询选择池成员，目的地址改为成员、回程源地址改回 VIP；`show/display ltm` 显示虚拟服务器/池/会话。
+- **实验十五「VXLAN 数据中心跨 DC 二层互通」**、**实验十六「堆叠/IRF」**、**实验十七「M-LAG」**、**实验十八「EVPN 控制面」**、**实验十九「F5 LTM」**。
+- 简化边界见 ADR D29/D30/D31（静态/简化 EVPN Type-3、无真实 BGP EVPN 属性/RT、堆叠/M-LAG 为共享 MAC+fabric、LTM 无健康检查/持久化/SSL 卸载）。
+
+**已验证**：139 个 Rust 测试全绿；实验十五 3/3、实验十六 3/3、实验十七 4/4、实验十八 3/3、实验十九 3/3。
+
 ## 本地开发
 
 ```bash
@@ -186,7 +199,7 @@ web/
 | M5 IE 数通 | BGP ✅（eBGP 单跳）、IS-IS ✅（单区域）、VRF ✅（静态）、MPLS ✅（静态 LSP）、route-policy ✅、MPLS L3VPN ✅、大型园区实验 ✅ | ✅ |
 | M6 安全方向 | 防火墙设备/安全区域/区域策略 ✅、ASA 安全级别 ✅、TCP 状态机 ✅、IPsec 站点 VPN ✅、SSL VPN ✅ | ✅ |
 | M7 无线方向 | AC/AP ✅、CAPWAP ✅、多 SSID ✅、WPA2/WPA3 ✅、无线 VLAN 隔离 ✅、漫游 ✅、实验十三/十四 ✅；信道/射频/802.1X/AP 冗余 | ✅ |
-| M8 数据中心 | 堆叠/IRF/CSS、M-LAG、VXLAN EVPN + DC 实验；F5 LTM 基础 | |
+| M8 数据中心 | VXLAN ✅、EVPN ✅、堆叠/IRF ✅、M-LAG ✅、F5 LTM ✅、实验十五~十九 ✅ | ✅ |
 | M9 打磨 | 大拓扑 Canvas 渲染、英文界面与内容（界面+课程/题库/实验文案 ✅）、社区内容贡献管线 | 进行中 |
 
 ## 部署（GitHub Pages）

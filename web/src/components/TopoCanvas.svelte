@@ -159,6 +159,7 @@
     Firewall: 'var(--firewall)',
     AccessPoint: 'var(--ap)',
     WlanController: 'var(--ac)',
+    LoadBalancer: 'var(--lb)',
   };
 
   const KIND_TEXT: Record<string, string> = {
@@ -168,6 +169,7 @@
     Firewall: 'left.firewall',
     AccessPoint: 'left.ap',
     WlanController: 'left.ac',
+    LoadBalancer: 'left.lb',
   };
 </script>
 
@@ -290,6 +292,9 @@
             <rect x={NODE_W / 2 - 13} y={14} width="26" height="18" rx="3" fill="none" stroke={KIND_COLOR[dev.kind]} stroke-width="2" />
             <circle cx={NODE_W / 2} cy={23} r="3" fill={KIND_COLOR[dev.kind]} />
             <path d="M {NODE_W / 2 - 8} 36 h16" stroke={KIND_COLOR[dev.kind]} stroke-width="2" />
+          {:else if dev.kind === 'LoadBalancer'}
+            <circle cx={NODE_W / 2} cy={25} r="12" fill="none" stroke={KIND_COLOR[dev.kind]} stroke-width="2" />
+            <path d="M {NODE_W / 2 - 7} 20 l14 10 M {NODE_W / 2 - 7} 30 l14 -10" stroke={KIND_COLOR[dev.kind]} stroke-width="1.6" />
           {:else}
             <rect x={NODE_W / 2 - 11} y={12} width="22" height="14" rx="2" fill="none" stroke={KIND_COLOR[dev.kind]} stroke-width="2" />
             <path d="M {NODE_W / 2 - 5} 32 h10 M {NODE_W / 2} 26 v6" stroke={KIND_COLOR[dev.kind]} stroke-width="2" fill="none" />

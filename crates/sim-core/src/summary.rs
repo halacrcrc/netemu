@@ -124,6 +124,21 @@ pub struct DevSummary {
     /// WLAN/CAPWAP 配置
     #[serde(default)]
     pub wlan: Option<WlanSummary>,
+    /// VXLAN 配置
+    #[serde(default)]
+    pub vxlan: Option<VxlanSummary>,
+    /// EVPN 控制面配置
+    #[serde(default)]
+    pub evpn: Option<EvpnSummary>,
+    /// F5 LTM 配置
+    #[serde(default)]
+    pub ltm: Option<LtmSummary>,
+    /// 堆叠/IRF 配置
+    #[serde(default)]
+    pub stack: Option<StackSummary>,
+    /// M-LAG 配置
+    #[serde(default)]
+    pub mlag: Option<MlagSummary>,
     /// IS-IS NET
     #[serde(default)]
     pub isis_net: Option<String>,
@@ -201,6 +216,52 @@ pub struct WlanProfileSummary {
     pub security: String,
     pub psk: Option<String>,
     pub vlan: VlanId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VxlanSummary {
+    pub local: Option<String>,
+    pub mappings: Vec<(u32, VlanId)>,
+    pub peers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvpnSummary {
+    pub enabled: bool,
+    pub peers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtmSummary {
+    pub pools: Vec<LtmPoolSummary>,
+    pub virtuals: Vec<LtmVirtualSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtmPoolSummary {
+    pub name: String,
+    pub members: Vec<(String, u16)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LtmVirtualSummary {
+    pub name: String,
+    pub vip: String,
+    pub port: u16,
+    pub pool: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackSummary {
+    pub domain: u16,
+    pub member: u8,
+    pub priority: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MlagSummary {
+    pub domain: u16,
+    pub peer_links: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -573,6 +634,72 @@ impl Net {
                     } else {
                         None
                     },
+                    stack: match &d.state {
+                        DeviceState::Switch(sw) => sw.stack.as_ref().map(|s| StackSummary {
+                            domain: s.domain,
+                            member: s.member,
+                            priority: s.priority,
+                        }),
+                        _ => None,
+                    },
+                    mlag: match &d.state {
+                        DeviceState::Switch(sw) => sw.mlag.as_ref().map(|m| MlagSummary {
+                            domain: m.domain,
+                            peer_links: m.peer_links.clone(),
+                        }),
+                        _ => None,
+                    },
+                    vxlan: match &d.state {
+                        DeviceState::Switch(sw)
+                            if !sw.vxlan.mappings.is_empty() || !sw.vxlan.peers.is_empty() =>
+                        {
+                            Some(VxlanSummary {
+                                local: sw.vxlan.local.map(ipv4_str),
+                                mappings: sw.vxlan.mappings.clone(),
+                                peers: sw.vxlan.peers.iter().map(|p| ipv4_str(*p)).collect(),
+                            })
+                        }
+                        _ => None,
+                    },
+                    evpn: match &d.state {
+                        DeviceState::Switch(sw) if sw.evpn.enabled || !sw.evpn.peers.is_empty() => {
+                            Some(EvpnSummary {
+                                enabled: sw.evpn.enabled,
+                                peers: sw.evpn.peers.iter().map(|p| ipv4_str(*p)).collect(),
+                            })
+                        }
+                        _ => None,
+                    },
+                    ltm: if d.kind == DeviceKind::LoadBalancer {
+                        Some(LtmSummary {
+                            pools: d
+                                .ltm
+                                .pools
+                                .iter()
+                                .map(|p| LtmPoolSummary {
+                                    name: p.name.clone(),
+                                    members: p
+                                        .members
+                                        .iter()
+                                        .map(|m| (ipv4_str(m.ip), m.port))
+                                        .collect(),
+                                })
+                                .collect(),
+                            virtuals: d
+                                .ltm
+                                .virtuals
+                                .iter()
+                                .map(|v| LtmVirtualSummary {
+                                    name: v.name.clone(),
+                                    vip: ipv4_str(v.vip),
+                                    port: v.port,
+                                    pool: v.pool.clone(),
+                                })
+                                .collect(),
+                        })
+                    } else {
+                        None
+                    },
                     isis_net: match &d.state {
                         DeviceState::Router(rs) => rs.isis.as_ref().map(|i| i.net.clone()),
                         _ => None,
@@ -687,6 +814,34 @@ impl Net {
             }
             if let (DeviceState::Host(h), Some(gw6)) = (&mut d.state, &ds.gw6) {
                 h.gw6 = sim_packets::ipv6_from_str(gw6);
+            }
+            if let Some(l) = &ds.ltm {
+                d.ltm.pools = l
+                    .pools
+                    .iter()
+                    .map(|p| LtmPool {
+                        name: p.name.clone(),
+                        members: p
+                            .members
+                            .iter()
+                            .filter_map(|(ip, port)| {
+                                ipv4_from_str(ip).map(|ip| LtmMember { ip, port: *port })
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                d.ltm.virtuals = l
+                    .virtuals
+                    .iter()
+                    .filter_map(|v| {
+                        ipv4_from_str(&v.vip).map(|vip| LtmVirtual {
+                            name: v.name.clone(),
+                            vip,
+                            port: v.port,
+                            pool: v.pool.clone(),
+                        })
+                    })
+                    .collect();
             }
             match &mut d.state {
                 DeviceState::Router(rs) => {
@@ -883,6 +1038,28 @@ impl Net {
                 }
                 DeviceState::Switch(sw) => {
                     sw.dhcp_snooping = ds.dhcp_snooping;
+                    if let Some(v) = &ds.vxlan {
+                        sw.vxlan.local = v.local.as_ref().and_then(|s| ipv4_from_str(s));
+                        sw.vxlan.mappings = v.mappings.clone();
+                        sw.vxlan.peers = v.peers.iter().filter_map(|p| ipv4_from_str(p)).collect();
+                    }
+                    if let Some(e) = &ds.evpn {
+                        sw.evpn.enabled = e.enabled;
+                        sw.evpn.peers = e.peers.iter().filter_map(|p| ipv4_from_str(p)).collect();
+                    }
+                    if let Some(s) = &ds.stack {
+                        sw.stack = Some(StackConfig {
+                            domain: s.domain,
+                            member: s.member,
+                            priority: s.priority,
+                        });
+                    }
+                    if let Some(m) = &ds.mlag {
+                        sw.mlag = Some(MlagConfig {
+                            domain: m.domain,
+                            peer_links: m.peer_links.clone(),
+                        });
+                    }
                     // 端口引用的 VLAN 需要登记进 VLAN 表
                     for ps in &ds.ports {
                         sw.ensure_vlan(ps.pvid);

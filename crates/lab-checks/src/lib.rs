@@ -104,6 +104,32 @@ pub enum CheckKind {
     WifiConnected { dev: DevId },
     /// 检查主机当前关联的 AP。
     WifiOnAp { dev: DevId, ap: DevId },
+    /// 检查 VXLAN VNI 与 VLAN 映射。
+    VxlanVni { dev: DevId, vlan: u16, vni: u32 },
+    /// 检查堆叠 domain/member。
+    StackMember { dev: DevId, domain: u16, member: u8 },
+    /// 检查 M-LAG domain。
+    MlagDomain { dev: DevId, domain: u16 },
+    /// 检查 EVPN 学到的远端 VTEP/VNI。
+    EvpnRoute {
+        dev: DevId,
+        vtep: Ipv4Addr,
+        vni: u32,
+    },
+    /// 检查 LTM 虚拟服务器。
+    LtmVirtual {
+        dev: DevId,
+        name: String,
+        vip: Ipv4Addr,
+        port: u16,
+    },
+    /// 发起 TCP 探测并检查结果。
+    TcpProbe {
+        from: DevId,
+        to: Ipv4Addr,
+        port: u16,
+        expect: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -564,6 +590,127 @@ fn run_one(eng: &mut Engine, c: &Check) -> CheckResult {
                 match current {
                     Some(a) => format!("当前关联 AP id={}", a),
                     None => "未关联任何 AP".into(),
+                },
+            )
+        }
+        CheckKind::VxlanVni { dev, vlan, vni } => {
+            let found = eng
+                .net
+                .device(*dev)
+                .map(|d| match &d.state {
+                    sim_core::device::DeviceState::Switch(sw) => sw
+                        .vxlan
+                        .mappings
+                        .iter()
+                        .any(|(v, vl)| *v == *vni && *vl == *vlan),
+                    _ => false,
+                })
+                .unwrap_or(false);
+            (
+                found,
+                if found {
+                    format!("VNI {} <-> VLAN {}", vni, vlan)
+                } else {
+                    format!("VNI {} <-> VLAN {} 未配置", vni, vlan)
+                },
+            )
+        }
+        CheckKind::StackMember {
+            dev,
+            domain,
+            member,
+        } => {
+            let found = eng.net.device(*dev).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Switch(sw) => sw
+                    .stack
+                    .as_ref()
+                    .map(|s| s.domain == *domain && s.member == *member)
+                    .filter(|ok| *ok),
+                _ => None,
+            });
+            (
+                found.is_some(),
+                if found.is_some() {
+                    format!("Stack domain {} member {}", domain, member)
+                } else {
+                    format!("Stack domain {} member {} 未配置", domain, member)
+                },
+            )
+        }
+        CheckKind::MlagDomain { dev, domain } => {
+            let found = eng.net.device(*dev).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Switch(sw) => sw
+                    .mlag
+                    .as_ref()
+                    .map(|m| m.domain == *domain)
+                    .filter(|ok| *ok),
+                _ => None,
+            });
+            (
+                found.is_some(),
+                if found.is_some() {
+                    format!("M-LAG domain {}", domain)
+                } else {
+                    format!("M-LAG domain {} 未配置", domain)
+                },
+            )
+        }
+        CheckKind::EvpnRoute { dev, vtep, vni } => {
+            let found = eng
+                .evpn_routes_of(*dev)
+                .into_iter()
+                .any(|r| r.vtep == *vtep && r.vni == *vni);
+            (
+                found,
+                if found {
+                    format!("EVPN 路由 {}/{} 已学习", ipv4_str(*vtep), vni)
+                } else {
+                    format!("EVPN 路由 {}/{} 未学习", ipv4_str(*vtep), vni)
+                },
+            )
+        }
+        CheckKind::LtmVirtual {
+            dev,
+            name,
+            vip,
+            port,
+        } => {
+            let found = eng.net.device(*dev).is_some_and(|d| {
+                d.ltm
+                    .virtuals
+                    .iter()
+                    .any(|v| v.name == *name && v.vip == *vip && v.port == *port)
+            });
+            (
+                found,
+                if found {
+                    format!("虚拟服务器 {} {}:{}", name, ipv4_str(*vip), port)
+                } else {
+                    format!("虚拟服务器 {} 未配置", name)
+                },
+            )
+        }
+        CheckKind::TcpProbe {
+            from,
+            to,
+            port,
+            expect,
+        } => {
+            eng.start_tcp_probe(*from, *to, *port);
+            eng.run_to_quiescence(PING_HORIZON_NS);
+            let opened = eng.net.device(*from).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Host(hs) => {
+                    hs.tcp_probes.last().and_then(|p| p.opened)
+                }
+                _ => None,
+            });
+            let ok = opened == Some(true);
+            (
+                ok == *expect,
+                if ok {
+                    format!("TCP {}:{} 连接成功", ipv4_str(*to), port)
+                } else {
+                    format!("TCP {}:{} 未建立", ipv4_str(*to), port)
                 },
             )
         }

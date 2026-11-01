@@ -174,6 +174,11 @@ fn show_branch() -> CNode {
                 .kid(CNode::lit("session", "SSL VPN sessions").run(cmd::show_sslvpn)),
         )
         .kid(CNode::lit("wlan", "WLAN information").run(cmd::show_wlan))
+        .kid(CNode::lit("vxlan", "VXLAN information").run(cmd::show_vxlan))
+        .kid(CNode::lit("evpn", "EVPN information").run(cmd::show_evpn))
+        .kid(CNode::lit("stack", "Stack information").run(cmd::show_stack))
+        .kid(CNode::lit("mlag", "M-LAG information").run(cmd::show_mlag))
+        .kid(CNode::lit("ltm", "LTM information").run(cmd::show_ltm))
         .kid(CNode::lit("spanning-tree", "Spanning tree topology").run(cmd::show_stp))
         .kid(CNode::lit("vrrp", "VRRP status").run(cmd::show_vrrp))
         .kid(CNode::lit("port-security", "Port security").run(cmd::show_port_security))
@@ -438,6 +443,75 @@ pub fn build() -> Trees {
                 .kid(CNode::lit("priority", "AP selection priority").kid(
                     CNode::param(ParamKind::Number, "priority", "0-255").run(cmd::wlan_priority),
                 )),
+            CNode::lit("vxlan", "VXLAN configuration")
+                .kid(
+                    CNode::lit("local", "Local VTEP")
+                        .kid(CNode::param(ParamKind::Ipv4, "ip", "VTEP IP").run(cmd::vxlan_local)),
+                )
+                .kid(
+                    CNode::lit("peer", "Remote VTEP")
+                        .kid(CNode::param(ParamKind::Ipv4, "ip", "Peer IP").run(cmd::vxlan_peer)),
+                )
+                .kid(CNode::lit("vni", "VNI mapping").kid(
+                    CNode::param(ParamKind::Number, "vni", "VNI").kid(
+                        CNode::lit("vlan", "Service VLAN").kid(
+                            CNode::param(ParamKind::Number, "vlan", "VLAN ID").run(cmd::vxlan_vni),
+                        ),
+                    ),
+                )),
+            CNode::lit("evpn", "EVPN control plane")
+                .kid(CNode::lit("enable", "Enable EVPN").run(cmd::evpn_enable))
+                .kid(
+                    CNode::lit("peer", "EVPN peer")
+                        .kid(CNode::param(ParamKind::Ipv4, "ip", "Peer VTEP").run(cmd::evpn_peer)),
+                ),
+            CNode::lit("ltm", "Local Traffic Manager")
+                .kid(
+                    CNode::lit("pool", "Server pool").kid(
+                        CNode::param(ParamKind::Word, "pool", "Pool name").kid(
+                            CNode::lit("member", "Pool member").kid(
+                                CNode::param(ParamKind::Ipv4, "ip", "Member IP").kid(
+                                    CNode::param(ParamKind::Number, "port", "Service port")
+                                        .run(cmd::ltm_pool_member),
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+                .kid(
+                    CNode::lit("virtual", "Virtual server").kid(
+                        CNode::param(ParamKind::Word, "name", "Virtual name").kid(
+                            CNode::lit("vip", "Virtual IP").kid(
+                                CNode::param(ParamKind::Ipv4, "vip", "VIP address").kid(
+                                    CNode::param(ParamKind::Number, "port", "Service port").kid(
+                                        CNode::lit("pool", "Pool name").kid(
+                                            CNode::param(ParamKind::Word, "pool", "Pool name")
+                                                .run(cmd::ltm_virtual),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            CNode::lit("stack", "Stack/IRF configuration")
+                .kid(CNode::lit("domain", "Stack domain").kid(
+                    CNode::param(ParamKind::Number, "domain", "Domain ID").run(cmd::stack_domain),
+                ))
+                .kid(CNode::lit("member", "Member ID").kid(
+                    CNode::param(ParamKind::Number, "member", "Member ID").run(cmd::stack_member),
+                ))
+                .kid(
+                    CNode::lit("priority", "Master priority").kid(
+                        CNode::param(ParamKind::Number, "priority", "Priority")
+                            .run(cmd::stack_priority),
+                    ),
+                ),
+            CNode::lit("mlag", "M-LAG configuration").kid(
+                CNode::lit("domain", "M-LAG domain").kid(
+                    CNode::param(ParamKind::Number, "domain", "Domain ID").run(cmd::mlag_domain),
+                ),
+            ),
             CNode::lit("capwap", "CAPWAP configuration").kid(
                 CNode::lit("ac", "Controller address")
                     .kid(CNode::param(ParamKind::Ipv4, "ip", "AC IP").run(cmd::capwap_ac)),
@@ -721,6 +795,10 @@ pub fn build() -> Trees {
                         ),
                     ),
                 ),
+            CNode::lit("mlag", "M-LAG interface").kid(
+                CNode::lit("peer-link", "Use this port as the M-LAG peer-link")
+                    .run(cmd::mlag_peer_link),
+            ),
             CNode::lit("zone-member", "Assign this interface to a security zone").kid(
                 CNode::lit("security", "Security zone").kid(
                     CNode::param(ParamKind::Word, "zone", "Zone name")

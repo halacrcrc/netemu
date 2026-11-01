@@ -29,6 +29,12 @@ export interface LabCheckDef {
     | { type: 'wlanSsid'; ac: string; ssid: string }
     | { type: 'wifiConnected'; dev: string }
     | { type: 'wifiOnAp'; dev: string; ap: string }
+    | { type: 'vxlanVni'; dev: string; vlan: number; vni: number }
+    | { type: 'stackMember'; dev: string; domain: number; member: number }
+    | { type: 'mlagDomain'; dev: string; domain: number }
+    | { type: 'evpnRoute'; dev: string; vtep: string; vni: number }
+    | { type: 'ltmVirtual'; dev: string; name: string; vip: string; port: number }
+    | { type: 'tcpProbe'; from: string; to: string; port: number; expect?: boolean }
     | {
         type: 'securityPolicy';
         dev: string;
@@ -207,6 +213,44 @@ export function runLabChecks(lab: LabDef): { label: string; passed: boolean; det
         out.push({ label: ck.label, passed: r.passed, detail: r.detail });
       } else if (ck.kind.type === 'routeExists') {
         const r = JSON.parse(sim.check_route(need(ck.kind.dev), ck.kind.net)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'evpnRoute') {
+        const r = JSON.parse(sim.check_evpn_route(need(ck.kind.dev), ck.kind.vtep, ck.kind.vni)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'ltmVirtual') {
+        const r = JSON.parse(
+          sim.check_ltm_virtual(need(ck.kind.dev), ck.kind.name, ck.kind.vip, ck.kind.port)
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'tcpProbe') {
+        const r = JSON.parse(
+          sim.check_tcp_probe(
+            need(ck.kind.from),
+            ck.kind.to,
+            ck.kind.port,
+            ck.kind.expect !== false
+          )
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'stackMember') {
+        const r = JSON.parse(
+          sim.check_stack_member(need(ck.kind.dev), ck.kind.domain, ck.kind.member)
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'mlagDomain') {
+        const r = JSON.parse(sim.check_mlag_domain(need(ck.kind.dev), ck.kind.domain)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'vxlanVni') {
+        const r = JSON.parse(sim.check_vxlan_vni(need(ck.kind.dev), ck.kind.vlan, ck.kind.vni)) as {
           passed: boolean;
           detail: string;
         };
@@ -1022,7 +1066,227 @@ export const lab14: LabDef = {
   },
 };
 
-export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12, lab13, lab14];
+// ---------- 实验十五：VXLAN 数据中心跨 DC 二层互通 ----------
+
+export const lab15: LabDef = {
+  id: 'vxlan-dc',
+  title: '实验十五 · VXLAN 数据中心跨 DC 二层互通',
+  brief:
+    '两台数据中心交换机作为 VTEP，通过 VXLAN 把本地 VLAN10 映射到 VNI 10000，在 L3 Underlay 上实现跨 DC 的二层延伸。H1/H2 同网段但位于不同机房，仍可直接互通。',
+  tasks: [
+    'DSW1：vlan batch 10 100；G0/0/1 接 H1 access VLAN10；G0/0/2 接 DSW2 access VLAN100',
+    'DSW1：interface vlanif 100 → ip address 10.0.0.1 24 → undo shutdown',
+    'DSW1：vxlan local 10.0.0.1 → vxlan vni 10000 vlan 10 → vxlan peer 10.0.0.2',
+    'DSW2：vlan batch 10 100；G0/0/1 接 DSW1 access VLAN100；G0/0/2 接 H2 access VLAN10',
+    'DSW2：interface vlanif 100 → ip address 10.0.0.2 24 → undo shutdown',
+    'DSW2：vxlan local 10.0.0.2 → vxlan vni 10000 vlan 10 → vxlan peer 10.0.0.1',
+    'display vxlan 应看到 VNI 10000 <-> VLAN10 与对端 VTEP；H1 ping 192.168.10.20 应通',
+    '（抓包可见 VXLAN 外层报文，内层为原始以太帧）',
+  ],
+  checks: [
+    { label: 'DSW1 配置 VNI 10000 ↔ VLAN10', kind: { type: 'vxlanVni', dev: 'DSW1', vlan: 10, vni: 10000 } },
+    { label: 'DSW2 配置 VNI 10000 ↔ VLAN10', kind: { type: 'vxlanVni', dev: 'DSW2', vlan: 10, vni: 10000 } },
+    { label: 'H1 → H2 跨 DC 二层互通', kind: { type: 'ping', from: 'H1', to: '192.168.10.20' } },
+  ],
+  build: (sim) => {
+    const h1 = sim.add_device('Host', 'Ios');
+    const d1 = sim.add_device('Switch', 'Vrp');
+    const d2 = sim.add_device('Switch', 'Vrp');
+    const h2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(h1, 'H1');
+    sim.rename_device(d1, 'DSW1');
+    sim.rename_device(d2, 'DSW2');
+    sim.rename_device(h2, 'H2');
+    sim.add_link(h1, d1); // DSW1 p0
+    sim.add_link(d1, d2); // DSW1 p1 / DSW2 p0
+    sim.add_link(d2, h2); // DSW2 p1
+    sim.set_host_config(h1, '192.168.10.10', 24, '');
+    sim.set_host_config(h2, '192.168.10.20', 24, '');
+    setPosition(h1, { x: 60, y: 90 });
+    setPosition(d1, { x: 270, y: 90 });
+    setPosition(d2, { x: 500, y: 90 });
+    setPosition(h2, { x: 710, y: 90 });
+  },
+};
+
+// ---------- 实验十六：堆叠 / IRF ----------
+
+export const lab16: LabDef = {
+  id: 'stack-irf',
+  title: '实验十六 · 堆叠 / IRF（多交换机一台逻辑设备）',
+  brief:
+    '两台交换机配置同一 stack domain，成为一台逻辑交换机：成员间链路视为内部 fabric，不参与 STP 阻塞；两台成员下的 PC 在同一 VLAN 内互通。',
+  tasks: [
+    'SW1：stack domain 10 → stack member 1 → stack priority 200',
+    'SW2：stack domain 10 → stack member 2 → stack priority 100',
+    'SW1/SW2：vlan batch 10；各自接 PC 的口配 access VLAN10',
+    'SW1/SW2：互联口配 trunk 并 allow-pass vlan 10',
+    'display stack：应看到 domain 10、两个成员，SW1 为 Master',
+    'PC1 ping 192.168.10.12 应通（跨堆叠成员二层转发）',
+  ],
+  checks: [
+    { label: 'SW1 是 stack domain 10 的成员 1', kind: { type: 'stackMember', dev: 'SW1', domain: 10, member: 1 } },
+    { label: 'SW2 是 stack domain 10 的成员 2', kind: { type: 'stackMember', dev: 'SW2', domain: 10, member: 2 } },
+    { label: 'PC1 → PC2 跨堆叠成员连通', kind: { type: 'ping', from: 'PC1', to: '192.168.10.12' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const sw1 = sim.add_device('Switch', 'Vrp');
+    const sw2 = sim.add_device('Switch', 'Vrp');
+    const pc2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(sw1, 'SW1');
+    sim.rename_device(sw2, 'SW2');
+    sim.rename_device(pc2, 'PC2');
+    sim.add_link(pc1, sw1); // SW1 p0
+    sim.add_link(sw1, sw2); // SW1 p1 / SW2 p0 stack link
+    sim.add_link(sw2, pc2); // SW2 p1
+    sim.set_host_config(pc1, '192.168.10.11', 24, '');
+    sim.set_host_config(pc2, '192.168.10.12', 24, '');
+    setPosition(pc1, { x: 60, y: 90 });
+    setPosition(sw1, { x: 260, y: 90 });
+    setPosition(sw2, { x: 480, y: 90 });
+    setPosition(pc2, { x: 680, y: 90 });
+  },
+};
+
+// ---------- 实验十七：M-LAG 跨设备链路聚合 ----------
+
+export const lab17: LabDef = {
+  id: 'mlag-dc',
+  title: '实验十七 · M-LAG 跨设备链路聚合',
+  brief:
+    '两台 DSW 组成 M-LAG 对：共享同一系统 MAC，接入交换机 SW1 用 LACP 双归到两台 DSW，两条链路同时转发；DSW 间 peer-link 负责跨设备转发。',
+  tasks: [
+    'SW1：vlan batch 10 → stp disable（M-LAG 双归不依赖 STP）',
+    'SW1：G0/0/1 接 PC1 access VLAN10；G0/0/2、G0/0/3 接 DSW1/DSW2 配 trunk allow-pass vlan 10',
+    'SW1：interface eth-trunk 1 → mode lacp-static → G0/0/2、G0/0/3 分别 eth-trunk 1',
+    'DSW1/DSW2：vlan batch 10；mlag domain 1；G0/0/1 接 SW1 trunk allow-pass vlan 10；G0/0/2 互连 trunk allow-pass vlan 10 并 mlag peer-link',
+    'DSW1/DSW2：interface eth-trunk 1 → mode lacp-static → G0/0/1 加入 eth-trunk 1',
+    'DSW2：G0/0/3 接 PC2 access VLAN10',
+    'display mlag 应看到 domain 1 与共享 System MAC；SW1 display eth-trunk 1 应选中 2 个成员',
+    'PC1 ping 192.168.10.12 应通（双归链路同时转发）',
+  ],
+  checks: [
+    { label: 'DSW1 配置 M-LAG domain 1', kind: { type: 'mlagDomain', dev: 'DSW1', domain: 1 } },
+    { label: 'DSW2 配置 M-LAG domain 1', kind: { type: 'mlagDomain', dev: 'DSW2', domain: 1 } },
+    { label: 'SW1 双归 LACP 选中 2 个成员', kind: { type: 'lagSelected', dev: 'SW1', group: 1, count: 2 } },
+    { label: 'PC1 → PC2 经 M-LAG 连通', kind: { type: 'ping', from: 'PC1', to: '192.168.10.12' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const sw1 = sim.add_device('Switch', 'Vrp');
+    const d1 = sim.add_device('Switch', 'Vrp');
+    const d2 = sim.add_device('Switch', 'Vrp');
+    const pc2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(sw1, 'SW1');
+    sim.rename_device(d1, 'DSW1');
+    sim.rename_device(d2, 'DSW2');
+    sim.rename_device(pc2, 'PC2');
+    sim.add_link(pc1, sw1); // SW1 p0
+    sim.add_link(sw1, d1); // SW1 p1 / DSW1 p0
+    sim.add_link(sw1, d2); // SW1 p2 / DSW2 p0
+    sim.add_link(d1, d2); // DSW1 p1 / DSW2 p1 peer-link
+    sim.add_link(d2, pc2); // DSW2 p2
+    sim.set_host_config(pc1, '192.168.10.11', 24, '');
+    sim.set_host_config(pc2, '192.168.10.12', 24, '');
+    setPosition(pc1, { x: 40, y: 60 });
+    setPosition(sw1, { x: 230, y: 140 });
+    setPosition(d1, { x: 450, y: 50 });
+    setPosition(d2, { x: 450, y: 230 });
+    setPosition(pc2, { x: 660, y: 230 });
+  },
+};
+
+// ---------- 实验十八：EVPN 控制面自动发现 VTEP ----------
+
+export const lab18: LabDef = {
+  id: 'evpn-dc',
+  title: '实验十八 · EVPN 控制面（自动发现 VTEP）',
+  brief:
+    '两台 VTEP 不再手工指定 vxlan peer，而是通过 EVPN 路由通告（简化 Type-3）互相学习远端 VTEP 与 VNI，数据面自动建立 VXLAN 隧道。',
+  tasks: [
+    'DSW1/DSW2：按实验十五配置 VLAN10/100、Underlay SVI 10.0.0.1/2、VXLAN local 与 VNI 10000 ↔ VLAN10',
+    'DSW1：evpn enable → evpn peer 10.0.0.2（不要再配静态 vxlan peer）',
+    'DSW2：evpn enable → evpn peer 10.0.0.1',
+    'display evpn：应看到对端 VTEP 与 VNI 10000 路由（由 EVPN 自动学习）',
+    'display vxlan：Peers 中应自动出现远端 VTEP',
+    'H1 ping 192.168.10.20 应通（数据面自动使用学习到的 VTEP）',
+  ],
+  checks: [
+    { label: 'DSW1 学到 DSW2 的 EVPN 路由', kind: { type: 'evpnRoute', dev: 'DSW1', vtep: '10.0.0.2', vni: 10000 } },
+    { label: 'DSW2 学到 DSW1 的 EVPN 路由', kind: { type: 'evpnRoute', dev: 'DSW2', vtep: '10.0.0.1', vni: 10000 } },
+    { label: 'H1 → H2 经 EVPN 自动 VTEP 连通', kind: { type: 'ping', from: 'H1', to: '192.168.10.20' } },
+  ],
+  build: (sim) => {
+    const h1 = sim.add_device('Host', 'Ios');
+    const d1 = sim.add_device('Switch', 'Vrp');
+    const d2 = sim.add_device('Switch', 'Vrp');
+    const h2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(h1, 'H1');
+    sim.rename_device(d1, 'DSW1');
+    sim.rename_device(d2, 'DSW2');
+    sim.rename_device(h2, 'H2');
+    sim.add_link(h1, d1);
+    sim.add_link(d1, d2);
+    sim.add_link(d2, h2);
+    sim.set_host_config(h1, '192.168.10.10', 24, '');
+    sim.set_host_config(h2, '192.168.10.20', 24, '');
+    setPosition(h1, { x: 60, y: 90 });
+    setPosition(d1, { x: 270, y: 90 });
+    setPosition(d2, { x: 500, y: 90 });
+    setPosition(h2, { x: 710, y: 90 });
+  },
+};
+
+// ---------- 实验十九：F5 LTM 负载均衡 ----------
+
+export const lab19: LabDef = {
+  id: 'f5-ltm',
+  title: '实验十九 · F5 LTM 负载均衡',
+  brief:
+    'F5 负载均衡器对外提供 VIP 10.0.0.100:80，后端池有两台服务器。客户端 TCP 连接 VIP，LTM 轮询选择成员并做目的/源地址转换，回程由 VIP 返回。',
+  tasks: [
+    'LB1：G0/0/0 接客户端 10.0.0.1/24；G0/0/1 接 SRV1 10.0.1.1/24；G0/0/2 接 SRV2 10.0.2.1/24，均 undo shutdown',
+    'LB1：ltm pool WEB member 10.0.1.10 80',
+    'LB1：ltm pool WEB member 10.0.2.11 80',
+    'LB1：ltm virtual VS vip 10.0.0.100 80 pool WEB',
+    'display ltm：应看到 VS → WEB，池内两个成员',
+    'PC1：tcp 10.0.0.100 80 连续执行两次，两次都应“连接成功”',
+    'display ltm：Sessions 中应出现两条会话，分别指向不同成员（轮询）',
+  ],
+  checks: [
+    {
+      label: 'LB1 虚拟服务器 VS = 10.0.0.100:80',
+      kind: { type: 'ltmVirtual', dev: 'LB1', name: 'VS', vip: '10.0.0.100', port: 80 },
+    },
+    { label: 'PC1 第一次连接 VIP 成功', kind: { type: 'tcpProbe', from: 'PC1', to: '10.0.0.100', port: 80 } },
+    { label: 'PC1 第二次连接 VIP 成功', kind: { type: 'tcpProbe', from: 'PC1', to: '10.0.0.100', port: 80 } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const lb = sim.add_device('LoadBalancer', 'Vrp');
+    const s1 = sim.add_device('Host', 'Ios');
+    const s2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(lb, 'LB1');
+    sim.rename_device(s1, 'SRV1');
+    sim.rename_device(s2, 'SRV2');
+    sim.add_link(pc1, lb); // LB1 p0
+    sim.add_link(lb, s1); // LB1 p1
+    sim.add_link(lb, s2); // LB1 p2
+    sim.set_host_config(pc1, '10.0.0.10', 24, '10.0.0.1');
+    sim.set_host_config(s1, '10.0.1.10', 24, '10.0.1.1');
+    sim.set_host_config(s2, '10.0.2.11', 24, '10.0.2.1');
+    setPosition(pc1, { x: 60, y: 90 });
+    setPosition(lb, { x: 300, y: 90 });
+    setPosition(s1, { x: 560, y: 30 });
+    setPosition(s2, { x: 560, y: 180 });
+  },
+};
+
+export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12, lab13, lab14, lab15, lab16, lab17, lab18, lab19];
 
 // 合并英文文案
 for (const l of LABS) {

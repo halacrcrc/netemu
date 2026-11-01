@@ -335,6 +335,37 @@ pub enum L3 {
     Ipsec(IpsecPacket),
     /// CAPWAP（简化：AP 发现/加入、AC 下发 WLAN 配置）
     Capwap(CapwapPacket),
+    /// VXLAN（EVPN 数据面简化：VNI + 内层以太帧）
+    Vxlan(VxlanPacket),
+    /// EVPN 控制面（简化 Type-3：VTEP + VNI 路由）
+    Evpn(EvpnPacket),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvpnPacket {
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub vtep_ip: Ipv4Addr,
+    pub vni: u32,
+    pub vlan: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VxlanPayload {
+    Ipv4(Ipv4Packet),
+    Arp(ArpPacket),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VxlanPacket {
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub ttl: u8,
+    pub vni: u32,
+    pub inner_src: Mac,
+    pub inner_dst: Mac,
+    pub inner_vlan: Option<u16>,
+    pub payload: VxlanPayload,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,6 +647,8 @@ impl EthernetFrame {
             L3::Tcp(_) => 20 + 20 + 8,
             L3::Ipsec(_) => 20 + 20 + ICMP_DATA_SIZE + 20,
             L3::Capwap(_) => 20 + 8 + 64 + 2,
+            L3::Vxlan(_) => 20 + 8 + 8 + 14 + 4 + 20 + ICMP_DATA_SIZE,
+            L3::Evpn(_) => 20 + 16,
         };
         14 + payload + 4 + if self.vlan.is_some() { 4 } else { 0 }
     }

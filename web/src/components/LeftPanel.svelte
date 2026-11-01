@@ -9,7 +9,13 @@
 
   (window as unknown as { __appComp?: unknown }).__appComp = app;
   let newKind = $state<
-    'Router' | 'Switch' | 'Host' | 'Firewall' | 'AccessPoint' | 'WlanController'
+    | 'Router'
+    | 'Switch'
+    | 'Host'
+    | 'Firewall'
+    | 'AccessPoint'
+    | 'WlanController'
+    | 'LoadBalancer'
   >('Router');
   let newDialect = $state<'Ios' | 'Vrp' | 'Comware'>('Ios');
 
@@ -338,6 +344,7 @@
         <option value="Firewall">{t('left.firewall')}</option>
         <option value="AccessPoint">{t('left.ap')}</option>
         <option value="WlanController">{t('left.ac')}</option>
+        <option value="LoadBalancer">{t('left.lb')}</option>
       </select>
       {#if newKind !== 'Host'}
         <select bind:value={newDialect}>
