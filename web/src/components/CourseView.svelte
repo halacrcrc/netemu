@@ -9,6 +9,19 @@
   import { LABS, labTitle } from '../lib/labs';
   let currentId = $state(LESSONS[0]?.id ?? '');
   const current = $derived(LESSONS.find((l) => l.id === currentId) ?? LESSONS[0]);
+
+  const LEVELS = [
+    { id: 'IA', key: 'course.level.ia' },
+    { id: 'IP', key: 'course.level.ip' },
+    { id: 'IE', key: 'course.level.ie' },
+    { id: 'MAP', key: 'course.level.map' },
+  ] as const;
+  const groups = $derived(
+    LEVELS.map((lv) => ({
+      ...lv,
+      lessons: LESSONS.filter((l) => l.level === lv.id),
+    })).filter((g) => g.lessons.length > 0)
+  );
   const html = $derived(
     current ? renderMarkdown(lessonMarkdown(current, i18n.lang === 'en')) : ''
   );
@@ -52,11 +65,18 @@
   <aside class="list panel">
     <h3>{t('course.catalog')}</h3>
     <div class="pad lessons">
-      {#each LESSONS as l (l.id)}
-        <button class="lesson" class:active={l.id === currentId} onclick={() => (currentId = l.id)}>
-          <span class="no">{String(l.order).padStart(2, '0')}</span>
-          {lessonTitle(l, i18n.lang === 'en')}
-        </button>
+      {#each groups as g (g.id)}
+        <div class="level-head">
+          <span class="level-badge">{g.id}</span>
+          {t(g.key)}
+          <span class="level-count">{g.lessons.length}</span>
+        </div>
+        {#each g.lessons as l (l.id)}
+          <button class="lesson" class:active={l.id === currentId} onclick={() => (currentId = l.id)}>
+            <span class="no">{String(l.order).padStart(2, '0')}</span>
+            {lessonTitle(l, i18n.lang === 'en')}
+          </button>
+        {/each}
       {/each}
     </div>
   </aside>
@@ -126,6 +146,31 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    padding: 10px;
+  }
+  .level-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 2px 2px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .level-head:first-child {
+    margin-top: 0;
+  }
+  .level-badge {
+    font-family: Consolas, monospace;
+    font-size: 11px;
+    padding: 1px 5px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    color: var(--accent);
+  }
+  .level-count {
+    margin-left: auto;
+    font-family: Consolas, monospace;
+    opacity: 0.7;
   }
   .lesson {
     text-align: left;
@@ -152,14 +197,23 @@
     overflow-y: auto;
     max-height: 100%;
   }
+  .lesson-card .pad {
+    padding: 20px 26px 24px;
+  }
   .lesson-title {
-    margin: 0 0 8px;
+    margin: 0 0 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
     font-size: 22px;
   }
   .lab-open {
-    margin-top: 14px;
+    margin-top: 18px;
+    width: 100%;
+    white-space: normal;
+    text-align: left;
   }
   .table-wrap {
+    padding: 0 16px 16px;
     overflow-x: auto;
   }
   .cmd-table {

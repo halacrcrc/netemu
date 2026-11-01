@@ -1,6 +1,7 @@
 ---
 title: ACL 与 NAT：守门与翻译
 order: 4
+level: IA
 topic: acl
 lab: enterprise
 ---

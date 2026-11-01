@@ -1,6 +1,7 @@
 ---
 title: DHCP：地址自动分发
 order: 3
+level: IA
 topic: dhcp
 lab: enterprise
 ---

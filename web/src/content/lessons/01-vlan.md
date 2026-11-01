@@ -1,6 +1,7 @@
 ---
 title: VLAN 与 Trunk：广播域的隔离
 order: 1
+level: IA
 topic: vlan
 lab: office-l2
 ---

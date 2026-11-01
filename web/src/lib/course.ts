@@ -1,10 +1,14 @@
 // 课程内容：课程列表 + frontmatter + Markdown 加载。
 
+export type LessonLevel = 'IA' | 'IP' | 'IE' | 'MAP';
+
 export interface Lesson {
   id: string;
   title: string;
   order: number;
   topic: string;
+  /** 课程分级：IA 初级 / IP 中级 / IE 高级 */
+  level: LessonLevel;
   /** 关联实验 id（labs.ts） */
   lab: string | null;
   md: string;
@@ -33,7 +37,8 @@ function parseFrontmatter(md: string): { meta: Record<string, string>; body: str
   for (const line of m[1].split(/\r?\n/)) {
     const kv = line.split(':');
     if (kv.length >= 2) {
-      meta[kv[0].trim()] = kv.slice(1).join(':').trim();
+      const value = kv.slice(1).join(':').trim();
+      meta[kv[0].trim()] = value.replace(/^(["'])(.*)\1$/, '$2');
     }
   }
   return { meta, body: md.slice(m[0].length) };
@@ -43,11 +48,14 @@ export const LESSONS: Lesson[] = Object.entries(files)
   .map(([path, raw]) => {
     const { meta, body } = parseFrontmatter(raw);
     const id = path.split('/').pop()?.replace(/\.md$/, '') ?? path;
+    const level: LessonLevel =
+      meta.level === 'IP' || meta.level === 'IE' || meta.level === 'MAP' ? meta.level : 'IA';
     return {
       id,
       title: meta.title ?? id,
       order: Number(meta.order ?? 99),
       topic: meta.topic ?? '',
+      level,
       lab: meta.lab || null,
       md: body,
       titleEn: null,

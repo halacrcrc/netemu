@@ -1,6 +1,7 @@
 ---
 title: STP：有冗余，无环路
 order: 2
+level: IA
 topic: stp
 lab: stp-redundancy
 ---

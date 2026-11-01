@@ -1,14 +1,29 @@
 // 三厂商命令对照表（单一数据源）。
 // 每行都会在运行时经 wasm 的 verify_command 校验——保证表格与模拟器行为一致。
 
-import type { TopicId } from './questions';
-
-export type CmdMode = 'Exec' | 'Priv' | 'Config' | 'If' | 'Pool' | 'Acl';
+export type CmdMode =
+  | 'Exec'
+  | 'Priv'
+  | 'Config'
+  | 'If'
+  | 'Pool'
+  | 'Acl'
+  | 'Line'
+  | 'Aaa'
+  | 'Mst'
+  | 'Ospf'
+  | 'OspfArea'
+  | 'Bgp'
+  | 'RoutePolicy'
+  | 'Zone'
+  | 'SecurityPolicy'
+  | 'SecurityRule'
+  | 'Ipsec';
 
 export interface CmdRow {
   /** 功能描述 */
   feature: string;
-  topic: TopicId;
+  topic: string;
   /** 模拟器支持的三方言写法（示例参数按常用拓扑填写） */
   ios: string;
   vrp: string;
@@ -62,4 +77,153 @@ export const CMDMAP: CmdRow[] = [
   { feature: '标记 NAT 外口', topic: 'nat', ios: 'ip nat outside', vrp: 'nat outbound', comware: 'nat outbound', mode: 'If' },
   { feature: '静态 NAT', topic: 'nat', ios: 'ip nat inside source static 192.168.1.100 202.100.1.50', vrp: 'nat static global 202.100.1.50 inside 192.168.1.100', comware: 'nat static global 202.100.1.50 inside 192.168.1.100', mode: 'Config' },
   { feature: '查看转换表', topic: 'nat', ios: 'show ip nat translations', vrp: 'display nat session', comware: 'display nat session', mode: 'Exec' },
+
+  // OSPF / VRRP
+  { feature: '启动 OSPF 进程', topic: 'ospf', ios: 'router ospf 1', vrp: 'ospf 1', comware: 'ospf 1', mode: 'Config' },
+  {
+    feature: '宣告网段（区域 0）',
+    topic: 'ospf',
+    ios: 'network 10.1.0.0 0.0.0.3 area 0',
+    vrp: 'network 10.1.0.0 0.0.0.3',
+    comware: 'network 10.1.0.0 0.0.0.3',
+    mode: 'Ospf',
+    modeVrp: 'OspfArea',
+    modeComware: 'OspfArea',
+  },
+  { feature: '查看 OSPF 邻居', topic: 'ospf', ios: 'show ip ospf neighbor', vrp: 'display ospf peer', comware: 'display ospf peer', mode: 'Exec' },
+  { feature: 'VRRP 虚拟 IP', topic: 'ospf', ios: 'vrrp 1 ip 10.0.0.1', vrp: 'vrrp vrid 1 virtual-ip 10.0.0.1', comware: 'vrrp vrid 1 virtual-ip 10.0.0.1', mode: 'If' },
+  { feature: 'VRRP 优先级', topic: 'ospf', ios: 'vrrp 1 priority 200', vrp: 'vrrp vrid 1 priority 200', comware: 'vrrp vrid 1 priority 200', mode: 'If' },
+  { feature: '查看 VRRP 状态', topic: 'ospf', ios: 'show vrrp', vrp: 'display vrrp', comware: 'display vrrp', mode: 'Exec' },
+
+  // BGP / route-policy
+  { feature: '启动 BGP 进程', topic: 'bgp', ios: 'router bgp 65001', vrp: 'bgp 65001', comware: 'bgp 65001', mode: 'Config' },
+  { feature: '配置 BGP 邻居', topic: 'bgp', ios: 'neighbor 10.0.0.2 remote-as 65002', vrp: 'peer 10.0.0.2 as-number 65002', comware: 'peer 10.0.0.2 as-number 65002', mode: 'Bgp' },
+  { feature: '宣告 BGP 网段', topic: 'bgp', ios: 'network 192.168.1.0 mask 255.255.255.0', vrp: 'network 192.168.1.0 255.255.255.0', comware: 'network 192.168.1.0 255.255.255.0', mode: 'Bgp' },
+  { feature: '创建路由策略', topic: 'bgp', ios: 'route-map FILTER deny 10', vrp: 'route-policy FILTER deny node 10', comware: 'route-policy FILTER deny node 10', mode: 'Config' },
+  { feature: '策略匹配 ACL', topic: 'bgp', ios: 'match ip address 2000', vrp: 'if-match acl 2000', comware: 'if-match acl 2000', mode: 'RoutePolicy' },
+  { feature: '设置 Local-Pref', topic: 'bgp', ios: 'set local-preference 200', vrp: 'apply local-preference 200', comware: 'apply local-preference 200', mode: 'RoutePolicy' },
+  {
+    feature: '邻居应用策略（入）',
+    topic: 'bgp',
+    ios: 'neighbor 10.0.0.1 route-map FILTER in',
+    vrp: 'peer 10.0.0.1 route-policy FILTER import',
+    comware: 'peer 10.0.0.1 route-policy FILTER import',
+    mode: 'Bgp',
+  },
+  { feature: '查看 BGP 路由', topic: 'bgp', ios: 'show ip bgp', vrp: 'display bgp routing-table', comware: 'display bgp routing-table', mode: 'Exec' },
+  { feature: '查看路由策略', topic: 'bgp', ios: 'show route-map', vrp: 'display route-policy', comware: 'display route-policy', mode: 'Exec' },
+
+  // VRF / MPLS
+  { feature: '创建 VRF', topic: 'mpls', ios: 'vrf definition CUST1', vrp: 'ip vpn-instance CUST1', comware: 'ip vpn-instance CUST1', mode: 'Config' },
+  { feature: '接口绑定 VRF', topic: 'mpls', ios: 'ip vrf forwarding CUST1', vrp: 'ip binding vpn-instance CUST1', comware: 'ip binding vpn-instance CUST1', mode: 'If' },
+  {
+    feature: '静态 LSP（入口）',
+    topic: 'mpls',
+    ios: 'mpls static-lsp ingress to-ce2 destination 192.168.2.0 24 nexthop 10.0.0.2 out-label 100',
+    vrp: 'static-lsp ingress to-ce2 destination 192.168.2.0 24 nexthop 10.0.0.2 out-label 100',
+    comware: 'static-lsp ingress to-ce2 destination 192.168.2.0 24 nexthop 10.0.0.2 out-label 100',
+    mode: 'Config',
+  },
+  {
+    feature: '静态 LSP（中转）',
+    topic: 'mpls',
+    ios: 'mpls static-lsp transit t1 incoming-label 100 nexthop 10.0.1.2 out-label 200',
+    vrp: 'static-lsp transit t1 incoming-label 100 nexthop 10.0.1.2 out-label 200',
+    comware: 'static-lsp transit t1 incoming-label 100 nexthop 10.0.1.2 out-label 200',
+    mode: 'Config',
+  },
+  { feature: '查看 LSP', topic: 'mpls', ios: 'show mpls lsp', vrp: 'display mpls lsp', comware: 'display mpls lsp', mode: 'Exec' },
+  { feature: '查看 VRF 路由表', topic: 'mpls', ios: 'show ip route vrf CUST1', vrp: 'display ip routing-table vpn-instance CUST1', comware: 'display ip routing-table vpn-instance CUST1', mode: 'Exec' },
+
+  // 防火墙
+  { feature: '创建安全区域', topic: 'security', ios: 'zone security trust', vrp: 'firewall zone trust', comware: 'firewall zone trust', mode: 'Config' },
+  {
+    feature: '接口划入区域',
+    topic: 'security',
+    ios: 'zone-member security trust',
+    vrp: 'add interface g0/0/0',
+    comware: 'add interface g0/0/0',
+    mode: 'If',
+    modeVrp: 'Zone',
+    modeComware: 'Zone',
+  },
+  { feature: '创建区域间策略', topic: 'security', ios: 'zone-pair security ZP', vrp: 'security-policy', comware: 'security-policy', mode: 'Config' },
+  { feature: '策略源区域', topic: 'security', ios: 'source trust', vrp: 'source-zone trust', comware: 'source-zone trust', mode: 'SecurityRule' },
+  { feature: '策略目的区域', topic: 'security', ios: 'destination untrust', vrp: 'destination-zone untrust', comware: 'destination-zone untrust', mode: 'SecurityRule' },
+  { feature: '策略动作', topic: 'security', ios: 'action permit', vrp: 'action permit', comware: 'action permit', mode: 'SecurityRule' },
+  { feature: '查看安全区域', topic: 'security', ios: 'show zone security', vrp: 'display firewall zone', comware: 'display security-zone', mode: 'Exec' },
+  { feature: '查看安全策略', topic: 'security', ios: 'show zone-pair security', vrp: 'display security-policy', comware: 'display security-policy', mode: 'Exec' },
+
+  // IPsec / SSL VPN
+  {
+    feature: '创建 IPsec 隧道',
+    topic: 'ipsec',
+    ios: 'ipsec tunnel T1 local 10.0.0.1 remote 10.0.0.2',
+    vrp: 'ipsec tunnel T1 local 10.0.0.1 remote 10.0.0.2',
+    comware: 'ipsec tunnel T1 local 10.0.0.1 remote 10.0.0.2',
+    mode: 'Config',
+  },
+  { feature: '本地保护子网', topic: 'ipsec', ios: 'local-subnet 192.168.1.0 24', vrp: 'local-subnet 192.168.1.0 24', comware: 'local-subnet 192.168.1.0 24', mode: 'Ipsec' },
+  { feature: '远端保护子网', topic: 'ipsec', ios: 'remote-subnet 192.168.2.0 24', vrp: 'remote-subnet 192.168.2.0 24', comware: 'remote-subnet 192.168.2.0 24', mode: 'Ipsec' },
+  { feature: '查看 IPsec 隧道', topic: 'ipsec', ios: 'show ipsec tunnel', vrp: 'display ipsec tunnel', comware: 'display ipsec tunnel', mode: 'Exec' },
+  { feature: 'SSL VPN 虚拟地址池', topic: 'sslvpn', ios: 'sslvpn virtual-ip 10.10.0.0 24', vrp: 'sslvpn virtual-ip 10.10.0.0 24', comware: 'sslvpn virtual-ip 10.10.0.0 24', mode: 'Config' },
+  { feature: '创建本地用户', topic: 'sslvpn', ios: 'username admin privilege 15 secret Admin@123', vrp: 'local-user admin password cipher Admin@123', comware: 'local-user admin password cipher Admin@123', mode: 'Config' },
+  { feature: '查看 SSL VPN 会话', topic: 'sslvpn', ios: 'show sslvpn session', vrp: 'display sslvpn session', comware: 'display sslvpn session', mode: 'Exec' },
+
+  // WLAN
+  { feature: '配置 SSID', topic: 'wlan', ios: 'wlan ssid CORP', vrp: 'wlan ssid CORP', comware: 'wlan ssid CORP', mode: 'Config' },
+  { feature: 'WPA2 预共享密钥', topic: 'wlan', ios: 'wlan security wpa2 psk Admin@123', vrp: 'wlan security wpa2 psk Admin@123', comware: 'wlan security wpa2 psk Admin@123', mode: 'Config' },
+  { feature: 'WPA3-SAE 口令', topic: 'wlan', ios: 'wlan security wpa3 sae Guest@123', vrp: 'wlan security wpa3 sae Guest@123', comware: 'wlan security wpa3 sae Guest@123', mode: 'Config' },
+  { feature: 'SSID 业务 VLAN', topic: 'wlan', ios: 'wlan vlan 10', vrp: 'wlan vlan 10', comware: 'wlan vlan 10', mode: 'Config' },
+  { feature: 'AP 注册 AC', topic: 'wlan', ios: 'capwap ac 10.0.0.2', vrp: 'capwap ac 10.0.0.2', comware: 'capwap ac 10.0.0.2', mode: 'Config' },
+  { feature: '查看 WLAN', topic: 'wlan', ios: 'show wlan', vrp: 'display wlan', comware: 'display wlan', mode: 'Exec' },
+
+  // VXLAN / EVPN
+  { feature: '配置本地 VTEP', topic: 'vxlan', ios: 'vxlan local 10.0.0.1', vrp: 'vxlan local 10.0.0.1', comware: 'vxlan local 10.0.0.1', mode: 'Config' },
+  { feature: 'VNI 映射 VLAN', topic: 'vxlan', ios: 'vxlan vni 10000 vlan 10', vrp: 'vxlan vni 10000 vlan 10', comware: 'vxlan vni 10000 vlan 10', mode: 'Config' },
+  { feature: '静态远端 VTEP', topic: 'vxlan', ios: 'vxlan peer 10.0.0.2', vrp: 'vxlan peer 10.0.0.2', comware: 'vxlan peer 10.0.0.2', mode: 'Config' },
+  { feature: '启用 EVPN', topic: 'vxlan', ios: 'evpn enable', vrp: 'evpn enable', comware: 'evpn enable', mode: 'Config' },
+  { feature: '配置 EVPN 邻居', topic: 'vxlan', ios: 'evpn peer 10.0.0.2', vrp: 'evpn peer 10.0.0.2', comware: 'evpn peer 10.0.0.2', mode: 'Config' },
+  { feature: '查看 VXLAN', topic: 'vxlan', ios: 'show vxlan', vrp: 'display vxlan', comware: 'display vxlan', mode: 'Exec' },
+  { feature: '查看 EVPN', topic: 'vxlan', ios: 'show evpn', vrp: 'display evpn', comware: 'display evpn', mode: 'Exec' },
+
+  // 堆叠 / M-LAG
+  { feature: '配置堆叠域', topic: 'ha', ios: 'stack domain 10', vrp: 'stack domain 10', comware: 'stack domain 10', mode: 'Config' },
+  { feature: '配置堆叠成员号', topic: 'ha', ios: 'stack member 1', vrp: 'stack member 1', comware: 'stack member 1', mode: 'Config' },
+  { feature: '配置主设备优先级', topic: 'ha', ios: 'stack priority 200', vrp: 'stack priority 200', comware: 'stack priority 200', mode: 'Config' },
+  { feature: '配置 M-LAG 域', topic: 'ha', ios: 'mlag domain 1', vrp: 'mlag domain 1', comware: 'mlag domain 1', mode: 'Config' },
+  { feature: '指定 M-LAG peer-link', topic: 'ha', ios: 'mlag peer-link', vrp: 'mlag peer-link', comware: 'mlag peer-link', mode: 'If' },
+  { feature: '查看堆叠', topic: 'ha', ios: 'show stack', vrp: 'display stack', comware: 'display stack', mode: 'Exec' },
+  { feature: '查看 M-LAG', topic: 'ha', ios: 'show mlag', vrp: 'display mlag', comware: 'display mlag', mode: 'Exec' },
+
+  // F5 LTM
+  { feature: '添加池成员', topic: 'ltm', ios: 'ltm pool WEB member 10.0.1.10 80', vrp: 'ltm pool WEB member 10.0.1.10 80', comware: 'ltm pool WEB member 10.0.1.10 80', mode: 'Config' },
+  { feature: '创建虚拟服务器', topic: 'ltm', ios: 'ltm virtual VS vip 10.0.0.100 80 pool WEB', vrp: 'ltm virtual VS vip 10.0.0.100 80 pool WEB', comware: 'ltm virtual VS vip 10.0.0.100 80 pool WEB', mode: 'Config' },
+  { feature: '查看 LTM', topic: 'ltm', ios: 'show ltm', vrp: 'display ltm', comware: 'display ltm', mode: 'Exec' },
+
+  // 园区综合
+  { feature: 'Trunk 放行 VLAN', topic: 'campus', ios: 'switchport trunk allowed vlan 10,20', vrp: 'port trunk allow-pass vlan 10 20', comware: 'port trunk permit vlan 10 20', mode: 'If' },
+  { feature: '配置默认路由', topic: 'campus', ios: 'ip route 0.0.0.0 0.0.0.0 10.0.0.1', vrp: 'ip route-static 0.0.0.0 0 10.0.0.1', comware: 'ip route-static 0.0.0.0 0 10.0.0.1', mode: 'Config' },
+  { feature: '查看 NAT 会话', topic: 'campus', ios: 'show ip nat translations', vrp: 'display nat session', comware: 'display nat session', mode: 'Exec' },
+
+  // 厂商对照：链路聚合
+  { feature: '成员口加入聚合', topic: 'lag', ios: 'channel-group 1 mode active', vrp: 'eth-trunk 1', comware: 'port link-aggregation group 1', mode: 'If' },
+  { feature: '查看聚合状态', topic: 'lag', ios: 'show etherchannel summary', vrp: 'display eth-trunk 1', comware: 'display link-aggregation verbose', mode: 'Exec' },
+
+  // 厂商对照：堆叠
+  { feature: '配置堆叠域', topic: 'stack', ios: 'stack domain 10', vrp: 'stack domain 10', comware: 'stack domain 10', mode: 'Config' },
+  { feature: '配置成员编号', topic: 'stack', ios: 'stack member 1', vrp: 'stack member 1', comware: 'stack member 1', mode: 'Config' },
+  { feature: '配置主设备优先级', topic: 'stack', ios: 'stack priority 200', vrp: 'stack priority 200', comware: 'stack priority 200', mode: 'Config' },
+  { feature: '查看堆叠状态', topic: 'stack', ios: 'show stack', vrp: 'display stack', comware: 'display stack', mode: 'Exec' },
+
+  // 厂商对照：跨设备聚合
+  { feature: '配置 M-LAG 域', topic: 'mlag', ios: 'mlag domain 1', vrp: 'mlag domain 1', comware: 'mlag domain 1', mode: 'Config' },
+  { feature: '指定 peer-link', topic: 'mlag', ios: 'mlag peer-link', vrp: 'mlag peer-link', comware: 'mlag peer-link', mode: 'If' },
+  { feature: '查看 M-LAG 状态', topic: 'mlag', ios: 'show mlag', vrp: 'display mlag', comware: 'display mlag', mode: 'Exec' },
+
+  // 厂商对照：首跳冗余（模拟器实现 VRRP）
+  { feature: '配置虚拟网关 IP', topic: 'fhrp', ios: 'vrrp 1 ip 10.0.0.1', vrp: 'vrrp vrid 1 virtual-ip 10.0.0.1', comware: 'vrrp vrid 1 virtual-ip 10.0.0.1', mode: 'If' },
+  { feature: '配置优先级', topic: 'fhrp', ios: 'vrrp 1 priority 200', vrp: 'vrrp vrid 1 priority 200', comware: 'vrrp vrid 1 priority 200', mode: 'If' },
+  { feature: '开启抢占', topic: 'fhrp', ios: 'vrrp 1 preempt', vrp: 'vrrp vrid 1 preempt-mode', comware: 'vrrp vrid 1 preempt-mode', mode: 'If' },
+  { feature: '查看主备状态', topic: 'fhrp', ios: 'show vrrp', vrp: 'display vrrp', comware: 'display vrrp', mode: 'Exec' },
 ];

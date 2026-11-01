@@ -100,6 +100,10 @@ const zh: Record<string, string> = {
   'quiz.mastery': '分主题掌握度',
 
   'course.catalog': '课程目录',
+  'course.level.ia': '初级',
+  'course.level.ip': '中级',
+  'course.level.ie': '高级',
+  'course.level.map': '厂商对照',
   'course.openLab': '▶ 打开对应实验',
   'course.table': '三厂商命令对照（本课相关 · ✓ = 与模拟器行为已验证一致）',
   'course.feature': '功能',
@@ -231,6 +235,10 @@ const en: Record<string, string> = {
   'quiz.mastery': 'Mastery by topic',
 
   'course.catalog': 'Lessons',
+  'course.level.ia': 'Associate',
+  'course.level.ip': 'Professional',
+  'course.level.ie': 'Expert',
+  'course.level.map': 'Vendor mapping',
   'course.openLab': '▶ Open related lab',
   'course.table': 'Command comparison (this lesson · ✓ = verified against the simulator)',
   'course.feature': 'Feature',

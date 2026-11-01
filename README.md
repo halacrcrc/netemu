@@ -46,8 +46,8 @@
 
 ### M3a 新增（课程 / 三厂商对照 / 笔记 / 云同步）
 
-- **课程视图**：4 篇原创课程（VLAN/STP/DHCP/ACL+NAT），Markdown 阅读器（零依赖自研渲染器），frontmatter 关联实验——课程页一键跳进对应实验。
-- **三厂商命令对照表**：单一数据源（`cmdmap.ts`）驱动，**每条命令在运行时经 wasm `verify_command` 校验**，表格标注 ✓ = 与模拟器行为一致（29 条对照全绿）。这是与 eNSP/Packet Tracer 的根本差异之一。
+- **课程视图**：21 篇原创课程，按 **IA 初级（4）/ IP 中级（7）/ IE 高级（4）/ 厂商对照（6）** 分组（VLAN/STP/DHCP/ACL+NAT → OSPF+VRRP/BGP/MPLS L3VPN/防火墙/IPsec/SSL VPN/无线 → VXLAN+EVPN/堆叠+M-LAG/F5 LTM/园区综合 → EtherChannel/Eth-Trunk、StackWise/iStack/IRF、vPC/M-LAG/DRNI、HSRP/VRRP、PVST+/MSTP、VXLAN/EVPN 三家实现），Markdown 阅读器（零依赖自研渲染器），frontmatter 关联实验——课程页一键跳进对应实验。
+- **三厂商命令对照表**：单一数据源（`cmdmap.ts`）驱动，**每条命令在运行时经 wasm `verify_command` 校验**，表格标注 ✓ = 与模拟器行为一致（105 条对照全绿）。这是与 eNSP/Packet Tracer 的根本差异之一。
 - **笔记**：Markdown 编辑/预览、自动保存本地。
 - **Gist 云同步**：经典 PAT（gist 权限）备份/恢复笔记+题库记录+实验进度到私有 Gist；题库按答题次数合并、实验进度并集。Token 仅存本机。
 - **导航**：练习场 / 题库 / 课程 / 笔记 四视图切换。
@@ -80,7 +80,7 @@
 
 - **MSTP 多实例**：`spanning-tree mode mst` / `stp mode mstp`，`spanning-tree mst 1 priority 4096` / `stp instance 1 priority 4096`，MST 域视图配置 `instance 1 vlan 10` 映射；每个实例独立发送 BPDU、独立选根，数据面按 VLAN 归属实例转发（同一端口可在不同 VLAN 分别转发/阻塞，实现负载分担）。`show spanning-tree` / `display stp brief` 按实例展示。
   说明：不做 MST 域协商（name/revision 仅接受），详见 ADR D17。
-- **界面双语**：顶栏「EN / 中」一键切换，界面骨架、练习场、题库/课程/笔记的操作文案均为中英双语；课程与题目内容保持中文。
+- **界面双语**：顶栏「EN / 中」一键切换，界面骨架、练习场、题库/课程/笔记的操作文案均为中英双语；21 篇课程与题库内容也提供英文译文。
 - **URL 分享拓扑**：拓扑管理面板「复制分享链接」把工作区（含设备位置）压缩进 `#topo=`，打开链接即还原；同时补上导出/导入文件入口。分享链接优先于本地工作区。
 
 ### M4（IP 进阶与二层安全）
@@ -91,7 +91,7 @@
 - **DHCP Snooping**：全局开关 + 信任端口；非信任口的 Offer/Ack 被丢弃，从 Request/Ack 学习绑定表（MAC/IP/VLAN/端口），`show ip dhcp snooping binding` / `display dhcp snooping user-binding`。
 - **端口安全**：最大 MAC 数、`restrict` / `shutdown` 违规动作、sticky 标记；超限帧丢弃与违规计数，`show/display port-security`。
 - **QoS 基础**：入方向广播风暴抑制（每秒广播上限）与令牌桶限速（kbps），显示丢弃/抑制计数；`storm-control` / `broadcast-suppression`、`rate-limit input` / `qos car|lr inbound cir`、`show/display storm-control|qos`。
-- **英文内容**：四篇课程、103 道题库、19 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
+- **英文内容**：21 篇课程、103 道题库、19 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
 
 ### M5（BGP / IS-IS / VRF / MPLS / route-policy / L3VPN）
 

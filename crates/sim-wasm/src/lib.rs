@@ -767,6 +767,10 @@ impl Sim {
             "Bgp" => cli_engine::Mode::Bgp,
             "Isis" => cli_engine::Mode::Isis,
             "RoutePolicy" => cli_engine::Mode::RoutePolicy,
+            "Zone" => cli_engine::Mode::Zone,
+            "SecurityPolicy" => cli_engine::Mode::SecurityPolicy,
+            "SecurityRule" => cli_engine::Mode::SecurityRule,
+            "Ipsec" => cli_engine::Mode::Ipsec,
             _ => return false,
         };
         let trees = cli_dialects::trees(d);
