@@ -1,15 +1,43 @@
 // 题库 v1：IA 级别单选题（原创题面与解析）。
 // 题目内容为原创，仅作描述性使用各厂商命令语法。
 
-export type TopicId = 'basics' | 'vlan' | 'stp' | 'dhcp' | 'acl' | 'nat';
+export type TopicId =
+  | 'basics'
+  | 'vlan'
+  | 'stp'
+  | 'dhcp'
+  | 'acl'
+  | 'nat'
+  | 'ipv4'
+  | 'routing'
+  | 'ipv6'
+  | 'services'
+  | 'wlan'
+  | 'ospf'
+  | 'bgp'
+  | 'isis'
+  | 'mpls'
+  | 'qos'
+  | 'automation';
 
 export const TOPICS: { id: TopicId; name: string; nameEn: string }[] = [
   { id: 'basics', name: '网络基础', nameEn: 'Networking basics' },
+  { id: 'ipv4', name: 'IPv4 与子网', nameEn: 'IPv4 and subnetting' },
+  { id: 'routing', name: '静态路由', nameEn: 'Static routing' },
+  { id: 'ipv6', name: 'IPv6', nameEn: 'IPv6' },
+  { id: 'services', name: '网络服务', nameEn: 'Network services' },
   { id: 'vlan', name: 'VLAN', nameEn: 'VLAN' },
   { id: 'stp', name: 'STP', nameEn: 'STP' },
+  { id: 'wlan', name: 'WLAN', nameEn: 'WLAN' },
   { id: 'dhcp', name: 'DHCP', nameEn: 'DHCP' },
   { id: 'acl', name: 'ACL', nameEn: 'ACL' },
   { id: 'nat', name: 'NAT', nameEn: 'NAT' },
+  { id: 'ospf', name: 'OSPF', nameEn: 'OSPF' },
+  { id: 'bgp', name: 'BGP', nameEn: 'BGP' },
+  { id: 'isis', name: 'IS-IS', nameEn: 'IS-IS' },
+  { id: 'mpls', name: 'MPLS VPN', nameEn: 'MPLS VPN' },
+  { id: 'qos', name: 'QoS 与组播', nameEn: 'QoS and multicast' },
+  { id: 'automation', name: '自动化与 SDN', nameEn: 'Automation and SDN' },
 ];
 
 export interface QuestionEn {
@@ -1041,13 +1069,523 @@ const QUESTIONS_BASE: Question[] = [
     answer: 1,
     explain: 'Easy-IP 不需要地址池，直接用出接口（outside 口）的 IP 作为转换后的源地址，并复用端口区分会话。',
   },
+
+  // ---------- IA：网络基础补充 ----------
+  {
+    id: 'b24',
+    topic: 'basics',
+    q: 'OSI 模型中负责端到端可靠传输的是哪一层？',
+    options: ['网络层', '传输层', '数据链路层', '会话层'],
+    answer: 1,
+    explain: '传输层（TCP/UDP）负责端到端通信；TCP 通过握手、序号、确认与重传提供可靠性。',
+  },
+  {
+    id: 'b19',
+    topic: 'basics',
+    q: '主机发送数据时，封装顺序正确的是？',
+    options: [
+      '以太网头 → IP 头 → TCP 头 → 应用数据',
+      '应用数据 → TCP 头 → IP 头 → 以太网头',
+      '应用数据 → IP 头 → TCP 头 → 以太网头',
+      'TCP 头 → 应用数据 → 以太网头 → IP 头',
+    ],
+    answer: 1,
+    explain: '发送方自上而下封装：应用数据加传输层头，再加网络层 IP 头，最后加二层以太网头。',
+  },
+  {
+    id: 'b20',
+    topic: 'basics',
+    q: 'TCP 三次握手的主要目的是？',
+    options: ['加密数据', '同步初始序号并确认双方收发能力', '分配 IP 地址', '选择路由'],
+    answer: 1,
+    explain: 'SYN / SYN-ACK / ACK 交换初始序号并确认双向可达，之后才开始传数据。',
+  },
+  {
+    id: 'b21',
+    topic: 'basics',
+    q: '与 TCP 相比，UDP 的典型特点是？',
+    options: ['面向连接、可靠重传', '无连接、开销小、不保证送达', '一定按序到达', '必须三次握手'],
+    answer: 1,
+    explain: 'UDP 无连接、头部小、不重传，适合 DNS、语音、视频等能容忍丢包的场景。',
+  },
+  {
+    id: 'b22',
+    topic: 'basics',
+    q: 'ARP 请求的作用范围是？',
+    options: ['整个互联网', '同一广播域', '同一 VLAN 之外', '仅本机'],
+    answer: 1,
+    explain: 'ARP 通过广播解析 IP 对应的 MAC，广播帧不会跨越路由器，因此只在本广播域内生效。',
+  },
+
+  // ---------- IPv4 ----------
+  {
+    id: 'ip1',
+    topic: 'ipv4',
+    q: '一个 /26 子网最多有多少个可用主机地址？',
+    options: ['30', '62', '64', '126'],
+    answer: 1,
+    explain: '/26 有 6 个主机位，共 64 个地址，去掉网络地址与广播地址后可用 62 个。',
+  },
+  {
+    id: 'ip2',
+    topic: 'ipv4',
+    q: '下列哪个属于私有地址范围？',
+    options: ['172.16.0.0/12', '8.8.8.0/24', '203.0.113.0/24', '224.0.0.0/4'],
+    answer: 0,
+    explain: '私有地址为 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16；公网路由不转发它们。',
+  },
+  {
+    id: 'ip3',
+    topic: 'ipv4',
+    q: '192.168.1.130/25 所在子网的网络地址是？',
+    options: ['192.168.1.0', '192.168.1.128', '192.168.1.130', '192.168.1.255'],
+    answer: 1,
+    explain: '/25 以 128 为块大小，130 落在 128–255 这一段，网络地址是 192.168.1.128。',
+  },
+  {
+    id: 'ip4',
+    topic: 'ipv4',
+    q: '终端配置默认网关的作用是？',
+    options: ['解析域名', '把跨网段流量交给路由器', '分配 MAC 地址', '加密流量'],
+    answer: 1,
+    explain: '目的地址不在本网段时，终端把帧发给网关（路由器），由路由器继续转发。',
+  },
+  {
+    id: 'ip5',
+    topic: 'ipv4',
+    q: '点对点链路用 /30 的主要好处是？',
+    options: ['可用地址更多', '只占用 2 个可用地址，节省地址空间', '不需要掩码', '自动加密'],
+    answer: 1,
+    explain: '/30 共 4 个地址，去掉网络与广播后正好 2 个可用地址，适合两端点对点互联。',
+  },
+
+  // ---------- 静态路由 ----------
+  {
+    id: 'rt1',
+    topic: 'routing',
+    q: '路由表中同时存在 10.0.0.0/8 与 10.1.0.0/16，目的地址 10.1.2.3 会匹配？',
+    options: ['10.0.0.0/8', '10.1.0.0/16', '两条都转发', '默认路由'],
+    answer: 1,
+    explain: '最长前缀匹配优先，/16 比 /8 更具体，因此选择 10.1.0.0/16。',
+  },
+  {
+    id: 'rt2',
+    topic: 'routing',
+    q: '默认路由的前缀是？',
+    options: ['0.0.0.0/0', '255.255.255.255/32', '127.0.0.0/8', '224.0.0.0/4'],
+    answer: 0,
+    explain: '0.0.0.0/0 匹配所有目的，常用作出口路由；没有更具体匹配时才会使用它。',
+  },
+  {
+    id: 'rt3',
+    topic: 'routing',
+    q: '浮动静态路由实现主备切换依靠的是？',
+    options: ['更大的优先级/管理距离', '更小的掩码', '更短的 AS_PATH', '更低的端口号'],
+    answer: 0,
+    explain: '给备份静态路由配置更大的优先级（思科管理距离），主路由存在时它不进表，主路由消失后才生效。',
+  },
+  {
+    id: 'rt4',
+    topic: 'routing',
+    q: '思科设备上直连路由的默认管理距离是？',
+    options: ['0', '1', '110', '200'],
+    answer: 0,
+    explain: '直连路由 AD=0，静态=1，eBGP=20，OSPF=110，iBGP=200；华为/华三的默认值不同。',
+  },
+  {
+    id: 'rt5',
+    topic: 'routing',
+    q: '静态路由的下一跳必须满足什么条件才会生效？',
+    options: ['必须是公网地址', '必须递归可达', '必须与接口同网段', '必须是环回地址'],
+    answer: 1,
+    explain: '路由器要能为下一跳找到出接口/直连路由（递归查找），否则该静态路由不会进入路由表。',
+  },
+
+  // ---------- IPv6 ----------
+  {
+    id: 'v61',
+    topic: 'ipv6',
+    q: 'IPv6 地址长度是多少位？',
+    options: ['32', '64', '128', '256'],
+    answer: 2,
+    explain: 'IPv6 为 128 位，写成 8 组十六进制，可用 :: 压缩连续的全零组。',
+  },
+  {
+    id: 'v62',
+    topic: 'ipv6',
+    q: 'IPv6 链路本地地址的前缀是？',
+    options: ['2000::/3', 'fe80::/10', 'fc00::/7', 'ff00::/8'],
+    answer: 1,
+    explain: 'fe80::/10 是链路本地地址，每接口自动生成，只在本链路有效。',
+  },
+  {
+    id: 'v63',
+    topic: 'ipv6',
+    q: 'IPv6 中用哪个协议替代 ARP 解析邻居 MAC？',
+    options: ['NDP', 'DHCPv6', 'PIM', 'OSPFv3'],
+    answer: 0,
+    explain: '邻居发现协议（NDP）用 ICMPv6 的 NS/NA 完成地址解析，还负责 RA/RS 与重定向。',
+  },
+  {
+    id: 'v64',
+    topic: 'ipv6',
+    q: '关于 IPv6 广播，正确的说法是？',
+    options: ['仍使用 255.255.255.255', 'IPv6 没有广播，用组播替代', '只在 /64 内广播', '由 DHCPv6 提供'],
+    answer: 1,
+    explain: 'IPv6 取消了广播，使用组播（如 ff02::1 所有节点）实现一对多通知。',
+  },
+  {
+    id: 'v65',
+    topic: 'ipv6',
+    q: '为什么 IPv6 子网通常使用 /64？',
+    options: ['地址不够用', '便于 SLAAC 用接口标识自动生成地址', '为了兼容 IPv4', '减少组播'],
+    answer: 1,
+    explain: '/64 把后 64 位留给接口标识，主机可结合 RA 前缀通过 SLAAC 自动生成地址。',
+  },
+
+  // ---------- 网络服务 ----------
+  {
+    id: 'sv1',
+    topic: 'services',
+    q: '生产环境应优先使用 SSH 而不是 Telnet，原因是？',
+    options: ['SSH 更快', 'SSH 加密传输，Telnet 明文', 'Telnet 不支持口令', 'SSH 不需要 IP'],
+    answer: 1,
+    explain: 'Telnet 明文传输口令与配置，抓包即可看到；SSH 提供加密与完整性保护。',
+  },
+  {
+    id: 'sv2',
+    topic: 'services',
+    q: 'NTP 的主要作用是？',
+    options: ['分配 IP 地址', '同步设备时钟', '解析域名', '加密路由协议'],
+    answer: 1,
+    explain: 'NTP 让设备时间一致，日志、证书、审计与故障关联才有可靠时间戳。',
+  },
+  {
+    id: 'sv3',
+    topic: 'services',
+    q: 'Syslog 的 severity 0 表示？',
+    options: ['调试信息', '紧急（Emergency）', '警告', '通知'],
+    answer: 1,
+    explain: 'Syslog 级别 0 为 Emergency，最严重；7 为 Debug，最详细。',
+  },
+  {
+    id: 'sv4',
+    topic: 'services',
+    q: '相比 SNMPv2c，SNMPv3 的主要增强是？',
+    options: ['更快的轮询', '认证与加密', '支持更多接口', '自动配置'],
+    answer: 1,
+    explain: 'SNMPv3 增加用户认证与加密，v1/v2c 的 community 近似明文口令。',
+  },
+  {
+    id: 'sv5',
+    topic: 'services',
+    q: 'TFTP 的典型特点是？',
+    options: ['基于 TCP、强认证', '基于 UDP、简单无认证', '只用于网页', '自动加密'],
+    answer: 1,
+    explain: 'TFTP 基于 UDP，简单、无认证，适合受控网络内的配置备份与镜像传输。',
+  },
+
+  // ---------- WLAN ----------
+  {
+    id: 'wl1',
+    topic: 'wlan',
+    q: '2.4 GHz 频段中互不重叠的信道通常是？',
+    options: ['1、6、11', '1、2、3', '36、40、44', '所有的信道都不重叠'],
+    answer: 0,
+    explain: '2.4 GHz 只有 1/6/11 三个互不重叠信道，同频或邻频干扰会显著降低空口效率。',
+  },
+  {
+    id: 'wl2',
+    topic: 'wlan',
+    q: 'SSID 表示什么？',
+    options: ['AP 的 MAC 地址', '无线网络名称', '加密算法', '信道号'],
+    answer: 1,
+    explain: 'SSID 是无线网络名称；BSSID 才是 AP 射频的 MAC 标识。',
+  },
+  {
+    id: 'wl3',
+    topic: 'wlan',
+    q: 'CAPWAP 协议的作用是？',
+    options: ['分配公网地址', '在 AP 与 AC 之间建立控制/数据隧道', '加密有线流量', '选举 STP 根桥'],
+    answer: 1,
+    explain: 'CAPWAP 承载 AP 与 AC 之间的配置、心跳与数据隧道，是集中管理无线的基础。',
+  },
+  {
+    id: 'wl4',
+    topic: 'wlan',
+    q: 'WPA3-SAE 相比 WPA2-PSK 的主要优势是？',
+    options: ['不需要口令', '抗离线字典攻击', '只支持 2.4 GHz', '不加密'],
+    answer: 1,
+    explain: 'SAE 采用对等实体认证，即使抓到握手也难以离线穷举口令。',
+  },
+  {
+    id: 'wl5',
+    topic: 'wlan',
+    q: '无线终端竞争信道使用的主要机制是？',
+    options: ['CSMA/CD', 'CSMA/CA', '令牌环', '轮询'],
+    answer: 1,
+    explain: '无线是共享半双工介质，无法边发边检测冲突，因此用 CSMA/CA 先听后发、冲突避免。',
+  },
+
+  // ---------- OSPF ----------
+  {
+    id: 'os1',
+    topic: 'ospf',
+    q: 'OSPF 多区域设计中，所有区域必须连接到哪里？',
+    options: ['区域 1', '骨干区域 0', '任意区域', 'AS 外部'],
+    answer: 1,
+    explain: '区域 0 是骨干区域，区域间路由必须经过它；不相连时需虚链路等特殊处理。',
+  },
+  {
+    id: 'os2',
+    topic: 'ospf',
+    q: 'Type-3 Summary LSA 由谁生成？',
+    options: ['DR', 'ABR', 'ASBR', '任意路由器'],
+    answer: 1,
+    explain: 'ABR 把一个区域的网段汇总成 Type-3 LSA 通告到其他区域。',
+  },
+  {
+    id: 'os3',
+    topic: 'ospf',
+    q: '引入外部路由的 ASBR 会生成哪种 LSA？',
+    options: ['Type-1', 'Type-2', 'Type-5', 'Type-3'],
+    answer: 2,
+    explain: 'ASBR 用 Type-5 External LSA 描述外部路由；NSSA 内则用 Type-7。',
+  },
+  {
+    id: 'os4',
+    topic: 'ospf',
+    q: 'Stub 区域会拒绝哪种 LSA？',
+    options: ['Type-1', 'Type-2', 'Type-3', 'Type-4/5'],
+    answer: 3,
+    explain: 'Stub 区域拒绝 Type-4/5 外部 LSA，由 ABR 下发默认路由出区。',
+  },
+  {
+    id: 'os5',
+    topic: 'ospf',
+    q: 'OSPF 邻居状态 Full 表示？',
+    options: ['刚收到 Hello', '数据库已同步、邻接建立完成', '路由已删除', '区域不匹配'],
+    answer: 1,
+    explain: 'Full 表示双方 LSDB 已同步并完成邻接，可以正常计算路由。',
+  },
+
+  // ---------- BGP ----------
+  {
+    id: 'bg1',
+    topic: 'bgp',
+    q: 'BGP 选路中 LOCAL_PREF 的比较规则是？',
+    options: ['越小越优', '越大越优', '不参与选路', '只比较 AS_PATH'],
+    answer: 1,
+    explain: 'LOCAL_PREF 越大越优，用于在 AS 内选择出口，通常通过 route-policy 设置。',
+  },
+  {
+    id: 'bg2',
+    topic: 'bgp',
+    q: 'AS_PATH 属性的作用是？',
+    options: ['记录经过的 AS，并用于防环与选路', '加密路由', '分配端口', '同步时钟'],
+    answer: 0,
+    explain: 'AS_PATH 记录路由经过的 AS 序列，越短越优；收到含本 AS 号的路由会被丢弃以防环。',
+  },
+  {
+    id: 'bg3',
+    topic: 'bgp',
+    q: 'MED 属性主要影响？',
+    options: ['本 AS 出方向', '邻居 AS 如何进入本 AS', 'TCP 窗口', 'STP 根桥'],
+    answer: 1,
+    explain: 'MED 向邻居建议入口，影响入向流量；LOCAL_PREF 则影响本 AS 的出向选择。',
+  },
+  {
+    id: 'bg4',
+    topic: 'bgp',
+    q: 'iBGP 路由反射器（RR）解决的核心问题是？',
+    options: ['iBGP 全互联会话数量过多', 'eBGP 无法加密', 'BGP 不支持 IPv6', '路由表太小'],
+    answer: 0,
+    explain: 'RR 允许把路由反射给 client，打破 iBGP 水平分割，避免 N² 条全互联会话。',
+  },
+  {
+    id: 'bg5',
+    topic: 'bgp',
+    q: '在思科默认选路中，eBGP 与 iBGP 路由相比？',
+    options: ['iBGP 优先', 'eBGP 优先', '完全相同', '只看 MED'],
+    answer: 1,
+    explain: '在 AS_PATH、Origin、MED 等比较之后，eBGP 路由优先于 iBGP（思科 AD 也是 20 < 200）。',
+  },
+
+  // ---------- IS-IS ----------
+  {
+    id: 'is1',
+    topic: 'isis',
+    q: 'IS-IS 的 NET 中，哪一部分唯一标识路由器？',
+    options: ['区域地址', 'System ID', 'SEL', '端口号'],
+    answer: 1,
+    explain: 'NET 由区域地址 + System ID + SEL 组成，System ID 唯一标识一台路由器。',
+  },
+  {
+    id: 'is2',
+    topic: 'isis',
+    q: 'IS-IS 的 Level 2 主要用于？',
+    options: ['区域内路由', '骨干/区域间路由', '主机接入', '组播'],
+    answer: 1,
+    explain: 'L1 负责区域内部，L2 构成骨干并承载区域间路由，L1-2 路由器连接两层。',
+  },
+  {
+    id: 'is3',
+    topic: 'isis',
+    q: 'IS-IS 广播网段上的 DIS 与 OSPF DR 的关键区别是？',
+    options: ['DIS 有备份', 'DIS 没有备份，且可被抢占', 'DIS 不选举', 'DIS 只处理 IPv6'],
+    answer: 1,
+    explain: 'IS-IS 没有备份 DIS，且新路由器可能抢占 DIS；OSPF 有 BDR 且 DR 不抢占。',
+  },
+  {
+    id: 'is4',
+    topic: 'isis',
+    q: 'Segment Routing 中 Node SID 的作用是？',
+    options: ['标识一台路由器/前缀的段', '加密标签', '分配 MAC', '同步时钟'],
+    answer: 0,
+    explain: 'Node SID（Prefix SID）为节点或前缀分配段标识，源端用段列表编码整条路径。',
+  },
+  {
+    id: 'is5',
+    topic: 'isis',
+    q: 'SRv6 的 SID 本质上是？',
+    options: ['MPLS 标签', 'IPv6 地址（Locator + Function）', 'MAC 地址', 'VLAN ID'],
+    answer: 1,
+    explain: 'SRv6 把段标识编码为 IPv6 地址，由 Locator 与 Function 组成，不再依赖 MPLS 标签。',
+  },
+
+  // ---------- MPLS VPN ----------
+  {
+    id: 'mp1',
+    topic: 'mpls',
+    q: 'L3VPN 报文在入口 PE 通常压入几层标签？',
+    options: ['1 层', '2 层（传输标签 + VPN 标签）', '3 层', '不需要标签'],
+    answer: 1,
+    explain: '外层传输标签供 P 路由器逐跳转发，内层 VPN 标签告诉出口 PE 投递到哪个 VRF。',
+  },
+  {
+    id: 'mp2',
+    topic: 'mpls',
+    q: 'RD 的主要作用是？',
+    options: ['决定路由导入导出', '让不同 VRF 的相同前缀在 MP-BGP 中唯一', '加密报文', '分配标签'],
+    answer: 1,
+    explain: 'RD 拼在前缀前保证唯一性；导入导出策略由 RT 决定，两者分工不同。',
+  },
+  {
+    id: 'mp3',
+    topic: 'mpls',
+    q: 'RT（Route Target）的作用是？',
+    options: ['唯一标识前缀', '控制 VRF 的路由导入/导出', '分配 IP 地址', '计算 SPF'],
+    answer: 1,
+    explain: 'RT 是扩展社区，VRF 通过 import/export RT 匹配决定接收或发布哪些 VPN 路由。',
+  },
+  {
+    id: 'mp4',
+    topic: 'mpls',
+    q: 'PHP（倒数第二跳弹出）指的是？',
+    options: ['入口压标签', '倒数第二跳弹出外层标签，最后一跳直接转发', '出口重新压标签', '丢弃所有标签'],
+    answer: 1,
+    explain: 'PHP 让倒数第二跳弹出传输标签，出口路由器按目的 IP 或内层标签直接交付，减少最后一跳负担。',
+  },
+  {
+    id: 'mp5',
+    topic: 'mpls',
+    q: '跨域 L3VPN Option C 中，VPNv4 路由在哪两者之间交换？',
+    options: ['ASBR 之间', 'PE 之间（多跳 MP-eBGP）', 'CE 之间', 'P 之间'],
+    answer: 1,
+    explain: 'Option C 由 PE 直接交换 VPNv4 路由，ASBR 只转发带标签报文，扩展性最好。',
+  },
+
+  // ---------- QoS 与组播 ----------
+  {
+    id: 'qs1',
+    topic: 'qos',
+    q: '语音流量常用的 DSCP 值是？',
+    options: ['EF（46）', 'CS1（8）', 'AF11（10）', 'BE（0）'],
+    answer: 0,
+    explain: 'EF（Expedited Forwarding，46）用于低延迟、低抖动的语音业务。',
+  },
+  {
+    id: 'qs2',
+    topic: 'qos',
+    q: 'policing 与 shaping 的主要区别是？',
+    options: ['policing 缓存，shaping 丢弃', 'policing 超速丢弃/降级，shaping 缓存后平滑发送', '两者完全相同', 'shaping 只用于语音'],
+    answer: 1,
+    explain: 'policing 直接限制速率，超速丢弃或降级；shaping 先把超速流量缓存，再平滑发出，会增加延迟。',
+  },
+  {
+    id: 'qs3',
+    topic: 'qos',
+    q: '语音流量最适合放入哪种队列？',
+    options: ['低延迟队列（LLQ/优先队列）', '尽力而为队列', '广播队列', '管理队列'],
+    answer: 0,
+    explain: '语音对延迟与抖动敏感，应放入 LLQ/优先队列，拥塞时优先调度。',
+  },
+  {
+    id: 'qs4',
+    topic: 'qos',
+    q: 'WRED 的作用是？',
+    options: ['随机提前丢弃部分报文，避免全局同步', '加密队列', '增加带宽', '选举根桥'],
+    answer: 0,
+    explain: 'WRED 在队列将满时按概率丢弃低优先级报文，避免所有 TCP 流同时降速。',
+  },
+  {
+    id: 'qs5',
+    topic: 'qos',
+    q: '组播转发中的 RPF 检查要求？',
+    options: ['报文从去往源的最短路径接口进入', '报文从任意接口进入', '只检查目的地址', '只检查 TTL'],
+    answer: 0,
+    explain: 'RPF 检查组播报文必须从"回到源"的最短路径接口进入，否则丢弃，以防止组播环路。',
+  },
+
+  // ---------- 自动化与 SDN ----------
+  {
+    id: 'au1',
+    topic: 'automation',
+    q: 'NETCONF 通常基于哪种传输与数据格式？',
+    options: ['SSH + XML', 'HTTP + JSON', 'FTP + YAML', 'Telnet + 文本'],
+    answer: 0,
+    explain: 'NETCONF 基于 SSH，使用 XML 编码，支持 candidate/commit 与回滚。',
+  },
+  {
+    id: 'au2',
+    topic: 'automation',
+    q: 'RESTCONF 的主要特点是？',
+    options: ['把 YANG 模型映射为 RESTful API，常用 JSON', '只能传二进制', '不支持 HTTPS', '只能读不能写'],
+    answer: 0,
+    explain: 'RESTCONF 用 HTTP 方法操作 YANG 数据，JSON 友好，适合现代自动化平台。',
+  },
+  {
+    id: 'au3',
+    topic: 'automation',
+    q: 'Telemetry 相比 SNMP 轮询的优势是？',
+    options: ['设备主动推送、采样更细', '不需要网络', '只能采集告警', '必须人工触发'],
+    answer: 0,
+    explain: 'Telemetry 由设备持续推送指标，可达秒级，替代分钟级轮询，适合大规模监控。',
+  },
+  {
+    id: 'au4',
+    topic: 'automation',
+    q: 'Ansible 的典型特点是？',
+    options: ['需要在设备上装 Agent', '无 Agent、用 YAML playbook 描述目标状态', '只能管理 Windows', '不支持幂等'],
+    answer: 1,
+    explain: 'Ansible 通过 SSH/NETCONF 等连接设备，无需 Agent，playbook 幂等地把设备推向目标状态。',
+  },
+  {
+    id: 'au5',
+    topic: 'automation',
+    q: 'SDN 的核心思想是？',
+    options: ['把控制面集中到控制器，设备专注转发', '取消所有路由协议', '只用二层交换', '把所有设备合成一台'],
+    answer: 0,
+    explain: 'SDN 将控制面上收到控制器，通过南向接口下发转发策略，设备成为可编程转发器。',
+  },
 ];
 
 import { QUESTIONS_EN_1 } from './questions-en-1';
 import { QUESTIONS_EN_2 } from './questions-en-2';
+import { QUESTIONS_EN_3 } from './questions-en-3';
 
 /** 合并中英题目（英文缺失时回退中文）。 */
 export const QUESTIONS: Question[] = QUESTIONS_BASE.map((q) => ({
   ...q,
-  en: QUESTIONS_EN_1[q.id] ?? QUESTIONS_EN_2[q.id],
+  en: QUESTIONS_EN_1[q.id] ?? QUESTIONS_EN_2[q.id] ?? QUESTIONS_EN_3[q.id],
 }));

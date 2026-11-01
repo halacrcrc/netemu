@@ -14,6 +14,7 @@ export type CmdMode =
   | 'Ospf'
   | 'OspfArea'
   | 'Bgp'
+  | 'Isis'
   | 'RoutePolicy'
   | 'Zone'
   | 'SecurityPolicy'
@@ -226,4 +227,36 @@ export const CMDMAP: CmdRow[] = [
   { feature: '配置优先级', topic: 'fhrp', ios: 'vrrp 1 priority 200', vrp: 'vrrp vrid 1 priority 200', comware: 'vrrp vrid 1 priority 200', mode: 'If' },
   { feature: '开启抢占', topic: 'fhrp', ios: 'vrrp 1 preempt', vrp: 'vrrp vrid 1 preempt-mode', comware: 'vrrp vrid 1 preempt-mode', mode: 'If' },
   { feature: '查看主备状态', topic: 'fhrp', ios: 'show vrrp', vrp: 'display vrrp', comware: 'display vrrp', mode: 'Exec' },
+
+  // IA：IPv4 地址
+  { feature: '配置接口 IPv4 地址', topic: 'ipv4', ios: 'ip address 192.168.1.1 255.255.255.0', vrp: 'ip address 192.168.1.1 24', comware: 'ip address 192.168.1.1 24', mode: 'If' },
+  { feature: '查看接口摘要', topic: 'ipv4', ios: 'show ip interface brief', vrp: 'display ip interface brief', comware: 'display ip interface brief', mode: 'Exec' },
+  { feature: '连通性测试', topic: 'ipv4', ios: 'ping 192.168.1.2', vrp: 'ping 192.168.1.2', comware: 'ping 192.168.1.2', mode: 'Exec' },
+
+  // IA：静态路由
+  { feature: '配置静态路由', topic: 'routing', ios: 'ip route 192.168.2.0 255.255.255.0 10.0.0.2', vrp: 'ip route-static 192.168.2.0 24 10.0.0.2', comware: 'ip route-static 192.168.2.0 24 10.0.0.2', mode: 'Config' },
+  { feature: '配置默认路由', topic: 'routing', ios: 'ip route 0.0.0.0 0.0.0.0 10.0.0.1', vrp: 'ip route-static 0.0.0.0 0 10.0.0.1', comware: 'ip route-static 0.0.0.0 0 10.0.0.1', mode: 'Config' },
+  { feature: '查看路由表', topic: 'routing', ios: 'show ip route', vrp: 'display ip routing-table', comware: 'display ip routing-table', mode: 'Exec' },
+
+  // IA：IPv6
+  { feature: '配置 IPv6 地址', topic: 'ipv6', ios: 'ipv6 address 2001:db8:10::1/64', vrp: 'ipv6 address 2001:db8:10::1/64', comware: 'ipv6 address 2001:db8:10::1/64', mode: 'If' },
+  { feature: 'IPv6 静态路由', topic: 'ipv6', ios: 'ipv6 route 2001:db8:20::/64 2001:db8:10::2', vrp: 'ipv6 route-static 2001:db8:20:: 64 2001:db8:10::2', comware: 'ipv6 route-static 2001:db8:20:: 64 2001:db8:10::2', mode: 'Config' },
+  { feature: '查看 IPv6 接口', topic: 'ipv6', ios: 'show ipv6 interface brief', vrp: 'display ipv6 interface brief', comware: 'display ipv6 interface brief', mode: 'Exec' },
+  { feature: '查看 IPv6 路由表', topic: 'ipv6', ios: 'show ipv6 route', vrp: 'display ipv6 routing-table', comware: 'display ipv6 routing-table', mode: 'Exec' },
+
+  // IA：网络服务与管理
+  { feature: '创建本地管理员', topic: 'services', ios: 'username admin privilege 15 secret Admin@123', vrp: 'local-user admin password cipher Admin@123', comware: 'local-user admin password cipher Admin@123', mode: 'Config' },
+  { feature: 'VTY 只允许 SSH', topic: 'services', ios: 'transport input ssh', vrp: 'protocol inbound ssh', comware: 'protocol inbound ssh', mode: 'Line' },
+  { feature: '查看接口状态', topic: 'services', ios: 'show ip interface brief', vrp: 'display ip interface brief', comware: 'display ip interface brief', mode: 'Exec' },
+
+  // IE：IS-IS
+  { feature: '启动 IS-IS 进程', topic: 'isis', ios: 'router isis', vrp: 'isis 1', comware: 'isis 1', mode: 'Config' },
+  { feature: '配置 NET', topic: 'isis', ios: 'net 49.0001.0000.0000.0001.00', vrp: 'network-entity 49.0001.0000.0000.0001.00', comware: 'network-entity 49.0001.0000.0000.0001.00', mode: 'Isis' },
+  { feature: '接口启用 IS-IS', topic: 'isis', ios: 'ip router isis', vrp: 'isis enable', comware: 'isis enable', mode: 'If' },
+  { feature: '查看 IS-IS 邻居', topic: 'isis', ios: 'show isis neighbors', vrp: 'display isis peer', comware: 'display isis peer', mode: 'Exec' },
+
+  // IE：QoS
+  { feature: '广播风暴抑制', topic: 'qos', ios: 'storm-control broadcast level 100', vrp: 'broadcast-suppression 100', comware: 'broadcast-suppression 100', mode: 'If' },
+  { feature: '入方向限速', topic: 'qos', ios: 'rate-limit input 1000', vrp: 'qos car inbound cir 1000', comware: 'qos lr inbound cir 1000', mode: 'If' },
+  { feature: '查看 QoS 统计', topic: 'qos', ios: 'show storm-control', vrp: 'display qos', comware: 'display qos', mode: 'Exec' },
 ];
