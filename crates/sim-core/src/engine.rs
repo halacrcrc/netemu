@@ -4955,7 +4955,7 @@ impl Engine {
             .into_iter()
             .map(|(_, ip, len)| (ip, len))
             .collect();
-        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v.sort_by_key(|a| a.0);
         v
     }
 
@@ -5522,9 +5522,7 @@ impl Engine {
     // ---------- SRv6 BE（教学用 IPv6-in-IPv6） ----------
 
     fn srv6_route_for(&self, dev: DevId, dst: Ipv6Addr) -> Option<Ipv6Addr> {
-        let Some(d) = self.net.device(dev) else {
-            return None;
-        };
+        let d = self.net.device(dev)?;
         let DeviceState::Router(rs) = &d.state else {
             return None;
         };
