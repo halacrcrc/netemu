@@ -46,7 +46,7 @@
 
 ### M3a 新增（课程 / 三厂商对照 / 笔记 / 云同步）
 
-- **课程视图**：45 篇原创课程，按 **IA 初级（13）/ IP 中级（11）/ IE 高级（14）/ 厂商对照（7）** 分组——IA 覆盖 TCP/IP、IPv4、静态路由、OSPF 单区域、IPv6、网络服务/接入安全、WLAN、链路聚合/堆叠、运维与自动化入门；IP 覆盖 OSPF+VRRP、BGP、MPLS L3VPN、防火墙、IPsec、SSL VPN、无线、IS-IS 基础、BFD/可靠性、组播、OSPFv3；IE 覆盖 OSPF 多区域、BGP 选路/RR、IS-IS+SR、MPLS 跨域/TE、QoS、VXLAN/EVPN、堆叠/M-LAG、F5 LTM、园区综合、CloudCampus 规划、SD-WAN/CloudWAN、智能运维与排障、SRv6；厂商对照讲 EtherChannel/Eth-Trunk、StackWise/iStack/IRF、vPC/M-LAG/DRNI、HSRP/VRRP、PVST+/MSTP、VXLAN/EVPN、MUX VLAN/私有 VLAN/端口隔离。Markdown 阅读器（零依赖自研渲染器），frontmatter 关联实验——课程页一键跳进对应实验。
+- **课程视图**：46 篇原创课程，按 **IA 初级（13）/ IP 中级（12）/ IE 高级（14）/ 厂商对照（7）** 分组——IA 覆盖 TCP/IP、IPv4、静态路由、OSPF 单区域、IPv6、网络服务/接入安全、WLAN、链路聚合/堆叠、运维与自动化入门；IP 覆盖 OSPF+VRRP、BGP、MPLS L3VPN、防火墙、IPsec、SSL VPN、无线、IS-IS 基础、BFD/可靠性、组播、OSPFv3、QoS；IE 覆盖 OSPF 多区域、BGP 选路/RR、IS-IS+SR、MPLS 跨域/TE、组播进阶、VXLAN/EVPN、堆叠/M-LAG、F5 LTM、园区综合、CloudCampus 规划、SD-WAN/CloudWAN、智能运维与排障、SRv6；厂商对照讲 EtherChannel/Eth-Trunk、StackWise/iStack/IRF、vPC/M-LAG/DRNI、HSRP/VRRP、PVST+/MSTP、VXLAN/EVPN、MUX VLAN/私有 VLAN/端口隔离。Markdown 阅读器（零依赖自研渲染器），frontmatter 关联实验——课程页一键跳进对应实验。
 - **三厂商命令对照表**：单一数据源（`cmdmap.ts`）驱动，**每条命令在运行时经 wasm `verify_command` 校验**，表格标注 ✓ = 与模拟器行为一致（141 条对照全绿）。这是与 eNSP/Packet Tracer 的根本差异之一。
 - **笔记**：Markdown 编辑/预览、自动保存本地。
 - **Gist 云同步**：经典 PAT（gist 权限）备份/恢复笔记+题库记录+实验进度到私有 Gist；题库按答题次数合并、实验进度并集。Token 仅存本机。
@@ -80,7 +80,7 @@
 
 - **MSTP 多实例**：`spanning-tree mode mst` / `stp mode mstp`，`spanning-tree mst 1 priority 4096` / `stp instance 1 priority 4096`，MST 域视图配置 `instance 1 vlan 10` 映射；每个实例独立发送 BPDU、独立选根，数据面按 VLAN 归属实例转发（同一端口可在不同 VLAN 分别转发/阻塞，实现负载分担）。`show spanning-tree` / `display stp brief` 按实例展示。
   说明：不做 MST 域协商（name/revision 仅接受），详见 ADR D17。
-- **界面双语**：顶栏「EN / 中」一键切换，界面骨架、练习场、题库/课程/笔记的操作文案均为中英双语；45 篇课程与题库内容也提供英文译文。
+- **界面双语**：顶栏「EN / 中」一键切换，界面骨架、练习场、题库/课程/笔记的操作文案均为中英双语；46 篇课程与题库内容也提供英文译文。
 - **URL 分享拓扑**：拓扑管理面板「复制分享链接」把工作区（含设备位置）压缩进 `#topo=`，打开链接即还原；同时补上导出/导入文件入口。分享链接优先于本地工作区。
 
 ### M4（IP 进阶与二层安全）
@@ -91,7 +91,7 @@
 - **DHCP Snooping**：全局开关 + 信任端口；非信任口的 Offer/Ack 被丢弃，从 Request/Ack 学习绑定表（MAC/IP/VLAN/端口），`show ip dhcp snooping binding` / `display dhcp snooping user-binding`。
 - **端口安全**：最大 MAC 数、`restrict` / `shutdown` 违规动作、sticky 标记；超限帧丢弃与违规计数，`show/display port-security`。
 - **QoS 基础**：入方向广播风暴抑制（每秒广播上限）与令牌桶限速（kbps），显示丢弃/抑制计数；`storm-control` / `broadcast-suppression`、`rate-limit input` / `qos car|lr inbound cir`、`show/display storm-control|qos`。
-- **英文内容**：45 篇课程、228 道题库、22 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
+- **英文内容**：46 篇课程、228 道题库、22 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
 
 ### M5（BGP / IS-IS / VRF / MPLS / route-policy / L3VPN）
 
@@ -198,7 +198,7 @@ web/
 ## 与华为 Datacom 认证大纲的对照
 
 - **HCIA-Datacom V2.0（H12-811）**：网络基础、IP 网络、以太交换、安全接入、网络服务、WLAN、WAN、运维、IPv6、SDN/自动化。IA 的 13 篇课程覆盖 TCP/IP、IPv4/子网、静态路由、OSPF 单区域、IPv6、网络服务/接入安全、WLAN、链路聚合/堆叠、运维与自动化入门；**WAN 基础（PPP/PPPoE）** 课程未单列、模拟器也未建模。
-- **HCIP-Datacom Core（H12-821）**：OSPF/IS-IS/BGP、交换（VLAN/STP/堆叠）、IPv6、BFD/VRRP、组播、QoS、MPLS VPN、运维。IP 的 11 篇课程覆盖 OSPF/VRRP、OSPFv3、BGP、IS-IS 基础、BFD/可靠性、组播、MPLS VPN、安全与 WLAN；**MUX VLAN / 端口隔离** 已建模（端口角色 + 隔离组，同一 VLAN 内生效；不做 MUX VLAN 的跨 VLAN 二层桥接）。
+- **HCIP-Datacom Core（H12-821）**：OSPF/IS-IS/BGP、交换（VLAN/STP/堆叠）、IPv6、BFD/VRRP、组播、QoS、MPLS VPN、运维。IP 的 12 篇课程覆盖 OSPF/VRRP、OSPFv3、BGP、IS-IS 基础、BFD/可靠性、组播、QoS、MPLS VPN、安全与 WLAN；**MUX VLAN / 端口隔离** 已建模（端口角色 + 隔离组，同一 VLAN 内生效；不做 MUX VLAN 的跨 VLAN 二层桥接）。
 - **HCIE-Datacom V2.0（H12-891）**：园区 43%、广域 33%、自动化 10%、智能运维 14%。IE 的 40/41/42/45 分别对应园区规划/CloudCampus、SD-WAN/CloudWAN、智能运维与结构化排障、SRv6；EVPN、MPLS 跨域、自动化由 IE 12/31/33 承接。
 - **已知缺口（下一批）**：
   - WAN 基础（PPP/PPPoE）：课程与模拟器均未实现；

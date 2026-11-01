@@ -1,51 +1,40 @@
 ---
-title: "QoS and Multicast: Prioritizing Critical Traffic"
+title: "Advanced Multicast: PIM-SM, SSM, and RPF"
 order: 32
 level: IE
-topic: qos
+topic: multicast
 lab: campus-capstone
 ---
 
-Under congestion, treating every flow "fairly" makes voice stutter and video pixelate. **QoS** gives different services different treatment; **multicast** delivers one stream to many receivers without duplicating it at the source.
+Multicast lets a source send one copy while the network replicates at forks, and only receivers that joined the group get it. IP multicast basics are in Lesson 39; this lesson focuses on **routing protocols, the RP, and loop prevention** in enterprise and carrier multicast.
 
-## The four QoS actions
+## Three PIM modes
 
-```
-Classification   Identify traffic by ACL, port, or DSCP
-Marking          Set DSCP/CoS so downstream devices can trust it
-Policing         Drop or downgrade excess immediately, enforcing a rate
-Shaping          Buffer excess and smooth it out, adding delay
-Queuing          PQ priority, WFQ fairness, LLQ low-latency queue
-```
+- **PIM-DM (dense mode)**: flood first, then prune; suits dense small networks;
+- **PIM-SM (sparse mode)**: build a shared tree `(*,G)` rooted at the RP, then switch to the source tree `(S,G)` as traffic grows;
+- **PIM-SSM**: receivers specify `(S,G)` directly, no RP needed, ideal for live/video.
 
-DSCP occupies 6 bits in the IP header (0–63): **EF=46** for voice, **AF41=34** for video, **CS6/CS7** for protocol control. End-to-end QoS requires every hop to trust and enforce the same markings, or they will be stripped at a boundary.
+The key to PIM-SM is the **RP (rendezvous point)**: sources register with the RP, receivers join toward it, and after the shared tree is built the last-hop router may perform an **SPT switchover** to the source tree for lower latency.
 
-Congestion avoidance often uses **WRED**: as a queue fills, drop low-priority packets probabilistically to avoid global TCP synchronization.
+## RPF: the core loop-prevention check
 
-## Multicast: one stream, many receivers
+Multicast forwarding does not look at the destination; it checks the **source**:
 
-- **IGMP**: hosts tell the router which group they want (IGMPv2/v3);
-- **PIM-SM**: sparse mode builds a shared tree rooted at the RP (`(*,G)`) and switches to the source tree (`(S,G)`) when traffic grows;
-- **PIM-SSM**: specifies source and group directly, ideal for video and live streams;
-- **RPF check**: multicast packets must arrive on the interface on the shortest path back to the source, otherwise they are dropped — the core loop-prevention rule.
+- Packets must arrive on the interface on the shortest path back to the source (the RPF interface);
+- Packets arriving on any other interface are dropped;
+- Unicast routing changes alter the RPF interface, so multicast failures are often "the unicast route changed".
 
-Multicast addresses are `224.0.0.0/4`; `224.0.0.0/24` is link-local protocol space and `239.0.0.0/8` is private multicast.
+Multicast routing entries use `(S,G)` or `(*,G)` and are maintained separately from unicast routes. A practical troubleshooting order: IGMP join → RP reachability → RPF interface → multicast boundary/ACL → Layer-2 IGMP Snooping.
+
+## Layer 2 and QoS
+
+- **IGMP Snooping**: switches listen to IGMP and forward multicast only to ports with members, avoiding broadcast-like flooding;
+- **Multicast QoS**: live streams can be marked with DSCP (such as AF41) and placed in an LLQ/priority queue at congestion points; QoS basics are in Lesson 46.
 
 ## In this simulator
 
-The simulator implements **broadcast storm suppression** and **ingress rate limiting**, with drop/suppression counters:
-
-```
-Cisco:
-storm-control broadcast level 100
-rate-limit input 1000
-Huawei/H3C:
-broadcast-suppression 100
-qos car inbound cir 1000
-```
-
-Full DSCP queues, WRED, and PIM are not modeled, but the framework — classify, mark, then queue or drop — explains real device behavior.
+The simulator focuses on unicast per-packet forwarding and does not implement IGMP/PIM; this lesson is protocol- and troubleshooting-oriented. Open Lab 9 and compare broadcast and unknown-unicast flooding to understand why multicast replicates at forks instead of flooding the whole network.
 
 ## Hands-on
 
-Open Lab 9: configure broadcast suppression on an access port, generate broadcast traffic, and watch the drop counter; then rate-limit the uplink and observe excess traffic being dropped. Consider why voice fits LLQ while large downloads fit WFQ.
+Open Lab 9 and draw the "source—RP—receiver" shared tree and the "source—receiver" source tree, marking each router's RPF interface. Then suppose the unicast route moves the RPF interface to the other side and reason where multicast traffic will be dropped.
