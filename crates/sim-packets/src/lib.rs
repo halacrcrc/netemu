@@ -222,6 +222,24 @@ pub struct Ipv4Packet {
     pub icmp: IcmpPacket,
 }
 
+pub const TCP_FIN: u8 = 0x01;
+pub const TCP_SYN: u8 = 0x02;
+pub const TCP_RST: u8 = 0x04;
+pub const TCP_ACK: u8 = 0x10;
+
+/// 简化 TCP 段（教学用：握手/挥手/复位，不携带应用数据）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpPacket {
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub ttl: u8,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub flags: u8,
+    pub seq: u32,
+    pub ack: u32,
+}
+
 /// 网桥 ID：优先级 + MAC，越小越优（先比优先级再比 MAC）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeId {
@@ -311,6 +329,19 @@ pub enum L3 {
     Isis(IsisPacket),
     /// MPLS 标签帧
     Mpls(MplsPacket),
+    /// 简化 TCP（IPv4 承载）
+    Tcp(TcpPacket),
+    /// IPsec 站点隧道（教学用 IP-in-IP，不做 ESP 加密）
+    Ipsec(IpsecPacket),
+}
+
+/// 简化 IPsec 隧道报文：外层路由到对端，内层是受保护流量。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpsecPacket {
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub ttl: u8,
+    pub inner: Ipv4Packet,
 }
 
 /// VRRP 通告（简化字段）。
@@ -548,6 +579,8 @@ impl EthernetFrame {
             L3::Bgp(_) => 19 + 32,       // BGP 头 + 条目近似
             L3::Isis(_) => 27 + 32,      // IS-IS 头 + 条目近似
             L3::Mpls(m) => 14 + 4 * m.depth as u32 + 20 + ICMP_DATA_SIZE + 4,
+            L3::Tcp(_) => 20 + 20 + 8,
+            L3::Ipsec(_) => 20 + 20 + ICMP_DATA_SIZE + 20,
         };
         14 + payload + 4 + if self.vlan.is_some() { 4 } else { 0 }
     }

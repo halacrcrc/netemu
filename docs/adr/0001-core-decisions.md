@@ -126,6 +126,22 @@ MPLS：只做**静态 LSP**：ingress（FEC→out-label）压签、transit 换�
 
 不做：MP-BGP VPNv4 路由分发、LDP/RSVP、PHP、VPN 实例 RD/RT、跨 VRF 泄漏；`vpn-label` 必须配合 `vrf`，标签值不做全局唯一性校验（教学拓扑由使用者保证）。大型园区实验复用既有 VLAN/LACP/SVI/OSPF/VRRP/NAT，不新增引擎能力；静态路由现已允许 `0.0.0.0/0` 默认路由（原先误判为非法）。
 
+### D25（M6 起步）防火墙复用路由器数据面，区域策略为状态化 ICMP 简化
+
+`DeviceKind::Firewall` 复用 `RouterState`（接口、路由、NAT、ACL 全部可用），只额外增加端口 `zone` 与 `RouterState.security_policies/security_sessions`。转发时在路由查表后、出向 ACL/NAT 前判定：同区域或未划分区域放行；跨区域按策略顺序首条匹配，无命中默认拒绝；策略 permit 后记录 `(src,dst,icmp_id)` 会话，30 秒内反向回包直接放行。当前只对 ICMP 建模状态（本模拟器三层载荷只有 ICMP），不对 TCP 状态机、序列号与超时细节建模。
+
+命令按厂商语义分叉：VRP `firewall zone` + `security-policy` + `rule name`，Comware `security-zone name` + `security-policy ip`，IOS 用简化 ZBF（`zone security`、接口 `zone-member security`、`zone-pair security` + `source`/`destination`/`action`，省略 class-map/policy-map/inspect）。不做：ASA `nameif`/`security-level`、IPSec/SSL VPN、应用层识别、NAT 与策略联动、区域间 IPv6 策略。
+
+### D26（M6 补全）ASA 安全级别、TCP 状态机、IPsec/SSL VPN 的教学实现
+
+**ASA 模型**：端口增加 `nameif`/`security_level`。防火墙在未配置区域时按安全级别处理：`in_level >= out_level` 放行并记录 ICMP 会话，低→高仅允许已有会话回包；配置区域时区域策略优先。不做完整 ASA ACL/object-group/application inspection。
+
+**TCP 状态机**：新增 `TcpPacket` 与 `L3::Tcp`，PC `tcp <IP> <port>` 发起 SYN；主机监听 22/80/443，回 SYN-ACK，未监听端口回 RST；客户端完成 ACK 后发 FIN，服务端回 ACK+FIN，客户端再 ACK，实现 SYN_SENT → ESTABLISHED → FIN_WAIT → CLOSED。防火墙用五元组 `TcpFlow` 追踪状态（60s 老化），首包按区域/级别策略，后续报文命中流即放行。TCP 报文用广播 MAC 逐跳发送（免 ARP，和 BGP 一致），不承载应用数据，不做窗口/重传/序列号校验。
+
+**IPsec**：`ipsec tunnel NAME local A remote B` + `local-subnet`/`remote-subnet`，命中保护子网的 IPv4 报文以 `IpsecPacket` 做 IP-in-IP 封装，外层按全局表路由，对端解封装后按内层目的转发；仅 ICMP 载荷，不做 IKE/ESP/AH/加密/抗重放。
+
+**SSL VPN**：防火墙 `sslvpn virtual-ip NET LEN` 定义虚拟地址池，复用本地用户认证；PC `sslvpn connect` 认证成功后获得虚拟 IP，访问非本地网段时封装到网关（内层源地址改为虚拟 IP），网关解封装后按内网路由转发；回程目的为虚拟 IP 时按客户端映射封装回真实 IP。仅 ICMP 隧道，不做 TLS/证书/隧道分片/资源授权。
+
 ## 后果
 
 - 三方言首版交付慢一些（M0 即验证多方言架构），但 M1+ 平移成本递减。

@@ -712,6 +712,8 @@ impl Engine {
         };
         let my_mac = svi_mac(vlan);
         match frame.payload {
+            L3::Tcp(tcp) => self.tcp_ingress(dev_id, in_port, tcp),
+            L3::Ipsec(pkt) => self.ipsec_ingress(dev_id, in_port, pkt),
             L3::Arp(arp) => {
                 if arp.sender_ip != 0 {
                     self.arp_learn(dev_id, in_port, Some(vlan), arp.sender_ip, arp.sender_mac);
@@ -906,6 +908,8 @@ impl Engine {
         match frame.payload {
             L3::Arp(arp) => self.arp_ingress(dev_id, port, my_mac, my_ip, arp),
             L3::Ipv4(pkt) => self.ipv4_ingress(dev_id, port, my_mac, frame, pkt),
+            L3::Tcp(tcp) => self.tcp_ingress(dev_id, port, tcp),
+            L3::Ipsec(pkt) => self.ipsec_ingress(dev_id, port, pkt),
             L3::Bpdu(_) => {} // 主机/路由器不处理 802.1D BPDU
             L3::Lacp(_) => {} // 主机/路由器不做链路聚合
             L3::Ospf(_) => {} // OSPF 已在入口处理
@@ -918,7 +922,9 @@ impl Engine {
                 // DHCP 广播：主机客户端 / 路由器服务器各自处理
                 match d_kind(&self.net, dev_id) {
                     DeviceKind::Host => self.dhcp_client_ingress(dev_id, port, dhcp),
-                    DeviceKind::Router => self.dhcp_server_ingress(dev_id, port, dhcp),
+                    DeviceKind::Router | DeviceKind::Firewall => {
+                        self.dhcp_server_ingress(dev_id, port, dhcp)
+                    }
                     DeviceKind::Switch => {}
                 }
             }
@@ -1078,7 +1084,10 @@ impl Engine {
             .and_then(|d| d.port(port))
             .and_then(|p| p.ip);
         // 入方向 ACL（先于一切转发与本机处理；DHCP 不走 Ipv4 路径天然豁免）
-        if d_kind(&self.net, dev_id) == DeviceKind::Router {
+        if matches!(
+            d_kind(&self.net, dev_id),
+            DeviceKind::Router | DeviceKind::Firewall
+        ) {
             let acl_no = self
                 .net
                 .device(dev_id)
@@ -1089,8 +1098,11 @@ impl Engine {
                 return;
             }
         }
-        // 路由器：NAT 入向还原优先（outside 口收到目的为出口 IP 的报文 → 还原目的后转发）
-        if d_kind(&self.net, dev_id) == DeviceKind::Router {
+        // 路由器/防火墙：NAT 入向还原优先（outside 口收到目的为出口 IP 的报文 → 还原目的后转发）
+        if matches!(
+            d_kind(&self.net, dev_id),
+            DeviceKind::Router | DeviceKind::Firewall
+        ) {
             let vrf = self
                 .net
                 .device(dev_id)
@@ -1098,7 +1110,7 @@ impl Engine {
                 .and_then(|p| p.vrf);
             let mut pkt2 = pkt;
             if vrf.is_none() && self.nat_check_ingress(dev_id, port, &mut pkt2) {
-                self.router_forward(dev_id, None, pkt2);
+                self.router_forward(dev_id, None, Some(port), pkt2);
                 return;
             }
             let vip_mac = if vrf.is_none() {
@@ -1132,7 +1144,7 @@ impl Engine {
                 }
                 return;
             }
-            self.router_forward(dev_id, vrf, pkt);
+            self.router_forward(dev_id, vrf, Some(port), pkt);
             return;
         }
         // 主机：本机交付或丢弃
@@ -1183,6 +1195,53 @@ impl Engine {
             };
             (p.mac, p.ip)
         };
+        // SSL VPN 客户端：访问非本地网段时封装到网关
+        let vpn_send = {
+            let Some(d) = self.net.device(dev_id) else {
+                return;
+            };
+            match (&d.state, d.port(port)) {
+                (DeviceState::Host(hs), Some(p)) => {
+                    let vpn = hs.vpn.clone();
+                    let local = p.ip.map(|ip| (ip, p.prefix));
+                    match (vpn, local) {
+                        (Some(v), Some((ip, prefix))) => {
+                            let mask = mask_from_prefix(prefix);
+                            if (pkt.dst & mask) != (ip & mask) {
+                                Some((v, ip))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        if let Some((v, real_ip)) = vpn_send {
+            let inner = Ipv4Packet {
+                src: v.virtual_ip,
+                dst: pkt.dst,
+                ttl: pkt.ttl,
+                icmp: pkt.icmp,
+            };
+            let outer = IpsecPacket {
+                src: real_ip,
+                dst: v.gateway,
+                ttl: DEFAULT_TTL,
+                inner,
+            };
+            let frame = EthernetFrame {
+                dst: BROADCAST_MAC,
+                src: src_mac,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV4,
+                payload: L3::Ipsec(outer),
+            };
+            self.transmit_frame(dev_id, port, frame);
+            return;
+        }
         if let Some(e) = self.arp_lookup(dev_id, port, None, arp_for) {
             let frame = EthernetFrame {
                 dst: e.mac,
@@ -1252,12 +1311,26 @@ impl Engine {
         }
     }
 
-    fn router_forward(&mut self, dev_id: DevId, vrf: Option<u16>, mut pkt: Ipv4Packet) {
+    fn router_forward(
+        &mut self,
+        dev_id: DevId,
+        vrf: Option<u16>,
+        in_port: Option<PortId>,
+        mut pkt: Ipv4Packet,
+    ) {
         if pkt.ttl <= 1 {
             self.dropped += 1;
             return;
         }
         pkt.ttl -= 1;
+        // IPsec 站点隧道：命中保护子网则封装（教学用 IP-in-IP）
+        if vrf.is_none() && self.ipsec_encapsulate(dev_id, pkt) {
+            return;
+        }
+        // SSL VPN 回程：目的为虚拟 IP 时封装回客户端
+        if vrf.is_none() && self.sslvpn_encapsulate(dev_id, pkt) {
+            return;
+        }
         // VRF 入口：PE 的 VPN 路由下一跳位于全局 MPLS 域，先尝试压签
         if vrf.is_some() && self.mpls_push(dev_id, pkt, vrf) {
             return;
@@ -1266,6 +1339,12 @@ impl Engine {
             self.dropped += 1;
             return;
         };
+        if let Some(ip) = in_port {
+            if !self.firewall_allow(dev_id, ip, port, &pkt) {
+                self.dropped += 1;
+                return;
+            }
+        }
         // 出方向 ACL（后于路由，先于 NAT——与真实设备一致）
         let acl_out = self
             .net
@@ -1285,6 +1364,152 @@ impl Engine {
             return;
         }
         self.device_send_ip(dev_id, port, pkt, nexthop);
+    }
+
+    /// 防火墙区域策略：同区域/未划分区域放行；跨区域按策略首条匹配，
+    /// 无命中默认拒绝；已放行的 ICMP 会话允许反向回包（30s）。
+    fn firewall_allow(
+        &mut self,
+        dev_id: DevId,
+        in_port: PortId,
+        out_port: PortId,
+        pkt: &Ipv4Packet,
+    ) -> bool {
+        let (in_zone, out_zone, in_level, out_level) = {
+            let Some(d) = self.net.device(dev_id) else {
+                return true;
+            };
+            if d.kind != DeviceKind::Firewall {
+                return true;
+            }
+            let z = |p: PortId| d.port(p).and_then(|p| p.zone.clone());
+            let l = |p: PortId| d.port(p).and_then(|p| p.security_level);
+            (z(in_port), z(out_port), l(in_port), l(out_port))
+        };
+        let now = self.now;
+        let Some(d) = self.net.device_mut(dev_id) else {
+            return true;
+        };
+        let DeviceState::Router(rs) = &mut d.state else {
+            return true;
+        };
+        rs.security_sessions.retain(|s| {
+            now.saturating_sub(s.last_ns) < 30_000_000_000
+                && !(s.src == pkt.src && s.dst == pkt.dst && s.icmp_id == pkt.icmp.id)
+        });
+        let reverse_session = rs
+            .security_sessions
+            .iter()
+            .any(|s| s.src == pkt.dst && s.dst == pkt.src && s.icmp_id == pkt.icmp.id);
+        if let (Some(in_zone), Some(out_zone)) = (in_zone, out_zone) {
+            if in_zone == out_zone || reverse_session {
+                return true;
+            }
+            let Some(policy) = rs
+                .security_policies
+                .iter()
+                .find(|p| p.src_zone == in_zone && p.dst_zone == out_zone)
+            else {
+                return false;
+            };
+            if !policy.permit {
+                return false;
+            }
+        } else if let (Some(il), Some(ol)) = (in_level, out_level) {
+            // ASA 默认：高安全级别 → 低安全级别放行，低 → 高默认拒绝（回包走会话）
+            if il < ol && !reverse_session {
+                return false;
+            }
+        } else {
+            return true;
+        }
+        rs.security_sessions.push(SecuritySession {
+            src: pkt.src,
+            dst: pkt.dst,
+            icmp_id: pkt.icmp.id,
+            last_ns: now,
+        });
+        true
+    }
+
+    fn firewall_tcp_allow(
+        &mut self,
+        dev_id: DevId,
+        in_port: PortId,
+        out_port: PortId,
+        tcp: &TcpPacket,
+    ) -> bool {
+        let (in_zone, out_zone, in_level, out_level) = {
+            let Some(d) = self.net.device(dev_id) else {
+                return true;
+            };
+            if d.kind != DeviceKind::Firewall {
+                return true;
+            }
+            let z = |p: PortId| d.port(p).and_then(|p| p.zone.clone());
+            let l = |p: PortId| d.port(p).and_then(|p| p.security_level);
+            (z(in_port), z(out_port), l(in_port), l(out_port))
+        };
+        let now = self.now;
+        let Some(d) = self.net.device_mut(dev_id) else {
+            return true;
+        };
+        let DeviceState::Router(rs) = &mut d.state else {
+            return true;
+        };
+        rs.tcp_flows
+            .retain(|f| now.saturating_sub(f.last_ns) < 60_000_000_000);
+        let existing = rs.tcp_flows.iter_mut().find(|f| {
+            (f.client == tcp.src
+                && f.server == tcp.dst
+                && f.client_port == tcp.src_port
+                && f.server_port == tcp.dst_port)
+                || (f.server == tcp.src
+                    && f.client == tcp.dst
+                    && f.server_port == tcp.src_port
+                    && f.client_port == tcp.dst_port)
+        });
+        if let Some(flow) = existing {
+            flow.last_ns = now;
+            if tcp.flags & TCP_RST != 0 {
+                flow.state = TcpFlowState::Closed;
+            } else if tcp.flags & TCP_FIN != 0 {
+                flow.state = TcpFlowState::FinWait;
+            } else if (tcp.flags & TCP_SYN != 0 && tcp.flags & TCP_ACK != 0)
+                || (tcp.flags & TCP_ACK != 0 && flow.state == TcpFlowState::SynSent)
+            {
+                flow.state = TcpFlowState::Established;
+            }
+            return true;
+        }
+        let is_syn = tcp.flags & TCP_SYN != 0 && tcp.flags & TCP_ACK == 0;
+        let permitted = if let (Some(in_zone), Some(out_zone)) = (in_zone, out_zone) {
+            if in_zone == out_zone {
+                true
+            } else {
+                rs.security_policies
+                    .iter()
+                    .find(|p| p.src_zone == in_zone && p.dst_zone == out_zone)
+                    .map(|p| p.permit)
+                    .unwrap_or(false)
+            }
+        } else if let (Some(il), Some(ol)) = (in_level, out_level) {
+            il >= ol
+        } else {
+            true
+        };
+        if !permitted || !is_syn {
+            return false;
+        }
+        rs.tcp_flows.push(TcpFlow {
+            client: tcp.src,
+            server: tcp.dst,
+            client_port: tcp.src_port,
+            server_port: tcp.dst_port,
+            state: TcpFlowState::SynSent,
+            last_ns: now,
+        });
+        true
     }
 
     /// ACL 判定：存在编号且命中规则按首条决定；无命中 = 隐式拒绝；编号未定义 = 放行。
@@ -1315,7 +1540,7 @@ impl Engine {
         let kind = d_kind(&self.net, dev);
         if !matches!(
             kind,
-            DeviceKind::Router | DeviceKind::Switch | DeviceKind::Host
+            DeviceKind::Router | DeviceKind::Switch | DeviceKind::Host | DeviceKind::Firewall
         ) {
             return None;
         }
@@ -1588,6 +1813,507 @@ impl Engine {
         }
         pings.retain(|s| !(s.done && s.reported));
         out
+    }
+
+    // ---------- TCP 握手/挥手（教学简化，无应用数据） ----------
+
+    pub fn start_tcp_probe(&mut self, dev: DevId, target: Ipv4Addr, port: u16) -> Option<u16> {
+        if d_kind(&self.net, dev) != DeviceKind::Host {
+            return None;
+        }
+        let (id, src_ip) = {
+            let src_ip = self
+                .net
+                .device(dev)
+                .and_then(|d| d.port(0))
+                .and_then(|p| p.ip)?;
+            let d = self.net.device_mut(dev)?;
+            let DeviceState::Host(hs) = &mut d.state else {
+                return None;
+            };
+            let id = hs.next_tcp_id;
+            hs.next_tcp_id = hs.next_tcp_id.wrapping_add(1);
+            hs.tcp_probes.push(TcpProbe {
+                id,
+                target,
+                target_port: port,
+                src_port: 40000 + id,
+                state: TcpProbeState::SynSent,
+                opened: None,
+                reported: false,
+            });
+            (id, src_ip)
+        };
+        let tcp = TcpPacket {
+            src: src_ip,
+            dst: target,
+            ttl: DEFAULT_TTL,
+            src_port: 40000 + id,
+            dst_port: port,
+            flags: TCP_SYN,
+            seq: 1000,
+            ack: 0,
+        };
+        self.send_tcp_broadcast(dev, 0, tcp);
+        Some(id)
+    }
+
+    pub fn take_unreported_tcp(&mut self, dev: DevId) -> Vec<TcpProbe> {
+        let Some(d) = self.net.device_mut(dev) else {
+            return vec![];
+        };
+        let DeviceState::Host(hs) = &mut d.state else {
+            return vec![];
+        };
+        let mut out = vec![];
+        for p in hs.tcp_probes.iter_mut() {
+            if !p.reported {
+                p.reported = true;
+                out.push(p.clone());
+            }
+        }
+        hs.tcp_probes.retain(|p| !p.reported);
+        out
+    }
+
+    fn send_tcp_broadcast(&mut self, dev: DevId, port: PortId, tcp: TcpPacket) {
+        let Some(mac) = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(port))
+            .map(|p| p.mac)
+        else {
+            return;
+        };
+        let frame = EthernetFrame {
+            dst: BROADCAST_MAC,
+            src: mac,
+            vlan: None,
+            ethertype: ETHERTYPE_IPV4,
+            payload: L3::Tcp(tcp),
+        };
+        self.transmit_frame(dev, port, frame);
+    }
+
+    fn tcp_ingress(&mut self, dev: DevId, port: PortId, tcp: TcpPacket) {
+        let my_ip = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(port))
+            .and_then(|p| p.ip);
+        if Some(tcp.dst) == my_ip {
+            match d_kind(&self.net, dev) {
+                DeviceKind::Host => self.host_tcp_ingress(dev, port, tcp),
+                DeviceKind::Router | DeviceKind::Firewall | DeviceKind::Switch => {
+                    let rst = TcpPacket {
+                        src: tcp.dst,
+                        dst: tcp.src,
+                        ttl: DEFAULT_TTL,
+                        src_port: tcp.dst_port,
+                        dst_port: tcp.src_port,
+                        flags: TCP_RST | TCP_ACK,
+                        seq: tcp.ack,
+                        ack: tcp.seq.wrapping_add(1),
+                    };
+                    self.send_tcp_broadcast(dev, port, rst);
+                }
+            }
+            return;
+        }
+        match d_kind(&self.net, dev) {
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::Switch => {
+                self.tcp_forward(dev, port, tcp)
+            }
+            DeviceKind::Host => {}
+        }
+    }
+
+    fn host_tcp_ingress(&mut self, dev: DevId, port: PortId, tcp: TcpPacket) {
+        let is_client = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Host(hs) = &d.state else {
+                return;
+            };
+            hs.tcp_probes.iter().any(|p| {
+                p.target == tcp.src && p.target_port == tcp.src_port && p.src_port == tcp.dst_port
+            })
+        };
+        if is_client {
+            let mut out: Vec<TcpPacket> = vec![];
+            if let Some(d) = self.net.device_mut(dev) {
+                let DeviceState::Host(hs) = &mut d.state else {
+                    return;
+                };
+                let Some(p) = hs.tcp_probes.iter_mut().find(|p| {
+                    p.target == tcp.src
+                        && p.target_port == tcp.src_port
+                        && p.src_port == tcp.dst_port
+                }) else {
+                    return;
+                };
+                if tcp.flags & TCP_RST != 0 {
+                    p.opened = Some(false);
+                    p.state = TcpProbeState::Closed;
+                } else if tcp.flags & TCP_SYN != 0 && tcp.flags & TCP_ACK != 0 {
+                    p.opened = Some(true);
+                    p.state = TcpProbeState::Established;
+                    out.push(TcpPacket {
+                        src: tcp.dst,
+                        dst: tcp.src,
+                        ttl: DEFAULT_TTL,
+                        src_port: tcp.dst_port,
+                        dst_port: tcp.src_port,
+                        flags: TCP_ACK,
+                        seq: tcp.ack,
+                        ack: tcp.seq.wrapping_add(1),
+                    });
+                    out.push(TcpPacket {
+                        src: tcp.dst,
+                        dst: tcp.src,
+                        ttl: DEFAULT_TTL,
+                        src_port: tcp.dst_port,
+                        dst_port: tcp.src_port,
+                        flags: TCP_ACK | TCP_FIN,
+                        seq: tcp.ack,
+                        ack: tcp.seq.wrapping_add(1),
+                    });
+                    p.state = TcpProbeState::FinWait;
+                } else if tcp.flags & TCP_FIN != 0 {
+                    p.state = TcpProbeState::Closed;
+                    out.push(TcpPacket {
+                        src: tcp.dst,
+                        dst: tcp.src,
+                        ttl: DEFAULT_TTL,
+                        src_port: tcp.dst_port,
+                        dst_port: tcp.src_port,
+                        flags: TCP_ACK,
+                        seq: tcp.ack,
+                        ack: tcp.seq.wrapping_add(1),
+                    });
+                }
+            }
+            for pkt in out {
+                self.send_tcp_broadcast(dev, port, pkt);
+            }
+            return;
+        }
+        // 服务端：监听端口回 SYN-ACK，未监听端口回 RST；FIN 回 ACK+FIN
+        let listening = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let DeviceState::Host(hs) = &d.state else {
+                return;
+            };
+            hs.tcp_listeners.contains(&tcp.dst_port)
+        };
+        let reply = if tcp.flags & TCP_SYN != 0 && tcp.flags & TCP_ACK == 0 && !listening {
+            Some(TcpPacket {
+                src: tcp.dst,
+                dst: tcp.src,
+                ttl: DEFAULT_TTL,
+                src_port: tcp.dst_port,
+                dst_port: tcp.src_port,
+                flags: TCP_RST | TCP_ACK,
+                seq: 0,
+                ack: tcp.seq.wrapping_add(1),
+            })
+        } else if tcp.flags & TCP_SYN != 0 && tcp.flags & TCP_ACK == 0 {
+            Some(TcpPacket {
+                src: tcp.dst,
+                dst: tcp.src,
+                ttl: DEFAULT_TTL,
+                src_port: tcp.dst_port,
+                dst_port: tcp.src_port,
+                flags: TCP_SYN | TCP_ACK,
+                seq: 2000,
+                ack: tcp.seq.wrapping_add(1),
+            })
+        } else if tcp.flags & TCP_FIN != 0 {
+            Some(TcpPacket {
+                src: tcp.dst,
+                dst: tcp.src,
+                ttl: DEFAULT_TTL,
+                src_port: tcp.dst_port,
+                dst_port: tcp.src_port,
+                flags: TCP_ACK | TCP_FIN,
+                seq: tcp.ack,
+                ack: tcp.seq.wrapping_add(1),
+            })
+        } else {
+            None
+        };
+        if let Some(reply) = reply {
+            self.send_tcp_broadcast(dev, port, reply);
+        }
+    }
+
+    fn tcp_forward(&mut self, dev: DevId, in_port: PortId, mut tcp: TcpPacket) {
+        if tcp.ttl <= 1 {
+            self.dropped += 1;
+            return;
+        }
+        tcp.ttl -= 1;
+        let vrf = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(in_port))
+            .and_then(|p| p.vrf);
+        let Some((out_port, _nh, _vlan)) = self.net.lookup_route_vrf(dev, vrf, tcp.dst) else {
+            self.dropped += 1;
+            return;
+        };
+        if !self.firewall_tcp_allow(dev, in_port, out_port, &tcp) {
+            self.dropped += 1;
+            return;
+        }
+        self.send_tcp_broadcast(dev, out_port, tcp);
+    }
+
+    // ---------- IPsec 站点隧道（教学 IP-in-IP） ----------
+
+    fn ipsec_encapsulate(&mut self, dev: DevId, pkt: Ipv4Packet) -> bool {
+        let tunnel = {
+            let Some(d) = self.net.device(dev) else {
+                return false;
+            };
+            let DeviceState::Router(rs) = &d.state else {
+                return false;
+            };
+            rs.ipsec_tunnels.iter().find(|t| {
+                (pkt.src & mask_from_prefix(t.local_subnet.1)) == t.local_subnet.0
+                    && (pkt.dst & mask_from_prefix(t.remote_subnet.1)) == t.remote_subnet.0
+            })
+        }
+        .cloned();
+        let Some(t) = tunnel else { return false };
+        let Some((port, _, _)) = self.net.lookup_route(dev, t.remote) else {
+            self.dropped += 1;
+            return true;
+        };
+        let tunneled = IpsecPacket {
+            src: t.local,
+            dst: t.remote,
+            ttl: DEFAULT_TTL,
+            inner: pkt,
+        };
+        if let Some(mac) = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(port))
+            .map(|p| p.mac)
+        {
+            let frame = EthernetFrame {
+                dst: BROADCAST_MAC,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV4,
+                payload: L3::Ipsec(tunneled),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+        true
+    }
+
+    fn ipsec_ingress(&mut self, dev: DevId, _port: PortId, pkt: IpsecPacket) {
+        let local = self
+            .net
+            .device(dev)
+            .map(|d| {
+                matches!(d.state, DeviceState::Router(_))
+                    && d.ports.iter().any(|p| p.ip == Some(pkt.dst))
+            })
+            .unwrap_or(false);
+        if local {
+            self.router_forward(dev, None, None, pkt.inner);
+            return;
+        }
+        // SSL VPN 客户端解封装：目的为本机时直接处理内层 ICMP 回包
+        if d_kind(&self.net, dev) == DeviceKind::Host {
+            let mine = self
+                .net
+                .device(dev)
+                .and_then(|d| d.port(0))
+                .and_then(|p| p.ip);
+            if Some(pkt.dst) == mine && pkt.inner.icmp.is_reply {
+                self.on_ping_reply(dev, pkt.inner);
+            }
+            return;
+        }
+        let Some(d) = self.net.device(dev) else {
+            return;
+        };
+        if !matches!(
+            d.kind,
+            DeviceKind::Router | DeviceKind::Firewall | DeviceKind::Switch
+        ) {
+            return;
+        }
+        if pkt.ttl <= 1 {
+            self.dropped += 1;
+            return;
+        }
+        let mut outer = pkt;
+        outer.ttl -= 1;
+        let Some((out_port, _, _)) = self.net.lookup_route(dev, outer.dst) else {
+            self.dropped += 1;
+            return;
+        };
+        let Some(mac) = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(out_port))
+            .map(|p| p.mac)
+        else {
+            return;
+        };
+        let frame = EthernetFrame {
+            dst: BROADCAST_MAC,
+            src: mac,
+            vlan: None,
+            ethertype: ETHERTYPE_IPV4,
+            payload: L3::Ipsec(outer),
+        };
+        self.transmit_frame(dev, out_port, frame);
+    }
+
+    // ---------- SSL VPN（远程接入简化：认证 + 虚拟 IP + IP-in-IP 隧道） ----------
+
+    pub fn sslvpn_connect(
+        &mut self,
+        pc: DevId,
+        gateway_ip: Ipv4Addr,
+        user: &str,
+        pass: &str,
+    ) -> Result<Ipv4Addr, String> {
+        if d_kind(&self.net, pc) != DeviceKind::Host {
+            return Err("SSL VPN client must be a host".into());
+        }
+        let Some(gw) = self.mgmt_ip_owner(gateway_ip) else {
+            return Err("SSL VPN gateway not found".into());
+        };
+        let (pool, real_ip) = {
+            let Some(d) = self.net.device(gw) else {
+                return Err("SSL VPN gateway not found".into());
+            };
+            let DeviceState::Router(rs) = &d.state else {
+                return Err("SSL VPN gateway not found".into());
+            };
+            let Some(pool) = rs.sslvpn_pool else {
+                return Err("SSL VPN virtual-ip pool is not configured".into());
+            };
+            if !d
+                .mgmt
+                .users
+                .iter()
+                .any(|u| u.name == user && u.secret == pass)
+            {
+                return Err("authentication failed".into());
+            }
+            let real_ip = self
+                .net
+                .device(pc)
+                .and_then(|d| d.port(0))
+                .and_then(|p| p.ip)
+                .ok_or("client has no IP")?;
+            (pool, real_ip)
+        };
+        let virtual_ip = {
+            let Some(d) = self.net.device_mut(gw) else {
+                return Err("SSL VPN gateway not found".into());
+            };
+            let DeviceState::Router(rs) = &mut d.state else {
+                return Err("SSL VPN gateway not found".into());
+            };
+            if let Some((v, _)) = rs.sslvpn_clients.iter().find(|(_, r)| *r == real_ip) {
+                *v
+            } else {
+                let base = pool.0;
+                let host = 2 + rs.sslvpn_clients.len() as u32;
+                if host >= (1u32 << (32 - pool.1)) - 1 {
+                    return Err("SSL VPN pool exhausted".into());
+                }
+                let v = base + host;
+                rs.sslvpn_clients.push((v, real_ip));
+                v
+            }
+        };
+        if let Some(d) = self.net.device_mut(pc) {
+            if let DeviceState::Host(hs) = &mut d.state {
+                hs.vpn = Some(VpnSession {
+                    gateway: gateway_ip,
+                    virtual_ip,
+                });
+            }
+        }
+        Ok(virtual_ip)
+    }
+
+    fn sslvpn_encapsulate(&mut self, dev: DevId, pkt: Ipv4Packet) -> bool {
+        let client = {
+            let Some(d) = self.net.device(dev) else {
+                return false;
+            };
+            let DeviceState::Router(rs) = &d.state else {
+                return false;
+            };
+            let Some((net, len)) = rs.sslvpn_pool else {
+                return false;
+            };
+            if (pkt.dst & mask_from_prefix(len)) != net {
+                return false;
+            }
+            rs.sslvpn_clients
+                .iter()
+                .find(|(v, _)| *v == pkt.dst)
+                .map(|(_, real)| *real)
+        };
+        let Some(real_ip) = client else {
+            return false;
+        };
+        let Some((port, _, _)) = self.net.lookup_route(dev, real_ip) else {
+            self.dropped += 1;
+            return true;
+        };
+        let Some(src_ip) = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(port))
+            .and_then(|p| p.ip)
+        else {
+            return false;
+        };
+        let outer = IpsecPacket {
+            src: src_ip,
+            dst: real_ip,
+            ttl: DEFAULT_TTL,
+            inner: pkt,
+        };
+        if let Some(mac) = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(port))
+            .map(|p| p.mac)
+        {
+            let frame = EthernetFrame {
+                dst: BROADCAST_MAC,
+                src: mac,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV4,
+                payload: L3::Ipsec(outer),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+        true
+    }
+
+    pub fn sslvpn_clients_of(&self, dev: DevId) -> Vec<(Ipv4Addr, Ipv4Addr)> {
+        match self.net.device(dev).map(|d| &d.state) {
+            Some(DeviceState::Router(rs)) => rs.sslvpn_clients.clone(),
+            _ => vec![],
+        }
     }
 
     // ---------- DHCP（DORA 简化：Discover/Offer/Request/Ack） ----------
@@ -3323,7 +4049,10 @@ impl Engine {
 
     pub fn start_ping6(&mut self, dev: DevId, target: Ipv6Addr) -> Option<u16> {
         let kind = d_kind(&self.net, dev);
-        if !matches!(kind, DeviceKind::Router | DeviceKind::Host) {
+        if !matches!(
+            kind,
+            DeviceKind::Router | DeviceKind::Host | DeviceKind::Firewall
+        ) {
             return None;
         }
         let sid = {
@@ -3673,7 +4402,10 @@ impl Engine {
             Ipv6Icmp::EchoRequest { .. } | Ipv6Icmp::EchoReply { .. }
         ) && !self.my_ipv6_on(dev, port, &pkt.dst)
         {
-            let is_router = matches!(d_kind(&self.net, dev), DeviceKind::Router);
+            let is_router = matches!(
+                d_kind(&self.net, dev),
+                DeviceKind::Router | DeviceKind::Firewall
+            );
             if !is_router || pkt.hop_limit <= 1 {
                 return;
             }
@@ -3991,7 +4723,7 @@ impl Engine {
                 self.transmit_frame(dev, reply_port, out);
             }
         } else {
-            self.router_forward(dev, vrf, pkt);
+            self.router_forward(dev, vrf, Some(port), pkt);
         }
     }
 

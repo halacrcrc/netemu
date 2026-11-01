@@ -10,6 +10,7 @@ export interface PortSummary {
   linked: boolean;
   ipv6?: string | null;
   prefix6?: number;
+  zone?: string | null;
 }
 
 export interface StaticRouteSummary {
@@ -18,7 +19,7 @@ export interface StaticRouteSummary {
   nexthop: string;
 }
 
-export type DeviceKind = 'Router' | 'Switch' | 'Host';
+export type DeviceKind = 'Router' | 'Switch' | 'Host' | 'Firewall';
 export type Dialect = 'Ios' | 'Vrp' | 'Comware';
 
 export interface DevSummary {

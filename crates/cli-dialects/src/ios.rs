@@ -43,7 +43,11 @@ fn h_exit(c: &mut Ctx) -> Result<String, CliError> {
         | Mode::OspfArea
         | Mode::Bgp
         | Mode::Isis
-        | Mode::RoutePolicy => Mode::Config,
+        | Mode::RoutePolicy
+        | Mode::Zone
+        | Mode::SecurityPolicy
+        | Mode::SecurityRule
+        | Mode::Ipsec => Mode::Config,
         _ => Mode::Exec,
     };
     if c.sess.mode != Mode::If {
@@ -152,6 +156,23 @@ fn show_branch() -> CNode {
                 .kid(CNode::lit("route", "IPv6 routing table").run(cmd::show_ipv6_route)),
         )
         .kid(CNode::lit("route-map", "Show route maps").run(cmd::show_route_policy))
+        .kid(
+            CNode::lit("zone", "Security zones")
+                .kid(CNode::lit("security", "Show security zones").run(cmd::show_security_zone)),
+        )
+        .kid(
+            CNode::lit("zone-pair", "Zone pairs").kid(
+                CNode::lit("security", "Show zone-pair policies").run(cmd::show_security_policy),
+            ),
+        )
+        .kid(
+            CNode::lit("ipsec", "IPsec information")
+                .kid(CNode::lit("tunnel", "Static tunnels").run(cmd::show_ipsec)),
+        )
+        .kid(
+            CNode::lit("sslvpn", "SSL VPN information")
+                .kid(CNode::lit("session", "SSL VPN sessions").run(cmd::show_sslvpn)),
+        )
         .kid(CNode::lit("spanning-tree", "Spanning tree topology").run(cmd::show_stp))
         .kid(CNode::lit("vrrp", "VRRP status").run(cmd::show_vrrp))
         .kid(CNode::lit("port-security", "Port security").run(cmd::show_port_security))
@@ -345,6 +366,40 @@ pub fn build() -> Trees {
                     CNode::param(ParamKind::Word, "action", "permit | deny").kid(
                         CNode::param(ParamKind::Number, "seq", "Sequence number")
                             .run(cmd::route_policy_enter),
+                    ),
+                ),
+            ),
+            CNode::lit("zone", "Security zone").kid(
+                CNode::lit("security", "Security zone name").kid(
+                    CNode::param(ParamKind::Word, "zone", "Zone name")
+                        .run(cmd::security_zone_enter),
+                ),
+            ),
+            CNode::lit("zone-pair", "Zone pair").kid(
+                CNode::lit("security", "Zone pair name").kid(
+                    CNode::param(ParamKind::Word, "name", "Zone pair name")
+                        .run(cmd::security_rule_enter),
+                ),
+            ),
+            CNode::lit("ipsec", "IPsec configuration").kid(
+                CNode::lit("tunnel", "Static site-to-site tunnel").kid(
+                    CNode::param(ParamKind::Word, "name", "Tunnel name").kid(
+                        CNode::lit("local", "Local endpoint").kid(
+                            CNode::param(ParamKind::Ipv4, "local", "Local IP").kid(
+                                CNode::lit("remote", "Remote endpoint").kid(
+                                    CNode::param(ParamKind::Ipv4, "remote", "Remote IP")
+                                        .run(cmd::ipsec_enter),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            CNode::lit("sslvpn", "SSL VPN gateway").kid(
+                CNode::lit("virtual-ip", "Virtual IP pool").kid(
+                    CNode::param(ParamKind::Ipv4, "net", "Pool network").kid(
+                        CNode::param(ParamKind::PrefixLen, "len", "Prefix length")
+                            .run(cmd::sslvpn_pool),
                     ),
                 ),
             ),
@@ -627,6 +682,17 @@ pub fn build() -> Trees {
                         ),
                     ),
                 ),
+            CNode::lit("zone-member", "Assign this interface to a security zone").kid(
+                CNode::lit("security", "Security zone").kid(
+                    CNode::param(ParamKind::Word, "zone", "Zone name")
+                        .run(cmd::security_zone_member),
+                ),
+            ),
+            CNode::lit("nameif", "Assign an ASA interface name").kid(
+                CNode::param(ParamKind::Word, "name", "e.g. inside, outside").run(cmd::nameif),
+            ),
+            CNode::lit("security-level", "Set the ASA security level")
+                .kid(CNode::param(ParamKind::Number, "level", "0-100").run(cmd::security_level)),
             // 交换机二层口命令
             CNode::lit("ipv6", "IPv6 interface configuration").kid(
                 CNode::lit("address", "Set the IPv6 address").kid(
@@ -872,6 +938,45 @@ pub fn build() -> Trees {
                 ),
             ),
             CNode::lit("exit", "Exit from route-map configuration mode").run(h_exit),
+            CNode::lit("end", "Exit to privileged mode").run(h_end),
+        ],
+        zone: vec![
+            CNode::lit("exit", "Exit from zone configuration mode").run(h_exit),
+            CNode::lit("end", "Exit to privileged mode").run(h_end),
+        ],
+        security_policy: vec![
+            CNode::lit("exit", "Exit from security policy mode").run(h_exit),
+            CNode::lit("end", "Exit to privileged mode").run(h_end),
+        ],
+        security_rule: vec![
+            CNode::lit("source", "Source zone").kid(
+                CNode::param(ParamKind::Word, "src", "Source zone name")
+                    .run(cmd::security_rule_source),
+            ),
+            CNode::lit("destination", "Destination zone").kid(
+                CNode::param(ParamKind::Word, "dst", "Destination zone name")
+                    .run(cmd::security_rule_destination),
+            ),
+            CNode::lit("action", "Policy action").kid(
+                CNode::param(ParamKind::Word, "action", "permit | deny").run(cmd::security_action),
+            ),
+            CNode::lit("exit", "Exit from zone-pair mode").run(h_exit),
+            CNode::lit("end", "Exit to privileged mode").run(h_end),
+        ],
+        ipsec: vec![
+            CNode::lit("local-subnet", "Local protected subnet").kid(
+                CNode::param(ParamKind::Ipv4, "net", "Network").kid(
+                    CNode::param(ParamKind::PrefixLen, "len", "Prefix length")
+                        .run(cmd::ipsec_local_subnet),
+                ),
+            ),
+            CNode::lit("remote-subnet", "Remote protected subnet").kid(
+                CNode::param(ParamKind::Ipv4, "net", "Network").kid(
+                    CNode::param(ParamKind::PrefixLen, "len", "Prefix length")
+                        .run(cmd::ipsec_remote_subnet),
+                ),
+            ),
+            CNode::lit("exit", "Exit from IPsec mode").run(h_exit),
             CNode::lit("end", "Exit to privileged mode").run(h_end),
         ],
     }

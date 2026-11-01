@@ -8,7 +8,7 @@
   import { t } from '../lib/i18n.svelte';
 
   (window as unknown as { __appComp?: unknown }).__appComp = app;
-  let newKind = $state<'Router' | 'Switch' | 'Host'>('Router');
+  let newKind = $state<'Router' | 'Switch' | 'Host' | 'Firewall'>('Router');
   let newDialect = $state<'Ios' | 'Vrp' | 'Comware'>('Ios');
 
   // 属性编辑的本地副本
@@ -333,6 +333,7 @@
         <option value="Router">{t('left.router')}</option>
         <option value="Switch">{t('left.switch')}</option>
         <option value="Host">{t('left.pc')}</option>
+        <option value="Firewall">{t('left.firewall')}</option>
       </select>
       {#if newKind !== 'Host'}
         <select bind:value={newDialect}>

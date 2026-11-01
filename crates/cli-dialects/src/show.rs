@@ -6,8 +6,8 @@ use sim_packets::Mac;
 
 use sim_core::device::{
     AclProto, DevId, DeviceKind, DeviceState, Dialect, LagMode, PingProbeState, PingSession,
-    PortId, PortMode, Route, RouteSrc, StpMode, StpRole, StpSt, SviState, VlanId, DEFAULT_VLAN,
-    STP_COST_1G,
+    PortId, PortMode, Route, RouteSrc, StpMode, StpRole, StpSt, SviState, TcpProbe, VlanId,
+    DEFAULT_VLAN, STP_COST_1G,
 };
 use sim_core::engine::Engine;
 use sim_core::{port_mac, Device};
@@ -522,9 +522,22 @@ pub fn render_ping_generic(s: &PingSession) -> String {
     out
 }
 
+/// PC `tcp <ip> <port>` 结果。
+pub fn render_tcp_probe(p: &TcpProbe) -> String {
+    let target = format!("{}:{}", ipv4_str(p.target), p.target_port);
+    match p.opened {
+        Some(true) => format!("TCP {target} 连接成功（SYN → SYN-ACK → ACK，FIN 已发送）"),
+        Some(false) => format!("TCP {target} 连接被拒绝（RST）"),
+        None => format!("TCP {target} 无响应（可能被策略丢弃或在途）"),
+    }
+}
+
 /// 设备是否具有 L3 能力（show ip route / ping 的前提）。
 pub fn is_l3_device(d: &Device) -> bool {
-    matches!(d.kind, DeviceKind::Router | DeviceKind::Switch)
+    matches!(
+        d.kind,
+        DeviceKind::Router | DeviceKind::Switch | DeviceKind::Firewall
+    )
 }
 
 /// STP 表格：角色/状态按方言渲染。
@@ -1450,6 +1463,139 @@ pub fn route_policies(eng: &Engine, dev: DevId, dialect: Dialect, only: Option<&
                 }
             }
         }
+    }
+    out.trim_end().to_string()
+}
+
+/// `display firewall zone` / `display security-zone` / `show zone security`。
+pub fn security_zones(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Router(_) = &d.state else {
+        return String::new();
+    };
+    let mut zones: Vec<(String, Vec<usize>)> = vec![];
+    for p in &d.ports {
+        let Some(z) = &p.zone else { continue };
+        match zones.iter_mut().find(|(n, _)| n == z) {
+            Some((_, ports)) => ports.push(p.idx),
+            None => zones.push((z.clone(), vec![p.idx])),
+        }
+    }
+    if zones.is_empty() {
+        return match dialect {
+            Dialect::Ios => "No security zone configured.".into(),
+            _ => " Info: No security zone.\n".into(),
+        };
+    }
+    let mut out = String::new();
+    for (name, mut ports) in zones {
+        ports.sort_unstable();
+        out.push_str(&format!("Zone: {}\n", name));
+        for p in ports {
+            out.push_str(&format!(
+                "  Interface: {}\n",
+                ifname::display(dialect, d.kind, p)
+            ));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `display security-policy` / `show zone-pair security`。
+pub fn security_policies(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Router(rs) = &d.state else {
+        return String::new();
+    };
+    if rs.security_policies.is_empty() {
+        return match dialect {
+            Dialect::Ios => "No zone-pair configured.".into(),
+            _ => " Info: No security policy.\n".into(),
+        };
+    }
+    let mut out = String::new();
+    match dialect {
+        Dialect::Ios => {
+            for p in &rs.security_policies {
+                out.push_str(&format!("Zone-pair: {}\n", p.name));
+                out.push_str(&format!("  source {}\n", p.src_zone));
+                out.push_str(&format!("  destination {}\n", p.dst_zone));
+                out.push_str(&format!(
+                    "  action {}\n",
+                    if p.permit { "permit" } else { "deny" }
+                ));
+            }
+        }
+        _ => {
+            out.push_str("Security-policy\n");
+            for p in &rs.security_policies {
+                out.push_str(&format!("  rule name {}\n", p.name));
+                out.push_str(&format!("    source-zone {}\n", p.src_zone));
+                out.push_str(&format!("    destination-zone {}\n", p.dst_zone));
+                out.push_str(&format!(
+                    "    action {}\n",
+                    if p.permit { "permit" } else { "deny" }
+                ));
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ipsec tunnel` / `display ipsec tunnel`。
+pub fn ipsec_tunnels(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Router(rs) = &d.state else {
+        return String::new();
+    };
+    if rs.ipsec_tunnels.is_empty() {
+        return match dialect {
+            Dialect::Ios => "No IPsec tunnel configured.".into(),
+            _ => " Info: No IPsec tunnel.\n".into(),
+        };
+    }
+    let mut out = match dialect {
+        Dialect::Ios => format!(
+            "{:<14}{:<16}{:<16}{:<20}{}\n",
+            "Name", "Local", "Remote", "Local Subnet", "Remote Subnet"
+        ),
+        _ => format!(
+            " {:<14}{:<16}{:<16}{:<20}{}\n",
+            "Name", "Local", "Remote", "Local Subnet", "Remote Subnet"
+        ),
+    };
+    for t in &rs.ipsec_tunnels {
+        let lsub = format!("{}/{}", ipv4_str(t.local_subnet.0), t.local_subnet.1);
+        let rsub = format!("{}/{}", ipv4_str(t.remote_subnet.0), t.remote_subnet.1);
+        let row = format!(
+            "{:<14}{:<16}{:<16}{:<20}{}",
+            t.name,
+            ipv4_str(t.local),
+            ipv4_str(t.remote),
+            lsub,
+            rsub
+        );
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+/// `show sslvpn session` / `display sslvpn session`。
+pub fn sslvpn_sessions(eng: &Engine, dev: DevId, _dialect: Dialect) -> String {
+    let rows = eng.sslvpn_clients_of(dev);
+    if rows.is_empty() {
+        return " Info: No SSL VPN session.\n".into();
+    }
+    let mut out = String::from("Virtual IP      Client IP\n");
+    for (v, c) in rows {
+        out.push_str(&format!("{:<15} {}\n", ipv4_str(v), ipv4_str(c)));
     }
     out.trim_end().to_string()
 }

@@ -4,7 +4,7 @@
 
 > 目标：覆盖 HCIA/HCIP/HCIE、CCNA/CCNP 等课程体系（数通 / 安全 / 无线 / 数据中心），对同一知识点**同时讲解思科、华为、华三的命令写法**，并提供从简单办公网到大型园区网、数据中心的在线练习场，附带笔记与进度追踪。
 
-## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4（OSPF/VRRP/IPv6/安全/QoS）✅ + M5（BGP/IS-IS/VRF/MPLS/route-policy/L3VPN + 园区实验）✅
+## 当前状态：M0 ✅ + M1 ✅ + M2（IA 补全，含 LACP/SSH/RSTP/MSTP）✅ + M3（课程/笔记/云同步/PWA）✅ + M3b（链路聚合）✅ + M4（OSPF/VRRP/IPv6/安全/QoS）✅ + M5（BGP/IS-IS/VRF/MPLS/route-policy/L3VPN + 园区实验）✅ + M6（防火墙/TCP 状态机/IPsec/SSL VPN）✅
 
 **M0 = 可运行的骨架**：
 
@@ -91,7 +91,7 @@
 - **DHCP Snooping**：全局开关 + 信任端口；非信任口的 Offer/Ack 被丢弃，从 Request/Ack 学习绑定表（MAC/IP/VLAN/端口），`show ip dhcp snooping binding` / `display dhcp snooping user-binding`。
 - **端口安全**：最大 MAC 数、`restrict` / `shutdown` 违规动作、sticky 标记；超限帧丢弃与违规计数，`show/display port-security`。
 - **QoS 基础**：入方向广播风暴抑制（每秒广播上限）与令牌桶限速（kbps），显示丢弃/抑制计数；`storm-control` / `broadcast-suppression`、`rate-limit input` / `qos car|lr inbound cir`、`show/display storm-control|qos`。
-- **英文内容**：四篇课程、103 道题库、9 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
+- **英文内容**：四篇课程、103 道题库、12 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
 
 ### M5（BGP / IS-IS / VRF / MPLS / route-policy / L3VPN）
 
@@ -107,6 +107,23 @@
 - 简化边界见 ADR D21/D22/D23/D24（无 TCP/iBGP、IS-IS 无 DIS/多级、VRF 无动态协议、L3VPN 无 MP-BGP/LDP、route-policy 仅 ACL 匹配与 Local Preference）。
 
 **已验证**：118 个 Rust 测试全绿；浏览器实测 BGP Established + `B` 路由、IS-IS 邻居 Up + LSDB、VRF 路由表隔离、MPLS 静态 LSP 展示、实验七 5/5、实验八 4/4、实验九 8/8（含 VRRP Master、OSPF 邻居、LACP、跨 VLAN 与 NAT 上网）。
+
+### M6（防火墙 / TCP 状态机 / IPsec / SSL VPN）
+
+- **防火墙设备**：拓扑编辑器新增 Firewall 类型（复用路由器数据面），独立图标与颜色；支持接口 IP、静态路由、NAT、ACL、ping 等路由器能力。
+- **安全区域**：VRP `firewall zone trust` + `add interface`，Comware `security-zone name trust` + `import interface`，IOS `zone security INSIDE` + 接口 `zone-member security INSIDE`；`display firewall zone` / `display security-zone` / `show zone security` 从端口状态渲染。
+- **区域间策略**：VRP/Comware `security-policy` → `rule name` → `source-zone` / `destination-zone` / `action permit|deny`；IOS 简化 ZBF `zone-pair security` → `source` / `destination` / `action`。按规则顺序首条匹配，无命中默认拒绝；同区域/未划分区域放行。
+- **状态化放行**：策略 permit 的反向 ICMP 回包由 30 秒会话表自动放行，无需额外配置回程规则。
+- **ASA 安全级别模型**：IOS 防火墙接口支持 `nameif inside` / `security-level 100`；默认高→低放行、低→高拒绝，回包走状态会话。
+- **TCP 状态机**：新增 TCP 段（SYN/ACK/FIN/RST）与 PC `tcp <IP> <端口>` 探测；主机监听 22/80/443，完成 SYN → SYN-ACK → ACK → FIN 挥手；防火墙维护五元组状态表（SynSent/Established/FinWait/Closed）。
+- **IPsec 站点隧道**：`ipsec tunnel NAME local A remote B` + `local-subnet`/`remote-subnet`，命中保护子网的流量以 IP-in-IP 封装到对端并在出口解封装；三方言 `show/display ipsec tunnel`。
+- **SSL VPN 远程接入**：防火墙 `sslvpn virtual-ip` 地址池 + 本地用户认证；PC `sslvpn connect <网关> <用户> <口令>` 获取虚拟 IP，访问内网流量封装到网关、回程再封装回客户端；`display sslvpn session`。
+- **实验十「防火墙安全区域与策略」**：trust/untrust 划分 + trust→untrust permit；判分验证区域、策略、外网主动访问被拒绝与内网访问状态化放行。
+- **实验十一「IPsec 站点到站点 VPN」**：双站点隧道，判分验证两端隧道与双向 ping。
+- **实验十二「SSL VPN 远程接入」**：外网 PC 认证获取虚拟 IP 后访问内网，判分验证会话与内网连通。
+- 简化边界见 ADR D25/D26（无 ESP 加密/IKE、无 TCP 应用数据、SSL VPN 仅 ICMP 隧道）。
+
+**已验证**：128 个 Rust 测试全绿；实验十 5/5、实验十一 4/4、实验十二 2/2；TCP 握手/拒绝、ASA 默认策略、IPsec 隧道、SSL VPN 隧道均有端到端测试。
 
 ## 本地开发
 
@@ -152,7 +169,7 @@ web/
 | M3 内容+笔记+同步 | 课程管线 ✅、三厂商对照表 ✅、Gist 同步 ✅、PWA 离线 ✅ | ✅ |
 | M4 IP 进阶 | OSPF 单区域 ✅（多区域可选）、VRRP ✅、IPv6 ✅、DHCP Snooping ✅、端口安全 ✅、QoS 基础 ✅ | ✅ |
 | M5 IE 数通 | BGP ✅（eBGP 单跳）、IS-IS ✅（单区域）、VRF ✅（静态）、MPLS ✅（静态 LSP）、route-policy ✅、MPLS L3VPN ✅、大型园区实验 ✅ | ✅ |
-| M6 安全方向 | 防火墙三方言（ASA/USG/SecPath）、区域/策略、IPSec/SSL VPN | |
+| M6 安全方向 | 防火墙设备/安全区域/区域策略 ✅、ASA 安全级别 ✅、TCP 状态机 ✅、IPsec 站点 VPN ✅、SSL VPN ✅ | ✅ |
 | M7 无线方向 | AC/AP、CAPWAP、WLAN 安全 | |
 | M8 数据中心 | 堆叠/IRF/CSS、M-LAG、VXLAN EVPN + DC 实验；F5 LTM 基础 | |
 | M9 打磨 | 大拓扑 Canvas 渲染、英文界面与内容（界面+课程/题库/实验文案 ✅）、社区内容贡献管线 | 进行中 |

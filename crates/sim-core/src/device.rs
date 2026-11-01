@@ -25,6 +25,8 @@ pub enum DeviceKind {
     Router,
     Switch,
     Host,
+    /// 防火墙：数据面复用路由器状态，额外提供安全区域与区域间策略。
+    Firewall,
 }
 
 impl DeviceKind {
@@ -33,6 +35,7 @@ impl DeviceKind {
             DeviceKind::Router => ROUTER_PORTS,
             DeviceKind::Switch => SWITCH_PORTS,
             DeviceKind::Host => HOST_PORTS,
+            DeviceKind::Firewall => ROUTER_PORTS,
         }
     }
 }
@@ -382,6 +385,72 @@ pub struct RouterState {
     /// 路由策略（BGP 邻居 import/export 使用）
     #[serde(default)]
     pub route_policies: Vec<RoutePolicy>,
+    /// 区域间安全策略（按顺序首条匹配，无命中 = 默认拒绝）
+    #[serde(default)]
+    pub security_policies: Vec<SecurityPolicy>,
+    /// 状态化会话（正向放行后允许反向回包）
+    #[serde(default)]
+    pub security_sessions: Vec<SecuritySession>,
+    /// 防火墙 TCP 状态表
+    #[serde(default)]
+    pub tcp_flows: Vec<TcpFlow>,
+    /// IPsec 站点隧道（教学用 IP-in-IP）
+    #[serde(default)]
+    pub ipsec_tunnels: Vec<IpsecTunnel>,
+    /// SSL VPN 地址池
+    #[serde(default)]
+    pub sslvpn_pool: Option<(Ipv4Addr, u8)>,
+    /// SSL VPN 在线客户端 (虚拟 IP, 客户端真实 IP)
+    #[serde(default)]
+    pub sslvpn_clients: Vec<(Ipv4Addr, Ipv4Addr)>,
+}
+
+/// IPsec 站点隧道：保护 local_subnet ↔ remote_subnet 的流量。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpsecTunnel {
+    pub name: String,
+    pub local: Ipv4Addr,
+    pub remote: Ipv4Addr,
+    pub local_subnet: (Ipv4Addr, u8),
+    pub remote_subnet: (Ipv4Addr, u8),
+}
+
+/// 防火墙区域间策略。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityPolicy {
+    pub name: String,
+    pub src_zone: String,
+    pub dst_zone: String,
+    pub permit: bool,
+}
+
+/// 状态化放行记录（仅 ICMP，本模拟器的三层载荷）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecuritySession {
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub icmp_id: u16,
+    pub last_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TcpFlowState {
+    #[default]
+    SynSent,
+    Established,
+    FinWait,
+    Closed,
+}
+
+/// 防火墙 TCP 五元组状态（示例只跟踪握手/挥手）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpFlow {
+    pub client: Ipv4Addr,
+    pub server: Ipv4Addr,
+    pub client_port: u16,
+    pub server_port: u16,
+    pub state: TcpFlowState,
+    pub last_ns: u64,
 }
 
 /// BGP 配置（AS、邻居、宣告网段、邻居策略）。
@@ -762,6 +831,47 @@ pub struct HostState {
     pub pings6: Vec<Ping6Session>,
     #[serde(default)]
     pub next_ping6_id: u32,
+    /// 监听端口（SYN 收到后回 SYN-ACK；其它端口回 RST）
+    #[serde(default = "default_tcp_listeners")]
+    pub tcp_listeners: Vec<u16>,
+    #[serde(default)]
+    pub tcp_probes: Vec<TcpProbe>,
+    #[serde(default)]
+    pub next_tcp_id: u16,
+    /// SSL VPN 已连接会话
+    #[serde(default)]
+    pub vpn: Option<VpnSession>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VpnSession {
+    pub gateway: Ipv4Addr,
+    pub virtual_ip: Ipv4Addr,
+}
+
+fn default_tcp_listeners() -> Vec<u16> {
+    vec![22, 80, 443]
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TcpProbeState {
+    #[default]
+    SynSent,
+    Established,
+    FinWait,
+    Closed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpProbe {
+    pub id: u16,
+    pub target: Ipv4Addr,
+    pub target_port: u16,
+    pub src_port: u16,
+    pub state: TcpProbeState,
+    /// None = 尚未收到任何响应
+    pub opened: Option<bool>,
+    pub reported: bool,
 }
 
 /// EasyIP 转换表项（ICMP：以 echo id 区分会话）。
@@ -833,6 +943,14 @@ pub struct Port {
     /// 所属 VRF id（None = 全局表）
     #[serde(default)]
     pub vrf: Option<u16>,
+    /// 安全区域名（防火墙；None = 未划分）
+    #[serde(default)]
+    pub zone: Option<String>,
+    /// ASA 风格接口名与安全级别（防火墙；IOS `nameif` / `security-level`）
+    #[serde(default)]
+    pub nameif: Option<String>,
+    #[serde(default)]
+    pub security_level: Option<u8>,
     /// 入方向 ACL（路由器）
     pub acl_in: Option<u32>,
     /// 出方向 ACL（路由器）
@@ -1046,7 +1164,7 @@ impl Device {
             .map(|idx| Port {
                 idx,
                 // 与真实设备一致：交换机端口与主机网卡默认开启，路由器接口需手工 no shutdown
-                admin_up: !matches!(kind, DeviceKind::Router),
+                admin_up: !matches!(kind, DeviceKind::Router | DeviceKind::Firewall),
                 mac: port_mac(id, idx),
                 speed_bps: PORT_SPEED_BPS,
                 ip: None,
@@ -1065,17 +1183,25 @@ impl Device {
                 rate_limit_kbps: None,
                 isis_enable: false,
                 vrf: None,
+                zone: None,
+                nameif: None,
+                security_level: None,
                 acl_in: None,
                 acl_out: None,
             })
             .collect();
         let state = match kind {
-            DeviceKind::Router => DeviceState::Router(RouterState::default()),
+            DeviceKind::Router | DeviceKind::Firewall => {
+                DeviceState::Router(RouterState::default())
+            }
             DeviceKind::Switch => DeviceState::Switch(SwitchState {
                 vlans: vec![DEFAULT_VLAN],
                 ..Default::default()
             }),
-            DeviceKind::Host => DeviceState::Host(HostState::default()),
+            DeviceKind::Host => DeviceState::Host(HostState {
+                tcp_listeners: default_tcp_listeners(),
+                ..Default::default()
+            }),
         };
         Self {
             id,
@@ -1103,7 +1229,10 @@ impl Device {
 
     /// 是否具备三层能力（本模拟器中交换机即三层交换机）。
     pub fn is_l3(&self) -> bool {
-        matches!(self.kind, DeviceKind::Router | DeviceKind::Switch)
+        matches!(
+            self.kind,
+            DeviceKind::Router | DeviceKind::Switch | DeviceKind::Firewall
+        )
     }
 
     /// 派生连接路由：路由器取每个配置了 IP 的物理口；交换机取每个启用且配置了 IP 的 SVI。

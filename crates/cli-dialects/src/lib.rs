@@ -37,6 +37,10 @@ pub struct Trees {
     pub bgp: Vec<cli_engine::CNode>,
     pub isis: Vec<cli_engine::CNode>,
     pub route_policy: Vec<cli_engine::CNode>,
+    pub zone: Vec<cli_engine::CNode>,
+    pub security_policy: Vec<cli_engine::CNode>,
+    pub security_rule: Vec<cli_engine::CNode>,
+    pub ipsec: Vec<cli_engine::CNode>,
 }
 
 impl Trees {
@@ -56,6 +60,10 @@ impl Trees {
             Mode::Bgp => &self.bgp,
             Mode::Isis => &self.isis,
             Mode::RoutePolicy => &self.route_policy,
+            Mode::Zone => &self.zone,
+            Mode::SecurityPolicy => &self.security_policy,
+            Mode::SecurityRule => &self.security_rule,
+            Mode::Ipsec => &self.ipsec,
         }
     }
 }
@@ -80,7 +88,10 @@ pub mod cmd {
     use super::*;
     use crate::show;
     use cli_engine::IfCtx;
-    use sim_core::device::{Acl, AclProto, AclRule, BgpPeerPolicy, RoutePolicy, RoutePolicyNode};
+    use sim_core::device::{
+        Acl, AclProto, AclRule, BgpPeerPolicy, IpsecTunnel, RoutePolicy, RoutePolicyNode,
+        SecurityPolicy,
+    };
     use sim_packets::mask_from_prefix;
 
     pub fn hostname(c: &mut Ctx) -> Result<String, CliError> {
@@ -594,7 +605,7 @@ pub mod cmd {
 
     /// IOS `ip dhcp pool NAME` → Pool 模式；VRP/Comware `ip pool NAME` / `dhcp server ip-pool NAME`
     pub fn dhcp_pool_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on routers".into(),
@@ -692,7 +703,7 @@ pub mod cmd {
 
     /// VRP/Comware `acl [basic|advanced] <n>` → Acl 模式
     pub fn acl_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -788,7 +799,7 @@ pub mod cmd {
     }
 
     fn ios_access_list_with(c: &mut Ctx, forced: Option<AclProto>) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom("Invalid input detected".into()));
         }
         let n = c.number("number").unwrap_or(0);
@@ -945,7 +956,10 @@ pub mod cmd {
     // ---------- 管理面（本地用户 / VTY / 远程登录） ----------
 
     fn require_mgmt_device(c: &Ctx) -> Result<(), CliError> {
-        if matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Switch) {
+        if matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Switch | DeviceKind::Firewall
+        ) {
             Ok(())
         } else {
             Err(CliError::Custom(
@@ -1180,7 +1194,7 @@ pub mod cmd {
 
     /// `router ospf 1` / `ospf 1`
     pub fn ospf_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1192,7 +1206,7 @@ pub mod cmd {
 
     /// VRP/Comware 区域视图：`area 0` / `area 0.0.0.0`
     pub fn ospf_area_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1234,7 +1248,7 @@ pub mod cmd {
     }
 
     pub fn show_ospf_neighbor(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1243,7 +1257,7 @@ pub mod cmd {
     }
 
     pub fn show_ospf_db(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1331,7 +1345,7 @@ pub mod cmd {
     }
 
     pub fn show_vrrp(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1364,7 +1378,7 @@ pub mod cmd {
 
     /// IOS `ipv6 route 2001:db8:2::/64 2001:db8:1::2` / VRP `ipv6 route-static ...`
     pub fn ipv6_route(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1545,7 +1559,7 @@ pub mod cmd {
     // ---------- BGP（eBGP 简化） ----------
 
     pub fn bgp_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1575,7 +1589,7 @@ pub mod cmd {
     }
 
     pub fn bgp_neighbor(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1604,7 +1618,7 @@ pub mod cmd {
     }
 
     pub fn bgp_network(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1634,7 +1648,7 @@ pub mod cmd {
     }
 
     pub fn show_bgp_summary(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1643,7 +1657,7 @@ pub mod cmd {
     }
 
     pub fn show_bgp_table(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1655,7 +1669,7 @@ pub mod cmd {
 
     /// IOS `route-map NAME permit|deny SEQ` / VRP `route-policy NAME permit|deny node SEQ`
     pub fn route_policy_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1762,7 +1776,7 @@ pub mod cmd {
 
     /// IOS `neighbor IP route-map NAME in|out` / VRP `peer IP route-policy NAME import|export`
     pub fn bgp_peer_policy(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1804,7 +1818,7 @@ pub mod cmd {
     }
 
     pub fn show_route_policy(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1818,10 +1832,300 @@ pub mod cmd {
         Ok(show::route_policies(c.eng, c.dev, c.dialect, only))
     }
 
+    // ---------- 防火墙：安全区域与区域间策略 ----------
+
+    fn require_firewall(c: &Ctx) -> Result<(), CliError> {
+        if c.device_kind() == DeviceKind::Firewall {
+            Ok(())
+        } else {
+            Err(CliError::Custom(
+                "Security zones are only available on firewalls".into(),
+            ))
+        }
+    }
+
+    fn zone_name(c: &Ctx) -> String {
+        let n = c.word("zone");
+        if n.is_empty() {
+            c.word("name")
+        } else {
+            n
+        }
+    }
+
+    pub fn security_zone_enter(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        let name = zone_name(c);
+        if name.is_empty() {
+            return Err(CliError::Custom("Zone name is required".into()));
+        }
+        c.sess.sub.zone = Some(name);
+        c.sess.mode = Mode::Zone;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    pub fn security_zone_add_if(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        let Some(zone) = c.sess.sub.zone.clone() else {
+            return Err(CliError::Custom("no zone selected".into()));
+        };
+        let raw = c.word("if");
+        let Some(ifname::IfRef::Physical(port)) =
+            ifname::resolve_if(c.dialect, c.device_kind(), &raw)
+        else {
+            return Err(CliError::Custom("Invalid interface".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.zone = Some(zone);
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub fn security_zone_member(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        let zone = c.word("zone");
+        if zone.is_empty() {
+            return Err(CliError::Custom("Zone name is required".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.zone = Some(zone);
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// ASA：`nameif inside`
+    pub fn nameif(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        let name = c.word("name");
+        if name.is_empty() {
+            return Err(CliError::Custom("Interface name is required".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.nameif = Some(name);
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// ASA：`security-level 0-100`
+    pub fn security_level(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        let level = c
+            .number("level")
+            .ok_or_else(|| CliError::Custom("Security level is required".into()))?;
+        if level > 100 {
+            return Err(CliError::Custom("Security level must be 0-100".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.security_level = Some(level as u8);
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub fn security_policy_enter(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        c.sess.mode = Mode::SecurityPolicy;
+        c.sess.sub.rule = None;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    pub fn security_rule_enter(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        let name = c.word("name");
+        if name.is_empty() {
+            return Err(CliError::Custom("Rule name is required".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if !rs.security_policies.iter().any(|p| p.name == name) {
+                    rs.security_policies.push(SecurityPolicy {
+                        name: name.clone(),
+                        src_zone: String::new(),
+                        dst_zone: String::new(),
+                        permit: false,
+                    });
+                }
+            }
+        }
+        c.sess.sub.rule = Some(name);
+        c.sess.mode = Mode::SecurityRule;
+        Ok(String::new())
+    }
+
+    fn security_rule_mut(c: &mut Ctx, f: impl FnOnce(&mut SecurityPolicy)) -> Result<(), CliError> {
+        let Some(name) = c.sess.sub.rule.clone() else {
+            return Err(CliError::Custom("no security rule selected".into()));
+        };
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(());
+        };
+        let DeviceState::Router(rs) = &mut d.state else {
+            return Ok(());
+        };
+        if let Some(rule) = rs.security_policies.iter_mut().find(|p| p.name == name) {
+            f(rule);
+        }
+        Ok(())
+    }
+
+    pub fn security_rule_source(c: &mut Ctx) -> Result<String, CliError> {
+        let zone = c.word("src");
+        if zone.is_empty() {
+            return Err(CliError::Custom("Source zone is required".into()));
+        }
+        security_rule_mut(c, |r| r.src_zone = zone)?;
+        Ok(String::new())
+    }
+
+    pub fn security_rule_destination(c: &mut Ctx) -> Result<String, CliError> {
+        let zone = c.word("dst");
+        if zone.is_empty() {
+            return Err(CliError::Custom("Destination zone is required".into()));
+        }
+        security_rule_mut(c, |r| r.dst_zone = zone)?;
+        Ok(String::new())
+    }
+
+    pub fn security_action(c: &mut Ctx) -> Result<String, CliError> {
+        let action = c.word("action");
+        let permit = if action.eq_ignore_ascii_case("permit") {
+            true
+        } else if action.eq_ignore_ascii_case("deny") {
+            false
+        } else {
+            return Err(CliError::Custom("Action must be permit or deny".into()));
+        };
+        security_rule_mut(c, |r| r.permit = permit)?;
+        Ok(String::new())
+    }
+
+    pub fn show_security_policy(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        Ok(show::security_policies(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_security_zone(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        Ok(show::security_zones(c.eng, c.dev, c.dialect))
+    }
+
+    // ---------- IPsec 站点隧道（教学 IP-in-IP） ----------
+
+    fn ipsec_tunnel_mut(c: &mut Ctx, f: impl FnOnce(&mut IpsecTunnel)) -> Result<(), CliError> {
+        let Some(name) = c.sess.sub.ipsec.clone() else {
+            return Err(CliError::Custom("no IPsec tunnel selected".into()));
+        };
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(());
+        };
+        let DeviceState::Router(rs) = &mut d.state else {
+            return Ok(());
+        };
+        if let Some(t) = rs.ipsec_tunnels.iter_mut().find(|t| t.name == name) {
+            f(t);
+        }
+        Ok(())
+    }
+
+    /// `ipsec tunnel NAME local A remote B`
+    pub fn ipsec_enter(c: &mut Ctx) -> Result<String, CliError> {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        let name = c.word("name");
+        let local = c.ipv4("local");
+        let remote = c.ipv4("remote");
+        if name.is_empty() || local == 0 || remote == 0 {
+            return Err(CliError::Custom("Invalid IPsec tunnel".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if !rs.ipsec_tunnels.iter().any(|t| t.name == name) {
+                    rs.ipsec_tunnels.push(IpsecTunnel {
+                        name: name.clone(),
+                        local,
+                        remote,
+                        local_subnet: (0, 0),
+                        remote_subnet: (0, 0),
+                    });
+                }
+            }
+        }
+        c.sess.sub.ipsec = Some(name);
+        c.sess.mode = Mode::Ipsec;
+        c.sess.cur_if = None;
+        Ok(String::new())
+    }
+
+    pub fn ipsec_local_subnet(c: &mut Ctx) -> Result<String, CliError> {
+        let net = c.ipv4("net");
+        let len = c.mask_len("len");
+        let net = net & sim_packets::mask_from_prefix(len);
+        ipsec_tunnel_mut(c, |t| t.local_subnet = (net, len))?;
+        Ok(String::new())
+    }
+
+    pub fn ipsec_remote_subnet(c: &mut Ctx) -> Result<String, CliError> {
+        let net = c.ipv4("net");
+        let len = c.mask_len("len");
+        let net = net & sim_packets::mask_from_prefix(len);
+        ipsec_tunnel_mut(c, |t| t.remote_subnet = (net, len))?;
+        Ok(String::new())
+    }
+
+    pub fn show_ipsec(c: &mut Ctx) -> Result<String, CliError> {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        Ok(show::ipsec_tunnels(c.eng, c.dev, c.dialect))
+    }
+
+    // ---------- SSL VPN（远程接入） ----------
+
+    pub fn sslvpn_pool(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        let net = c.ipv4("net");
+        let len = c.mask_len("len");
+        let net = net & sim_packets::mask_from_prefix(len);
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                rs.sslvpn_pool = Some((net, len));
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub fn show_sslvpn(c: &mut Ctx) -> Result<String, CliError> {
+        require_firewall(c)?;
+        Ok(show::sslvpn_sessions(c.eng, c.dev, c.dialect))
+    }
+
     // ---------- IS-IS（简化） ----------
 
     pub fn isis_enter(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1832,7 +2136,7 @@ pub mod cmd {
     }
 
     pub fn isis_net(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1856,7 +2160,7 @@ pub mod cmd {
     }
 
     pub fn isis_enable_if(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1874,7 +2178,7 @@ pub mod cmd {
     }
 
     pub fn show_isis_neighbors(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1883,7 +2187,7 @@ pub mod cmd {
     }
 
     pub fn show_isis_db(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1894,7 +2198,7 @@ pub mod cmd {
     // ---------- VRF（简化：连接 + 静态路由） ----------
 
     pub fn vrf_create(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1919,7 +2223,7 @@ pub mod cmd {
     }
 
     pub fn vrf_bind(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1945,7 +2249,7 @@ pub mod cmd {
     }
 
     pub fn vrf_static(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -1985,7 +2289,7 @@ pub mod cmd {
     }
 
     pub fn show_route_vrf(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2003,7 +2307,7 @@ pub mod cmd {
     // ---------- MPLS（静态 LSP） ----------
 
     fn mpls_lsp_upsert(c: &mut Ctx, lsp: sim_core::device::StaticLsp) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2098,7 +2402,7 @@ pub mod cmd {
     }
 
     pub fn show_mpls(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(
                 "Command is only available on routers".into(),
             ));
@@ -2109,7 +2413,7 @@ pub mod cmd {
     // ---------- 显示 ----------
 
     pub fn show_acl(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on routers".into(),
@@ -2119,7 +2423,7 @@ pub mod cmd {
     }
 
     pub fn show_nat(c: &mut Ctx) -> Result<String, CliError> {
-        if c.device_kind() != DeviceKind::Router {
+        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Firewall) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on routers".into(),
@@ -2133,7 +2437,10 @@ pub mod cmd {
     }
 
     pub fn show_route(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Switch) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Switch | DeviceKind::Firewall
+        ) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on routers".into(),
@@ -2158,7 +2465,10 @@ pub mod cmd {
     }
 
     pub fn static_route(c: &mut Ctx) -> Result<String, CliError> {
-        if !matches!(c.device_kind(), DeviceKind::Router | DeviceKind::Switch) {
+        if !matches!(
+            c.device_kind(),
+            DeviceKind::Router | DeviceKind::Switch | DeviceKind::Firewall
+        ) {
             return Err(CliError::Custom(match c.dialect {
                 Dialect::Ios => "Invalid input detected".into(),
                 _ => "Command is only available on routers".into(),
@@ -2380,6 +2690,9 @@ pub fn exec_and_run(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str
         };
         parts.push(text);
     }
+    for p in eng.take_unreported_tcp(eff) {
+        parts.push(show::render_tcp_probe(&p));
+    }
     parts.join("\n")
 }
 
@@ -2415,6 +2728,10 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
                 format!("{}(config-router)#", d.name)
             }
             Mode::RoutePolicy => format!("{}(config-route-map)#", d.name),
+            Mode::Zone => format!("{}(config-zone)#", d.name),
+            Mode::SecurityPolicy => format!("{}(config-sec-policy)#", d.name),
+            Mode::SecurityRule => format!("{}(config-zone-pair)#", d.name),
+            Mode::Ipsec => format!("{}(config-ipsec)#", d.name),
         },
         Dialect::Vrp | Dialect::Comware => match sess.mode {
             Mode::Exec | Mode::Priv => format!("<{}>", d.name),
@@ -2465,6 +2782,22 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
             }
             Mode::Isis => format!("[{}-isis-1]", d.name),
             Mode::RoutePolicy => format!("[{}-route-policy]", d.name),
+            Mode::Zone => format!(
+                "[{}-zone-{}]",
+                d.name,
+                sess.sub.zone.clone().unwrap_or_default()
+            ),
+            Mode::SecurityPolicy => format!("[{}-security-policy]", d.name),
+            Mode::SecurityRule => format!(
+                "[{}-security-policy-rule-{}]",
+                d.name,
+                sess.sub.rule.clone().unwrap_or_default()
+            ),
+            Mode::Ipsec => format!(
+                "[{}-ipsec-{}]",
+                d.name,
+                sess.sub.ipsec.clone().unwrap_or_default()
+            ),
         },
     }
 }

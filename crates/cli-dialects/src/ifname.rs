@@ -101,7 +101,9 @@ pub fn canonical(dialect: Dialect, kind: DeviceKind, idx: usize) -> String {
     match dialect {
         Dialect::Ios => format!("GigabitEthernet0/{}", idx),
         Dialect::Vrp => match kind {
-            DeviceKind::Router => format!("GigabitEthernet0/0/{}", idx),
+            DeviceKind::Router | DeviceKind::Firewall => {
+                format!("GigabitEthernet0/0/{}", idx)
+            }
             _ => format!("GigabitEthernet0/0/{}", idx + 1),
         },
         Dialect::Comware => format!("GigabitEthernet1/0/{}", idx + 1),
@@ -116,7 +118,7 @@ pub fn short(dialect: Dialect, kind: DeviceKind, idx: usize) -> String {
     match dialect {
         Dialect::Ios => format!("Gi0/{}", idx),
         Dialect::Vrp => match kind {
-            DeviceKind::Router => format!("GE0/0/{}", idx),
+            DeviceKind::Router | DeviceKind::Firewall => format!("GE0/0/{}", idx),
             _ => format!("GE0/0/{}", idx + 1),
         },
         Dialect::Comware => format!("GE1/0/{}", idx + 1),
@@ -167,7 +169,9 @@ pub fn resolve(dialect: Dialect, kind: DeviceKind, s: &str) -> Option<usize> {
     let within = |idx: usize| idx < kind.port_count();
     match (dialect, kind, nums.as_slice()) {
         (Dialect::Ios, _, [0, idx]) if within(*idx as usize) => Some(*idx as usize),
-        (Dialect::Vrp, DeviceKind::Router, [0, 0, idx]) if within(*idx as usize) => {
+        (Dialect::Vrp, DeviceKind::Router | DeviceKind::Firewall, [0, 0, idx])
+            if within(*idx as usize) =>
+        {
             Some(*idx as usize)
         }
         (Dialect::Vrp, DeviceKind::Switch, [0, 0, idx])

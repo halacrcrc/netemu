@@ -34,6 +34,35 @@ pub fn exec(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> Str
             eng.start_ping6(dev, target);
             String::new()
         }
+        "tcp" => {
+            if toks.len() < 3 {
+                return "用法: tcp <IP地址> <端口>".into();
+            }
+            let Some(target) = ipv4_from_str(&toks[1].0) else {
+                return format!("无效的 IP 地址: {}", toks[1].0);
+            };
+            let Ok(port) = toks[2].0.parse::<u16>() else {
+                return format!("无效的端口: {}", toks[2].0);
+            };
+            eng.start_tcp_probe(dev, target, port);
+            String::new()
+        }
+        "sslvpn" => {
+            if toks.len() < 5 || !toks[1].0.eq_ignore_ascii_case("connect") {
+                return "用法: sslvpn connect <网关IP> <用户名> <口令>".into();
+            }
+            let Some(gw) = ipv4_from_str(&toks[2].0) else {
+                return format!("无效的 IP 地址: {}", toks[2].0);
+            };
+            match eng.sslvpn_connect(dev, gw, &toks[3].0, &toks[4].0) {
+                Ok(vip) => format!(
+                    "SSL VPN 已连接：虚拟 IP {}（网关 {}）",
+                    ipv4_str(vip),
+                    ipv4_str(gw)
+                ),
+                Err(e) => format!("SSL VPN 连接失败: {}", e),
+            }
+        }
         "telnet" | "ssh" => {
             if toks.len() < 2 {
                 return "用法: telnet <IP地址> 或 ssh <IP地址>".into();
@@ -64,7 +93,7 @@ pub fn exec(eng: &mut Engine, sess: &mut Session, dev: DevId, line: &str) -> Str
         }
         "arp" => arp_table(eng, dev),
         "help" | "?" => {
-            "可用命令:\n  ping <IP>       测试到目标 IP 的连通性\n  ping6 <IPv6>    测试 IPv6 连通性\n  telnet <IP>     用 Telnet 登录网络设备\n  ssh <IP>        用 SSH 登录网络设备\n  ipconfig        查看本机网络配置\n  ipconfig /renew 重新发起 DHCP 获取（或输入 dhcp）\n  arp             查看本机 ARP 缓存\n  help            显示本帮助".into()
+            "可用命令:\n  ping <IP>       测试到目标 IP 的连通性\n  ping6 <IPv6>    测试 IPv6 连通性\n  tcp <IP> <端口> 发起 TCP 握手（22/80/443 开放）\n  sslvpn connect <网关IP> <用户> <口令> 建立 SSL VPN\n  telnet <IP>     用 Telnet 登录网络设备\n  ssh <IP>        用 SSH 登录网络设备\n  ipconfig        查看本机网络配置\n  ipconfig /renew 重新发起 DHCP 获取（或输入 dhcp）\n  arp             查看本机 ARP 缓存\n  help            显示本帮助".into()
         }
         other => format!("未知命令: {}（输入 help 查看可用命令）", other),
     }

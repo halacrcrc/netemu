@@ -39,6 +39,14 @@ pub struct PortSummary {
     /// 所属 VRF 名称
     #[serde(default)]
     pub vrf: Option<String>,
+    /// 安全区域名（防火墙）
+    #[serde(default)]
+    pub zone: Option<String>,
+    /// ASA 接口名与安全级别
+    #[serde(default)]
+    pub nameif: Option<String>,
+    #[serde(default)]
+    pub security_level: Option<u8>,
     /// DHCP Snooping 信任端口 / 端口安全 / QoS
     #[serde(default)]
     pub dhcp_trust: bool,
@@ -104,6 +112,15 @@ pub struct DevSummary {
     /// 路由策略
     #[serde(default)]
     pub route_policies: Vec<RoutePolicySummary>,
+    /// 防火墙区域间策略
+    #[serde(default)]
+    pub security_policies: Vec<SecurityPolicySummary>,
+    /// IPsec 站点隧道
+    #[serde(default)]
+    pub ipsec_tunnels: Vec<IpsecTunnelSummary>,
+    /// SSL VPN 虚拟地址池
+    #[serde(default)]
+    pub sslvpn_pool: Option<(String, u8)>,
     /// IS-IS NET
     #[serde(default)]
     pub isis_net: Option<String>,
@@ -146,6 +163,25 @@ pub struct RoutePolicyNodeSummary {
     pub permit: bool,
     pub match_acl: Option<u32>,
     pub set_local_pref: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityPolicySummary {
+    pub name: String,
+    pub src_zone: String,
+    pub dst_zone: String,
+    pub permit: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpsecTunnelSummary {
+    pub name: String,
+    pub local: String,
+    pub remote: String,
+    pub local_subnet: String,
+    pub local_len: u8,
+    pub remote_subnet: String,
+    pub remote_len: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +302,9 @@ impl Net {
                             rate_limit_kbps: p.rate_limit_kbps,
                             isis_enable: p.isis_enable,
                             vrf: d.vrf_name_of_port(p.idx),
+                            zone: p.zone.clone(),
+                            nameif: p.nameif.clone(),
+                            security_level: p.security_level,
                         })
                         .collect(),
                     gw: match &d.state {
@@ -455,6 +494,41 @@ impl Net {
                             .collect(),
                         _ => vec![],
                     },
+                    security_policies: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .security_policies
+                            .iter()
+                            .map(|p| SecurityPolicySummary {
+                                name: p.name.clone(),
+                                src_zone: p.src_zone.clone(),
+                                dst_zone: p.dst_zone.clone(),
+                                permit: p.permit,
+                            })
+                            .collect(),
+                        _ => vec![],
+                    },
+                    ipsec_tunnels: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .ipsec_tunnels
+                            .iter()
+                            .map(|t| IpsecTunnelSummary {
+                                name: t.name.clone(),
+                                local: ipv4_str(t.local),
+                                remote: ipv4_str(t.remote),
+                                local_subnet: ipv4_str(t.local_subnet.0),
+                                local_len: t.local_subnet.1,
+                                remote_subnet: ipv4_str(t.remote_subnet.0),
+                                remote_len: t.remote_subnet.1,
+                            })
+                            .collect(),
+                        _ => vec![],
+                    },
+                    sslvpn_pool: match &d.state {
+                        DeviceState::Router(rs) => {
+                            rs.sslvpn_pool.map(|(net, len)| (ipv4_str(net), len))
+                        }
+                        _ => None,
+                    },
                     isis_net: match &d.state {
                         DeviceState::Router(rs) => rs.isis.as_ref().map(|i| i.net.clone()),
                         _ => None,
@@ -550,6 +624,9 @@ impl Net {
                     p.broadcast_limit_pps = ps.broadcast_limit_pps;
                     p.rate_limit_kbps = ps.rate_limit_kbps;
                     p.isis_enable = ps.isis_enable;
+                    p.zone = ps.zone.clone();
+                    p.nameif = ps.nameif.clone();
+                    p.security_level = ps.security_level;
                     if let Some(txt) = &ps.ipv6 {
                         p.ipv6 = sim_packets::ipv6_from_str(txt);
                     }
@@ -676,6 +753,35 @@ impl Net {
                                 })
                                 .collect(),
                         });
+                    }
+                    for p in &ds.security_policies {
+                        rs.security_policies.push(SecurityPolicy {
+                            name: p.name.clone(),
+                            src_zone: p.src_zone.clone(),
+                            dst_zone: p.dst_zone.clone(),
+                            permit: p.permit,
+                        });
+                    }
+                    for t in &ds.ipsec_tunnels {
+                        if let (Some(local), Some(remote), Some(ls), Some(rsn)) = (
+                            ipv4_from_str(&t.local),
+                            ipv4_from_str(&t.remote),
+                            ipv4_from_str(&t.local_subnet),
+                            ipv4_from_str(&t.remote_subnet),
+                        ) {
+                            rs.ipsec_tunnels.push(IpsecTunnel {
+                                name: t.name.clone(),
+                                local,
+                                remote,
+                                local_subnet: (ls, t.local_len),
+                                remote_subnet: (rsn, t.remote_len),
+                            });
+                        }
+                    }
+                    if let Some((net, len)) = &ds.sslvpn_pool {
+                        if let Some(net) = ipv4_from_str(net) {
+                            rs.sslvpn_pool = Some((net, *len));
+                        }
                     }
                     if let Some(net) = &ds.isis_net {
                         if let Some(sid) = parse_isis_net(net) {

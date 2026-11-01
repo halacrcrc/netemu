@@ -116,6 +116,12 @@ pub struct SubCtx {
     pub aaa_user: Option<String>,
     /// 路由策略视图中正在编辑的 (策略名, 节点 seq)
     pub rp: Option<(String, u16)>,
+    /// 防火墙区域视图中的区域名
+    pub zone: Option<String>,
+    /// 安全策略规则视图中的规则名
+    pub rule: Option<String>,
+    /// IPsec 隧道视图中的隧道名
+    pub ipsec: Option<String>,
 }
 
 /// 远程登录输入流程。
@@ -192,6 +198,14 @@ pub enum Mode {
     Isis,
     /// 路由策略视图（route-map / route-policy node）
     RoutePolicy,
+    /// 防火墙区域视图
+    Zone,
+    /// 安全策略视图
+    SecurityPolicy,
+    /// 安全策略规则视图
+    SecurityRule,
+    /// IPsec 隧道视图
+    Ipsec,
 }
 
 #[derive(Debug)]

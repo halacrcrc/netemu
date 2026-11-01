@@ -155,10 +155,10 @@ fn ios_help_and_completion() {
     // 扩展到唯一匹配
     let (line, _) = complete_line(&eng, &sess, dev, "sh ip in");
     assert_eq!(line, "sh ip interface ");
-    // 回到配置模式：多候选 i → ipv6 / interface / ip
+    // 回到配置模式：多候选 i → ipsec / ipv6 / interface / ip
     run(&mut eng, &mut sess, dev, &["conf t"]);
     let (_, opts) = complete_line(&eng, &sess, dev, "i");
-    assert_eq!(opts, vec!["ipv6", "interface", "ip"]);
+    assert_eq!(opts, vec!["ipsec", "ipv6", "interface", "ip"]);
 }
 
 #[test]

@@ -24,7 +24,11 @@ fn h_quit(c: &mut Ctx) -> Result<String, CliError> {
         | Mode::OspfArea
         | Mode::Bgp
         | Mode::Isis
-        | Mode::RoutePolicy => Mode::Config,
+        | Mode::RoutePolicy
+        | Mode::Zone
+        | Mode::SecurityPolicy
+        | Mode::SecurityRule
+        | Mode::Ipsec => Mode::Config,
         _ => Mode::Exec,
     };
     if c.sess.mode != Mode::If {
@@ -150,6 +154,22 @@ fn display_branch() -> CNode {
         .kid(
             CNode::lit("route-policy", "Display route policy information")
                 .run(cmd::show_route_policy),
+        )
+        .kid(
+            CNode::lit("security-policy", "Display security policy").run(cmd::show_security_policy),
+        )
+        .kid(CNode::lit("security-zone", "Display security zones").run(cmd::show_security_zone))
+        .kid(
+            CNode::lit("ipsec", "Display IPsec information")
+                .kid(CNode::lit("tunnel", "Display static tunnels").run(cmd::show_ipsec)),
+        )
+        .kid(
+            CNode::lit("sslvpn", "Display SSL VPN information")
+                .kid(CNode::lit("session", "Display SSL VPN sessions").run(cmd::show_sslvpn)),
+        )
+        .kid(
+            CNode::lit("firewall", "Display firewall information")
+                .kid(CNode::lit("zone", "Display security zones").run(cmd::show_security_zone)),
         )
         .kid(CNode::lit("vlan", "Display VLAN information").run(cmd::show_vlan))
         .kid(CNode::lit("mac-address", "Display the MAC address table").run(cmd::show_mac))
@@ -385,6 +405,40 @@ pub fn build() -> Trees {
                 .kid(CNode::param(ParamKind::Number, "pid", "Process ID").run(cmd::ospf_enter)),
             CNode::lit("bgp", "BGP process")
                 .kid(CNode::param(ParamKind::Number, "asn", "Local AS number").run(cmd::bgp_enter)),
+            CNode::lit("security-policy", "Security policy")
+                .run(cmd::security_policy_enter)
+                .kid(CNode::lit("ip", "IP security policy").run(cmd::security_policy_enter)),
+            CNode::lit("firewall", "Firewall configuration").kid(
+                CNode::lit("zone", "Security zone").kid(
+                    CNode::param(ParamKind::Word, "zone", "Zone name")
+                        .run(cmd::security_zone_enter),
+                ),
+            ),
+            CNode::lit("security-zone", "Security zone").kid(CNode::lit("name", "Zone name").kid(
+                CNode::param(ParamKind::Word, "zone", "Zone name").run(cmd::security_zone_enter),
+            )),
+            CNode::lit("ipsec", "IPsec configuration").kid(
+                CNode::lit("tunnel", "Static site-to-site tunnel").kid(
+                    CNode::param(ParamKind::Word, "name", "Tunnel name").kid(
+                        CNode::lit("local", "Local endpoint").kid(
+                            CNode::param(ParamKind::Ipv4, "local", "Local IP").kid(
+                                CNode::lit("remote", "Remote endpoint").kid(
+                                    CNode::param(ParamKind::Ipv4, "remote", "Remote IP")
+                                        .run(cmd::ipsec_enter),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            CNode::lit("sslvpn", "SSL VPN gateway").kid(
+                CNode::lit("virtual-ip", "Virtual IP pool").kid(
+                    CNode::param(ParamKind::Ipv4, "net", "Pool network").kid(
+                        CNode::param(ParamKind::PrefixLen, "len", "Prefix length")
+                            .run(cmd::sslvpn_pool),
+                    ),
+                ),
+            ),
             CNode::lit("route-policy", "Create a route policy").kid(
                 CNode::param(ParamKind::Word, "name", "Route policy name").kid(
                     CNode::param(ParamKind::Word, "action", "permit | deny").kid(
@@ -958,6 +1012,60 @@ pub fn build() -> Trees {
                 CNode::lit("local-preference", "BGP local preference").kid(
                     CNode::param(ParamKind::Number, "pref", "Local preference value")
                         .run(cmd::route_policy_set_local_pref),
+                ),
+            ),
+            CNode::lit("quit", "Quit from the current view").run(h_quit),
+            CNode::lit("return", "Return to the user view").run(h_return),
+        ],
+        zone: vec![
+            CNode::lit("add", "Add an interface to the zone").kid(
+                CNode::lit("interface", "Interface").kid(
+                    CNode::param(ParamKind::IfName, "if", "e.g. GigabitEthernet0/0/0")
+                        .run(cmd::security_zone_add_if),
+                ),
+            ),
+            CNode::lit("import", "Import an interface into the zone").kid(
+                CNode::lit("interface", "Interface").kid(
+                    CNode::param(ParamKind::IfName, "if", "e.g. GigabitEthernet1/0/1")
+                        .run(cmd::security_zone_add_if),
+                ),
+            ),
+            CNode::lit("quit", "Quit from the current view").run(h_quit),
+            CNode::lit("return", "Return to the user view").run(h_return),
+        ],
+        security_policy: vec![
+            CNode::lit("rule", "Security policy rule").kid(CNode::lit("name", "Rule name").kid(
+                CNode::param(ParamKind::Word, "name", "Rule name").run(cmd::security_rule_enter),
+            )),
+            CNode::lit("quit", "Quit from the current view").run(h_quit),
+            CNode::lit("return", "Return to the user view").run(h_return),
+        ],
+        security_rule: vec![
+            CNode::lit("source-zone", "Source zone").kid(
+                CNode::param(ParamKind::Word, "src", "Source zone name")
+                    .run(cmd::security_rule_source),
+            ),
+            CNode::lit("destination-zone", "Destination zone").kid(
+                CNode::param(ParamKind::Word, "dst", "Destination zone name")
+                    .run(cmd::security_rule_destination),
+            ),
+            CNode::lit("action", "Policy action").kid(
+                CNode::param(ParamKind::Word, "action", "permit | deny").run(cmd::security_action),
+            ),
+            CNode::lit("quit", "Quit from the current view").run(h_quit),
+            CNode::lit("return", "Return to the user view").run(h_return),
+        ],
+        ipsec: vec![
+            CNode::lit("local-subnet", "Local protected subnet").kid(
+                CNode::param(ParamKind::Ipv4, "net", "Network").kid(
+                    CNode::param(ParamKind::PrefixLen, "len", "Prefix length")
+                        .run(cmd::ipsec_local_subnet),
+                ),
+            ),
+            CNode::lit("remote-subnet", "Remote protected subnet").kid(
+                CNode::param(ParamKind::Ipv4, "net", "Network").kid(
+                    CNode::param(ParamKind::PrefixLen, "len", "Prefix length")
+                        .run(cmd::ipsec_remote_subnet),
                 ),
             ),
             CNode::lit("quit", "Quit from the current view").run(h_quit),

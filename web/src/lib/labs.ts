@@ -22,6 +22,17 @@ export interface LabCheckDef {
     | { type: 'mplsLsp'; dev: string; name: string }
     | { type: 'vrrpMaster'; dev: string; vrid: number }
     | { type: 'ospfNeighbors'; dev: string; min: number }
+    | { type: 'securityZone'; dev: string; port: number; zone: string }
+    | { type: 'ipsecTunnel'; dev: string; name: string }
+    | { type: 'vpnConnected'; dev: string }
+    | {
+        type: 'securityPolicy';
+        dev: string;
+        name: string;
+        srcZone: string;
+        dstZone: string;
+        permit: boolean;
+      }
     | { type: 'rootBridge'; dev: string }
     | { type: 'portRole'; dev: string; port: number; role: 'Designated' | 'Root' | 'Alternate' }
     | {
@@ -195,6 +206,34 @@ export function runLabChecks(lab: LabDef): { label: string; passed: boolean; det
           passed: boolean;
           detail: string;
         };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'ipsecTunnel') {
+        const r = JSON.parse(sim.check_ipsec_tunnel(need(ck.kind.dev), ck.kind.name)) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'vpnConnected') {
+        const r = JSON.parse(sim.check_vpn_connected(need(ck.kind.dev))) as {
+          passed: boolean;
+          detail: string;
+        };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'securityZone') {
+        const r = JSON.parse(
+          sim.check_security_zone(need(ck.kind.dev), ck.kind.port, ck.kind.zone)
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'securityPolicy') {
+        const r = JSON.parse(
+          sim.check_security_policy(
+            need(ck.kind.dev),
+            ck.kind.name,
+            ck.kind.srcZone,
+            ck.kind.dstZone,
+            ck.kind.permit
+          )
+        ) as { passed: boolean; detail: string };
         out.push({ label: ck.label, passed: r.passed, detail: r.detail });
       } else if (ck.kind.type === 'vrrpMaster') {
         const r = JSON.parse(sim.check_vrrp_master(need(ck.kind.dev), ck.kind.vrid)) as {
@@ -702,7 +741,136 @@ export const lab9: LabDef = {
   },
 };
 
-export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9];
+// ---------- 实验十：防火墙安全区域与策略 ----------
+
+export const lab10: LabDef = {
+  id: 'firewall-zone',
+  title: '实验十 · 防火墙安全区域与策略',
+  brief:
+    '内网 PC 通过防火墙访问外网服务器。把两个接口分别划入 trust / untrust 区域，只放行 trust→untrust 的流量；untrust 主动访问内网被默认拒绝，回包由状态会话放行。',
+  tasks: [
+    'FW1：system-view → interface g0/0/0 → ip address 192.168.1.1 24 → undo shutdown → quit',
+    'FW1：interface g0/0/1 → ip address 203.0.113.1 24 → undo shutdown → quit',
+    'FW1：firewall zone trust → add interface g0/0/0 → quit（IOS：zone security INSIDE + 接口 zone-member security INSIDE）',
+    'FW1：firewall zone untrust → add interface g0/0/1 → quit',
+    'FW1：security-policy → rule name allow-out → source-zone trust → destination-zone untrust → action permit → quit → quit',
+    'FW1：display firewall zone、display security-policy 检查区域与规则',
+    'SRV → PC1 先 ping 应不通（untrust 主动入内网被默认拒绝）；PC1 → SRV ping 应通，回包由状态会话放行',
+  ],
+  checks: [
+    { label: 'FW1 G0/0/0 已划入 trust 区域', kind: { type: 'securityZone', dev: 'FW1', port: 0, zone: 'trust' } },
+    { label: 'FW1 G0/0/1 已划入 untrust 区域', kind: { type: 'securityZone', dev: 'FW1', port: 1, zone: 'untrust' } },
+    {
+      label: '存在 trust → untrust permit 策略',
+      kind: {
+        type: 'securityPolicy',
+        dev: 'FW1',
+        name: 'allow-out',
+        srcZone: 'trust',
+        dstZone: 'untrust',
+        permit: true,
+      },
+    },
+    { label: 'SRV → PC1 被默认拒绝', kind: { type: 'ping', from: 'SRV', to: '192.168.1.10', expect: false } },
+    { label: 'PC1 → SRV 放行（状态化回包）', kind: { type: 'ping', from: 'PC1', to: '203.0.113.10' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const fw1 = sim.add_device('Firewall', 'Vrp');
+    const srv = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(fw1, 'FW1');
+    sim.rename_device(srv, 'SRV');
+    sim.add_link(pc1, fw1); // FW1 p0
+    sim.add_link(fw1, srv); // FW1 p1
+    sim.set_host_config(pc1, '192.168.1.10', 24, '192.168.1.1');
+    sim.set_host_config(srv, '203.0.113.10', 24, '203.0.113.1');
+    setPosition(pc1, { x: 60, y: 100 });
+    setPosition(fw1, { x: 330, y: 100 });
+    setPosition(srv, { x: 620, y: 100 });
+  },
+};
+
+// ---------- 实验十一：IPsec 站点到站点 VPN ----------
+
+export const lab11: LabDef = {
+  id: 'ipsec-site',
+  title: '实验十一 · IPsec 站点到站点 VPN',
+  brief:
+    '两个分支机构各有一台路由器，通过公网互联。配置 IPsec 隧道把 192.168.1.0/24 与 192.168.2.0/24 的流量封装到 10.0.0.0/30 公网链路上，实现站点私网互通。',
+  tasks: [
+    'R1：G0/0/0 192.168.1.1/24、G0/0/1 10.0.0.1/30，均 undo shutdown',
+    'R2：G0/0/0 10.0.0.2/30、G0/0/1 192.168.2.1/24，均 undo shutdown',
+    'R1：ipsec tunnel T1 local 10.0.0.1 remote 10.0.0.2 → local-subnet 192.168.1.0 24 → remote-subnet 192.168.2.0 24 → quit',
+    'R2：ipsec tunnel T1 local 10.0.0.2 remote 10.0.0.1 → local-subnet 192.168.2.0 24 → remote-subnet 192.168.1.0 24 → quit',
+    'display ipsec tunnel 应看到两端保护子网；PC1 ping 192.168.2.10 应通',
+    '（IOS：ipsec tunnel T1 local … remote … 同一套简化命令）',
+  ],
+  checks: [
+    { label: 'R1 已配置 IPsec 隧道 T1', kind: { type: 'ipsecTunnel', dev: 'R1', name: 'T1' } },
+    { label: 'R2 已配置 IPsec 隧道 T1', kind: { type: 'ipsecTunnel', dev: 'R2', name: 'T1' } },
+    { label: 'PC1 → PC2 经 IPsec 隧道连通', kind: { type: 'ping', from: 'PC1', to: '192.168.2.10' } },
+    { label: 'PC2 → PC1 回程连通', kind: { type: 'ping', from: 'PC2', to: '192.168.1.10' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const r1 = sim.add_device('Router', 'Vrp');
+    const r2 = sim.add_device('Router', 'Vrp');
+    const pc2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(r1, 'R1');
+    sim.rename_device(r2, 'R2');
+    sim.rename_device(pc2, 'PC2');
+    sim.add_link(pc1, r1);
+    sim.add_link(r1, r2);
+    sim.add_link(r2, pc2);
+    sim.set_host_config(pc1, '192.168.1.10', 24, '192.168.1.1');
+    sim.set_host_config(pc2, '192.168.2.10', 24, '192.168.2.1');
+    setPosition(pc1, { x: 50, y: 100 });
+    setPosition(r1, { x: 250, y: 100 });
+    setPosition(r2, { x: 470, y: 100 });
+    setPosition(pc2, { x: 680, y: 100 });
+  },
+};
+
+// ---------- 实验十二：SSL VPN 远程接入 ----------
+
+export const lab12: LabDef = {
+  id: 'sslvpn-remote',
+  title: '实验十二 · SSL VPN 远程接入',
+  brief:
+    '外网 PC 通过 SSL VPN 网关认证后获得虚拟 IP，再访问内网服务器。防火墙默认拒绝外网主动访问内网，SSL VPN 隧道是受控的远程接入通道。',
+  tasks: [
+    'FW1：G0/0/0（外网）203.0.113.1/24、G0/0/1（内网）192.168.1.1/24，均 undo shutdown',
+    'FW1：firewall zone untrust → add interface g0/0/0 → quit；firewall zone trust → add interface g0/0/1 → quit',
+    'FW1：aaa → local-user admin password cipher Admin@123 → quit',
+    'FW1：sslvpn virtual-ip 10.10.0.0 24',
+    'PC1：sslvpn connect 203.0.113.1 admin Admin@123 —— 应获得虚拟 IP 10.10.0.2',
+    'FW1：display sslvpn session 应看到虚拟 IP 与客户端真实 IP',
+    'PC1 ping 192.168.1.10 —— 经 SSL VPN 隧道应通（未连接前不通）',
+  ],
+  checks: [
+    { label: 'PC1 已建立 SSL VPN 会话', kind: { type: 'vpnConnected', dev: 'PC1' } },
+    { label: 'PC1 → 内网服务器经 VPN 连通', kind: { type: 'ping', from: 'PC1', to: '192.168.1.10' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const fw1 = sim.add_device('Firewall', 'Vrp');
+    const srv = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(fw1, 'FW1');
+    sim.rename_device(srv, 'SRV');
+    sim.add_link(pc1, fw1); // FW1 p0 outside
+    sim.add_link(fw1, srv); // FW1 p1 inside
+    sim.set_host_config(pc1, '203.0.113.10', 24, '203.0.113.1');
+    sim.set_host_config(srv, '192.168.1.10', 24, '192.168.1.1');
+    setPosition(pc1, { x: 60, y: 100 });
+    setPosition(fw1, { x: 330, y: 100 });
+    setPosition(srv, { x: 620, y: 100 });
+  },
+};
+
+export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12];
 
 // 合并英文文案
 for (const l of LABS) {

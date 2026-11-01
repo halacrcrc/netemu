@@ -191,4 +191,62 @@ export const LABS_EN: Record<string, LabEn> = {
       'PC1 -> Internet server (NAT) reachable',
     ],
   },
+  'firewall-zone': {
+    title: 'Lab 10 · Firewall Security Zones and Policy',
+    brief:
+      'An inside PC reaches an Internet server through a firewall. Put the two interfaces into trust / untrust zones and permit only trust -> untrust traffic; untrusted-initiated access is denied by default while replies are allowed by the stateful session.',
+    tasks: [
+      'FW1: system-view -> interface g0/0/0 -> ip address 192.168.1.1 24 -> undo shutdown -> quit',
+      'FW1: interface g0/0/1 -> ip address 203.0.113.1 24 -> undo shutdown -> quit',
+      'FW1: firewall zone trust -> add interface g0/0/0 -> quit (IOS: zone security INSIDE + interface zone-member security INSIDE)',
+      'FW1: firewall zone untrust -> add interface g0/0/1 -> quit',
+      'FW1: security-policy -> rule name allow-out -> source-zone trust -> destination-zone untrust -> action permit -> quit -> quit',
+      'FW1: display firewall zone and display security-policy to check zones and rules',
+      'SRV -> PC1 should fail first (untrusted-initiated access is denied); PC1 -> SRV should succeed with the reply allowed by the stateful session',
+    ],
+    checkLabels: [
+      'FW1 G0/0/0 is in the trust zone',
+      'FW1 G0/0/1 is in the untrust zone',
+      'A trust -> untrust permit policy exists',
+      'SRV -> PC1 is denied by default',
+      'PC1 -> SRV is permitted (stateful reply)',
+    ],
+  },
+'ipsec-site': {
+    title: 'Lab 11 · IPsec Site-to-Site VPN',
+    brief:
+      'Two branch routers connect over a public link. Configure IPsec tunnels to encapsulate traffic between 192.168.1.0/24 and 192.168.2.0/24 across the 10.0.0.0/30 link, enabling private-site connectivity.',
+    tasks: [
+      'R1: G0/0/0 192.168.1.1/24, G0/0/1 10.0.0.1/30, both undo shutdown',
+      'R2: G0/0/0 10.0.0.2/30, G0/0/1 192.168.2.1/24, both undo shutdown',
+      'R1: ipsec tunnel T1 local 10.0.0.1 remote 10.0.0.2 -> local-subnet 192.168.1.0 24 -> remote-subnet 192.168.2.0 24 -> quit',
+      'R2: ipsec tunnel T1 local 10.0.0.2 remote 10.0.0.1 -> local-subnet 192.168.2.0 24 -> remote-subnet 192.168.1.0 24 -> quit',
+      'display ipsec tunnel should show both protected subnets; PC1 ping 192.168.2.10 should succeed',
+      '(IOS: ipsec tunnel T1 local ... remote ... with the same simplified commands)',
+    ],
+    checkLabels: [
+      'R1 has IPsec tunnel T1',
+      'R2 has IPsec tunnel T1',
+      'PC1 -> PC2 reachable through the IPsec tunnel',
+      'PC2 -> PC1 return path reachable',
+    ],
+  },
+  'sslvpn-remote': {
+    title: 'Lab 12 · SSL VPN Remote Access',
+    brief:
+      'An outside PC authenticates to an SSL VPN gateway, receives a virtual IP, and then reaches an inside server. The firewall denies outside-initiated inside access by default; the SSL VPN tunnel is the controlled remote-access path.',
+    tasks: [
+      'FW1: G0/0/0 (outside) 203.0.113.1/24, G0/0/1 (inside) 192.168.1.1/24, both undo shutdown',
+      'FW1: firewall zone untrust -> add interface g0/0/0 -> quit; firewall zone trust -> add interface g0/0/1 -> quit',
+      'FW1: aaa -> local-user admin password cipher Admin@123 -> quit',
+      'FW1: sslvpn virtual-ip 10.10.0.0 24',
+      'PC1: sslvpn connect 203.0.113.1 admin Admin@123 — should obtain virtual IP 10.10.0.2',
+      'FW1: display sslvpn session should show the virtual IP and the client real IP',
+      'PC1 ping 192.168.1.10 — should succeed through the SSL VPN tunnel (fails before connecting)',
+    ],
+    checkLabels: [
+      'PC1 has an established SSL VPN session',
+      'PC1 -> inside server reachable through the VPN',
+    ],
+  },
 };

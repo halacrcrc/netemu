@@ -23,6 +23,7 @@ fn kind_from(s: &str) -> Option<DeviceKind> {
         "Router" | "router" => Some(DeviceKind::Router),
         "Switch" | "switch" => Some(DeviceKind::Switch),
         "Host" | "host" | "PC" | "pc" => Some(DeviceKind::Host),
+        "Firewall" | "firewall" | "FW" | "fw" => Some(DeviceKind::Firewall),
         _ => None,
     }
 }
@@ -67,6 +68,7 @@ impl Sim {
             DeviceKind::Router => "Router",
             DeviceKind::Switch => "Switch",
             DeviceKind::Host => "PC",
+            DeviceKind::Firewall => "FW",
         };
         let n = self.kind_counts.entry(base.to_string()).or_insert(0);
         *n += 1;
@@ -279,6 +281,7 @@ impl Sim {
                 DeviceKind::Router => "Router",
                 DeviceKind::Switch => "Switch",
                 DeviceKind::Host => "PC",
+                DeviceKind::Firewall => "FW",
             };
             if let Some(sfx) = d.name.strip_prefix(base) {
                 if let Ok(n) = sfx.parse::<u32>() {
@@ -419,6 +422,79 @@ impl Sim {
                     dst,
                     len,
                     src: None,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 IPsec 隧道是否存在。
+    pub fn check_ipsec_tunnel(&mut self, dev: u32, name: &str) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::IpsecTunnel {
+                    dev,
+                    name: name.to_string(),
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查主机 SSL VPN 会话。
+    pub fn check_vpn_connected(&mut self, dev: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::VpnConnected { dev },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查端口安全区域。
+    pub fn check_security_zone(
+        &mut self,
+        dev: u32,
+        port: u32,
+        zone: &str,
+    ) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::SecurityZone {
+                    dev,
+                    port: port as usize,
+                    zone: zone.to_string(),
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查区域间策略。
+    pub fn check_security_policy(
+        &mut self,
+        dev: u32,
+        name: &str,
+        src_zone: &str,
+        dst_zone: &str,
+        permit: bool,
+    ) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::SecurityPolicy {
+                    dev,
+                    name: name.to_string(),
+                    src_zone: src_zone.to_string(),
+                    dst_zone: dst_zone.to_string(),
+                    permit,
                 },
             }],
         );
@@ -725,6 +801,45 @@ impl Sim {
                             sim_packets::ipv4_str(p.dst),
                             p.icmp.seq,
                             p.ttl
+                        ),
+                    ),
+                    L3::Tcp(t) => {
+                        let mut flags = String::new();
+                        if t.flags & sim_packets::TCP_SYN != 0 {
+                            flags.push_str("SYN ");
+                        }
+                        if t.flags & sim_packets::TCP_ACK != 0 {
+                            flags.push_str("ACK ");
+                        }
+                        if t.flags & sim_packets::TCP_FIN != 0 {
+                            flags.push_str("FIN ");
+                        }
+                        if t.flags & sim_packets::TCP_RST != 0 {
+                            flags.push_str("RST ");
+                        }
+                        (
+                            "TCP",
+                            format!(
+                                "{}:{} → {}:{}  {}seq={} ack={} ttl={}",
+                                sim_packets::ipv4_str(t.src),
+                                t.src_port,
+                                sim_packets::ipv4_str(t.dst),
+                                t.dst_port,
+                                flags,
+                                t.seq,
+                                t.ack,
+                                t.ttl
+                            ),
+                        )
+                    }
+                    L3::Ipsec(i) => (
+                        "IPsec",
+                        format!(
+                            "{} → {}  inner {} → {}",
+                            sim_packets::ipv4_str(i.src),
+                            sim_packets::ipv4_str(i.dst),
+                            sim_packets::ipv4_str(i.inner.src),
+                            sim_packets::ipv4_str(i.inner.dst)
                         ),
                     ),
                     L3::Bpdu(b) => (

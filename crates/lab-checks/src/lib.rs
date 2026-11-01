@@ -78,6 +78,24 @@ pub enum CheckKind {
     VrrpMaster { dev: DevId, vrid: u8 },
     /// 检查 OSPF 邻居数量不少于 min。
     OspfNeighbors { dev: DevId, min: usize },
+    /// 检查端口所属安全区域。
+    SecurityZone {
+        dev: DevId,
+        port: usize,
+        zone: String,
+    },
+    /// 检查区域间策略。
+    SecurityPolicy {
+        dev: DevId,
+        name: String,
+        src_zone: String,
+        dst_zone: String,
+        permit: bool,
+    },
+    /// 检查 IPsec 隧道配置。
+    IpsecTunnel { dev: DevId, name: String },
+    /// 检查主机已建立 SSL VPN 会话。
+    VpnConnected { dev: DevId },
 }
 
 #[derive(Clone, Debug)]
@@ -409,6 +427,76 @@ fn run_one(eng: &mut Engine, c: &Check) -> CheckResult {
         CheckKind::OspfNeighbors { dev, min } => {
             let n = eng.ospf_neighbors_of(*dev).len();
             (n >= *min, format!("OSPF 邻居 {} 个（要求 ≥{}）", n, min))
+        }
+        CheckKind::SecurityZone { dev, port, zone } => {
+            let actual = eng
+                .net
+                .device(*dev)
+                .and_then(|d| d.port(*port))
+                .and_then(|p| p.zone.clone());
+            (
+                actual.as_deref() == Some(zone.as_str()),
+                match actual {
+                    Some(z) => format!("接口区域 = {}", z),
+                    None => "接口未划分安全区域".into(),
+                },
+            )
+        }
+        CheckKind::SecurityPolicy {
+            dev,
+            name,
+            src_zone,
+            dst_zone,
+            permit,
+        } => {
+            let found = eng.net.device(*dev).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Router(rs) => rs
+                    .security_policies
+                    .iter()
+                    .find(|p| p.name == *name)
+                    .cloned(),
+                _ => None,
+            });
+            match found {
+                Some(p) => (
+                    p.src_zone == *src_zone && p.dst_zone == *dst_zone && p.permit == *permit,
+                    format!(
+                        "策略 {}：{} → {} {}",
+                        p.name,
+                        p.src_zone,
+                        p.dst_zone,
+                        if p.permit { "permit" } else { "deny" }
+                    ),
+                ),
+                None => (false, format!("策略 {} 未配置", name)),
+            }
+        }
+        CheckKind::IpsecTunnel { dev, name } => {
+            let found = eng.net.device(*dev).and_then(|d| match &d.state {
+                sim_core::device::DeviceState::Router(rs) => {
+                    rs.ipsec_tunnels.iter().find(|t| t.name == *name).cloned()
+                }
+                _ => None,
+            });
+            (
+                found.is_some(),
+                found
+                    .map(|t| format!("IPsec 隧道 {} 已配置", t.name))
+                    .unwrap_or_else(|| format!("IPsec 隧道 {} 未配置", name)),
+            )
+        }
+        CheckKind::VpnConnected { dev } => {
+            let connected = eng.net.device(*dev).map(|d| match &d.state {
+                sim_core::device::DeviceState::Host(hs) => hs.vpn.is_some(),
+                _ => false,
+            });
+            (
+                connected == Some(true),
+                match connected {
+                    Some(true) => "SSL VPN 已连接".into(),
+                    _ => "SSL VPN 未连接".into(),
+                },
+            )
         }
         CheckKind::SviIp { dev, vlan, ip } => {
             let got = eng.net.device(*dev).and_then(|d| match &d.state {

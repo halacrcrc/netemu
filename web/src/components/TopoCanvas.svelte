@@ -156,12 +156,14 @@
     Router: 'var(--router)',
     Switch: 'var(--switch)',
     Host: 'var(--host)',
+    Firewall: 'var(--firewall)',
   };
 
   const KIND_TEXT: Record<string, string> = {
     Router: 'left.router',
     Switch: 'left.switch',
     Host: 'left.pc',
+    Firewall: 'left.firewall',
   };
 </script>
 
@@ -264,6 +266,14 @@
             {#each [0, 1, 2, 3] as i}
               <circle cx={NODE_W / 2 - 10 + i * 7} cy={31} r="1.8" fill={KIND_COLOR[dev.kind]} />
             {/each}
+          {:else if dev.kind === 'Firewall'}
+            <path
+              d="M {NODE_W / 2} 12 l11 4 v8 c0 8 -5 12 -11 15 c-6 -3 -11 -7 -11 -15 v-8 z"
+              fill="none"
+              stroke={KIND_COLOR[dev.kind]}
+              stroke-width="2"
+            />
+            <path d="M {NODE_W / 2 - 5} 25 h10 M {NODE_W / 2} 20 v10" stroke={KIND_COLOR[dev.kind]} stroke-width="1.6" />
           {:else}
             <rect x={NODE_W / 2 - 11} y={12} width="22" height="14" rx="2" fill="none" stroke={KIND_COLOR[dev.kind]} stroke-width="2" />
             <path d="M {NODE_W / 2 - 5} 32 h10 M {NODE_W / 2} 26 v6" stroke={KIND_COLOR[dev.kind]} stroke-width="2" fill="none" />
