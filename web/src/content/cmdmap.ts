@@ -19,7 +19,8 @@ export type CmdMode =
   | 'Zone'
   | 'SecurityPolicy'
   | 'SecurityRule'
-  | 'Ipsec';
+  | 'Ipsec'
+  | 'Ospfv3';
 
 export interface CmdRow {
   /** 功能描述 */
@@ -259,4 +260,28 @@ export const CMDMAP: CmdRow[] = [
   { feature: '广播风暴抑制', topic: 'qos', ios: 'storm-control broadcast level 100', vrp: 'broadcast-suppression 100', comware: 'broadcast-suppression 100', mode: 'If' },
   { feature: '入方向限速', topic: 'qos', ios: 'rate-limit input 1000', vrp: 'qos car inbound cir 1000', comware: 'qos lr inbound cir 1000', mode: 'If' },
   { feature: '查看 QoS 统计', topic: 'qos', ios: 'show storm-control', vrp: 'display qos', comware: 'display qos', mode: 'Exec' },
+
+  // IA：运维入门
+  { feature: '连通性测试', topic: 'ops', ios: 'ping 10.0.0.2', vrp: 'ping 10.0.0.2', comware: 'ping 10.0.0.2', mode: 'Exec' },
+  { feature: '查看接口摘要', topic: 'ops', ios: 'show ip interface brief', vrp: 'display ip interface brief', comware: 'display ip interface brief', mode: 'Exec' },
+  { feature: '查看路由表', topic: 'ops', ios: 'show ip route', vrp: 'display ip routing-table', comware: 'display ip routing-table', mode: 'Exec' },
+
+  // 同 VLAN 隔离
+  { feature: '端口隔离', topic: 'isolation', ios: 'switchport protected', vrp: 'port-isolate enable group 1', comware: 'port-isolate enable group 1', mode: 'If' },
+  { feature: 'MUX VLAN principal', topic: 'isolation', ios: 'mux-vlan principal', vrp: 'mux-vlan principal', comware: 'mux-vlan principal', mode: 'If' },
+  { feature: 'MUX VLAN group', topic: 'isolation', ios: 'mux-vlan group 1', vrp: 'mux-vlan group 1', comware: 'mux-vlan group 1', mode: 'If' },
+  { feature: '查看端口隔离', topic: 'isolation', ios: 'show port-isolate', vrp: 'display port-isolate', comware: 'display port-isolate', mode: 'Exec' },
+  { feature: '查看 MUX VLAN', topic: 'isolation', ios: 'show mux-vlan', vrp: 'display mux-vlan', comware: 'display mux-vlan', mode: 'Exec' },
+
+  // OSPFv3
+  { feature: '启动 OSPFv3', topic: 'ospfv3', ios: 'ipv6 router ospf 1', vrp: 'ospfv3 1', comware: 'ospfv3 1', mode: 'Config' },
+  { feature: '设置 Router ID', topic: 'ospfv3', ios: 'router-id 1.1.1.1', vrp: 'router-id 1.1.1.1', comware: 'router-id 1.1.1.1', mode: 'Ospfv3' },
+  { feature: '接口启用 OSPFv3', topic: 'ospfv3', ios: 'ipv6 ospf 1 area 0', vrp: 'ospfv3 1 area 0', comware: 'ospfv3 1 area 0', mode: 'If' },
+  { feature: '查看 OSPFv3 邻居', topic: 'ospfv3', ios: 'show ipv6 ospf neighbor', vrp: 'display ospfv3 peer', comware: 'display ospfv3 peer', mode: 'Exec' },
+
+  // SRv6 BE
+  { feature: '配置 Locator', topic: 'srv6', ios: 'srv6 locator 2001:db8:100::/64', vrp: 'srv6 locator 2001:db8:100::/64', comware: 'srv6 locator 2001:db8:100::/64', mode: 'Config' },
+  { feature: '配置本地 SID', topic: 'srv6', ios: 'srv6 sid 2001:db8:100::1', vrp: 'srv6 sid 2001:db8:100::1', comware: 'srv6 sid 2001:db8:100::1', mode: 'Config' },
+  { feature: '静态 SRv6 路由', topic: 'srv6', ios: 'srv6 route 2001:db8:2::/64 sid 2001:db8:200::1', vrp: 'srv6 route 2001:db8:2::/64 sid 2001:db8:200::1', comware: 'srv6 route 2001:db8:2::/64 sid 2001:db8:200::1', mode: 'Config' },
+  { feature: '查看 SRv6', topic: 'srv6', ios: 'show srv6', vrp: 'display srv6', comware: 'display srv6', mode: 'Exec' },
 ];

@@ -18,6 +18,16 @@ export type TopicId =
   | 'isis'
   | 'mpls'
   | 'qos'
+  | 'lag'
+  | 'multicast'
+  | 'reliability'
+  | 'ops'
+  | 'campus'
+  | 'sdwan'
+  | 'aiops'
+  | 'isolation'
+  | 'ospfv3'
+  | 'srv6'
   | 'automation';
 
 export const TOPICS: { id: TopicId; name: string; nameEn: string }[] = [
@@ -36,7 +46,17 @@ export const TOPICS: { id: TopicId; name: string; nameEn: string }[] = [
   { id: 'bgp', name: 'BGP', nameEn: 'BGP' },
   { id: 'isis', name: 'IS-IS', nameEn: 'IS-IS' },
   { id: 'mpls', name: 'MPLS VPN', nameEn: 'MPLS VPN' },
-  { id: 'qos', name: 'QoS 与组播', nameEn: 'QoS and multicast' },
+  { id: 'qos', name: 'QoS', nameEn: 'QoS' },
+  { id: 'lag', name: '链路聚合与堆叠', nameEn: 'LAG and stacking' },
+  { id: 'multicast', name: 'IP 组播', nameEn: 'IP multicast' },
+  { id: 'reliability', name: '网络可靠性', nameEn: 'Network reliability' },
+  { id: 'ops', name: '运维与自动化入门', nameEn: 'Ops and automation basics' },
+  { id: 'campus', name: '园区规划', nameEn: 'Campus design' },
+  { id: 'sdwan', name: 'SD-WAN 与承载', nameEn: 'SD-WAN and transport' },
+  { id: 'aiops', name: '智能运维与排障', nameEn: 'AIOps and troubleshooting' },
+  { id: 'isolation', name: '同 VLAN 隔离', nameEn: 'Intra-VLAN isolation' },
+  { id: 'ospfv3', name: 'OSPFv3', nameEn: 'OSPFv3' },
+  { id: 'srv6', name: 'SRv6', nameEn: 'SRv6' },
   { id: 'automation', name: '自动化与 SDN', nameEn: 'Automation and SDN' },
 ];
 
@@ -1578,14 +1598,567 @@ const QUESTIONS_BASE: Question[] = [
     answer: 0,
     explain: 'SDN 将控制面上收到控制器，通过南向接口下发转发策略，设备成为可编程转发器。',
   },
+
+  // ---------- OSPF 单区域 ----------
+  {
+    id: 'os6',
+    topic: 'ospf',
+    q: 'OSPF 默认的 Hello 间隔与死亡时间通常是？',
+    options: ['1s / 3s', '10s / 40s', '30s / 120s', '60s / 180s'],
+    answer: 1,
+    explain: '广播网段默认 Hello 10 秒、Dead 40 秒；两端参数必须一致，否则邻居无法建立。',
+  },
+  {
+    id: 'os7',
+    topic: 'ospf',
+    q: '广播网段上 OSPF DR 的选举依据是？',
+    options: ['接口 IP 最大者', '优先级最高者，平局比 Router ID', 'MAC 最小者', '带宽最大者'],
+    answer: 1,
+    explain: '先比接口 DR 优先级（越大越优），平局再比 Router ID；DR 不是抢占式的。',
+  },
+  {
+    id: 'os8',
+    topic: 'ospf',
+    q: 'OSPF 中反掩码 0.0.0.3 匹配的是？',
+    options: ['/30 网段', '/24 网段', '单个主机', '所有地址'],
+    answer: 0,
+    explain: '反掩码 0 表示必须匹配、1 表示忽略；0.0.0.3 允许最后两位变化，对应 /30。',
+  },
+  {
+    id: 'os9',
+    topic: 'ospf',
+    q: 'OSPF 接口 cost 默认依据什么计算？',
+    options: ['接口带宽', '跳数', 'MAC 地址', '队列长度'],
+    answer: 0,
+    explain: '默认 cost 由接口带宽推导（参考带宽/带宽），可用 ip ospf cost 或 ospf cost 手工覆盖。',
+  },
+  {
+    id: 'os10',
+    topic: 'ospf',
+    q: '单区域 OSPF 中所有参与接口应属于？',
+    options: ['任意不同区域', '同一个区域（通常区域 0）', '只能区域 1', '不需要区域'],
+    answer: 1,
+    explain: '单区域部署把所有接口放进同一区域（通常骨干区域 0），区域内路由器交换 Type-1/2 LSA。',
+  },
+
+  // ---------- 链路聚合与堆叠 ----------
+  {
+    id: 'lg1',
+    topic: 'lag',
+    q: '两端 LACP 都配置为 passive 时，链路聚合会？',
+    options: ['正常建立', '无法协商建立', '自动变成 static', '只跑 STP'],
+    answer: 1,
+    explain: 'LACP 至少一端要 active 主动发 LACPDU；两端都 passive 不会主动发起，聚合无法建立。',
+  },
+  {
+    id: 'lg2',
+    topic: 'lag',
+    q: '链路聚合后，STP 看到的是？',
+    options: ['每条成员链路一个端口', '一个逻辑端口', '没有端口', '两个根端口'],
+    answer: 1,
+    explain: '聚合口是一个逻辑端口，成员链路不会因 STP 被单独阻塞，带宽与冗余同时保留。',
+  },
+  {
+    id: 'lg3',
+    topic: 'lag',
+    q: '聚合链路的负载分担通常按什么进行？',
+    options: ['按报文逐个轮询', '按流哈希（源/目的 MAC、IP、端口）', '按 VLAN 固定', '按 TTL'],
+    answer: 1,
+    explain: '哈希把不同流分散到成员链路，同一条流通常固定走一条链路，避免乱序。',
+  },
+  {
+    id: 'lg4',
+    topic: 'lag',
+    q: '堆叠系统中 Master 的选举主要依据？',
+    options: ['MAC 地址最小', '优先级与成员编号', '接口数量', '启动时间最晚'],
+    answer: 1,
+    explain: '堆叠比较优先级（高者优），平局再比成员编号/MAC；Master 统一管理配置与转发。',
+  },
+  {
+    id: 'lg5',
+    topic: 'lag',
+    q: '堆叠链路全部断开可能导致什么风险？',
+    options: ['自动恢复', '双主（split-brain）', 'VLAN 消失', 'OSPF 加速'],
+    answer: 1,
+    explain: '堆叠分裂后两台成员都可能认为自己是 Master，真实设备用 MAD 多主检测抑制。',
+  },
+
+  // ---------- 运维与自动化入门 ----------
+  {
+    id: 'op1',
+    topic: 'ops',
+    q: 'ping 命令主要验证什么？',
+    options: ['端到端 IP 连通性与往返时延', '路由协议的 LSDB', 'VLAN 配置', '接口光功率'],
+    answer: 0,
+    explain: 'ping 用 ICMP Echo/Reply 验证连通性与 RTT，是排障的第一步。',
+  },
+  {
+    id: 'op2',
+    topic: 'ops',
+    q: 'traceroute 的主要用途是？',
+    options: ['查看逐跳路径与丢包位置', '分配地址', '同步时钟', '加密流量'],
+    answer: 0,
+    explain: 'traceroute 逐跳增加 TTL 并收集 ICMP 超时，定位路径与故障点。',
+  },
+  {
+    id: 'op3',
+    topic: 'ops',
+    q: '变更网络前最重要的准备之一是？',
+    options: ['备份配置并准备回滚', '关闭所有日志', '删除路由', '关闭 STP'],
+    answer: 0,
+    explain: '变更前备份配置、明确回滚步骤与维护窗口，出问题才能快速恢复。',
+  },
+  {
+    id: 'op4',
+    topic: 'ops',
+    q: '排障时"一次只改一个变量"的目的是？',
+    options: ['加快配置速度', '能判断是哪一个改动生效或引入问题', '减少命令数量', '绕过权限'],
+    answer: 1,
+    explain: '同时改多个变量会混淆因果；单变量变更并立即验证，才能定位真正原因。',
+  },
+  {
+    id: 'op5',
+    topic: 'ops',
+    q: '结构化排障推荐的顺序是？',
+    options: ['应用 → 策略 → 三层 → 二层 → 物理', '物理 → 二层 → 三层 → 策略 → 应用', '随机尝试', '只看日志'],
+    answer: 1,
+    explain: '从物理层往上排查，先排除链路/接口，再查二层、三层、策略与应用，逐层缩小范围。',
+  },
+
+  // ---------- IS-IS 基础 ----------
+  {
+    id: 'is6',
+    topic: 'isis',
+    q: 'IS-IS 的 NET 中 System ID 的作用是？',
+    options: ['标识区域', '唯一标识一台路由器', '标识 VLAN', '标识进程号'],
+    answer: 1,
+    explain: 'NET = 区域地址 + System ID + SEL；System ID 在域内唯一标识路由器。',
+  },
+  {
+    id: 'is7',
+    topic: 'isis',
+    q: 'IS-IS Level 1 路由器主要维护？',
+    options: ['区域内的链路状态', '整个 AS 的链路状态', '仅 IPv6 路由', '组播组'],
+    answer: 0,
+    explain: 'L1 负责区域内部；L2 构成骨干并承载区域间路由，L1-2 同时属于两层。',
+  },
+  {
+    id: 'is8',
+    topic: 'isis',
+    q: 'IS-IS 的 DIS 与 OSPF DR 的关键区别是？',
+    options: ['DIS 有备份', 'DIS 没有备份且可被抢占', 'DIS 不选举', 'DIS 只处理 IPv6'],
+    answer: 1,
+    explain: 'IS-IS 没有备份 DIS，新路由器可能抢占；OSPF 有 BDR 且 DR 不抢占。',
+  },
+  {
+    id: 'is9',
+    topic: 'isis',
+    q: 'IS-IS 报文封装在？',
+    options: ['IP 之上（协议号 89）', '二层链路层', 'TCP 之上', 'UDP 之上'],
+    answer: 1,
+    explain: 'IS-IS 直接封装在二层，不依赖 IP；OSPF 才封装在 IP 之上。',
+  },
+  {
+    id: 'is10',
+    topic: 'isis',
+    q: '华为设备查看 IS-IS 邻居的命令是？',
+    options: ['display isis peer', 'show isis neighbor', 'display ospf peer', 'display bgp peer'],
+    answer: 0,
+    explain: 'VRP 用 display isis peer，思科用 show isis neighbors，两者查看的都是邻接状态。',
+  },
+
+  // ---------- 网络服务补充 ----------
+  {
+    id: 'sv6',
+    topic: 'services',
+    q: 'AAA 分别代表？',
+    options: ['认证、授权、计费', '地址、区域、应用', '审计、告警、归档', '接入、聚合、认证'],
+    answer: 0,
+    explain: 'AAA = Authentication（是谁）、Authorization（能做什么）、Accounting（做了什么）。',
+  },
+  {
+    id: 'sv7',
+    topic: 'services',
+    q: '802.1X 未认证通过前，端口通常只放行？',
+    options: ['所有流量', 'EAP/DHCP/DNS 等认证必需流量', '仅视频', '仅组播'],
+    answer: 1,
+    explain: '未认证终端只能发认证与获取地址所需流量，认证通过后再按动态 VLAN/ACL 放行业务。',
+  },
+  {
+    id: 'sv8',
+    topic: 'services',
+    q: '端口安全的主要作用是？',
+    options: ['限制端口可学习的 MAC 数量并处理违规', '加密所有报文', '分配 IP', '选举根桥'],
+    answer: 0,
+    explain: '端口安全限制 MAC 数，超限可 restrict 或 shutdown，防止私接交换机/伪造 MAC。',
+  },
+  {
+    id: 'sv9',
+    topic: 'services',
+    q: 'DHCP Snooping 的信任端口应指向？',
+    options: ['所有接入端口', '连接合法 DHCP 服务器的端口', '任意端口', '只连 PC 的端口'],
+    answer: 1,
+    explain: '只信任接 DHCP 服务器的端口，非信任口的 Offer/Ack 被丢弃，防止私设 DHCP。',
+  },
+  {
+    id: 'sv10',
+    topic: 'services',
+    q: 'IPSG 依据什么检查源 IP？',
+    options: ['路由表', 'DHCP Snooping 绑定表', 'ARP 表', 'ACL 计数'],
+    answer: 1,
+    explain: 'IPSG 用 DHCP Snooping 绑定表（MAC/IP/VLAN/端口）校验源 IP，阻止地址冒用。',
+  },
+
+  // ---------- 网络可靠性 ----------
+  {
+    id: 'rl1',
+    topic: 'reliability',
+    q: 'BFD 的核心作用是？',
+    options: ['快速检测链路/邻居故障', '分配地址', '加密报文', '计算 SPF'],
+    answer: 0,
+    explain: 'BFD 用轻量心跳在毫秒级检测故障，并通知 OSPF/BGP/VRRP 等协议快速收敛。',
+  },
+  {
+    id: 'rl2',
+    topic: 'reliability',
+    q: 'VRRP 联动 BFD 的主要好处是？',
+    options: ['缩短主备切换时间', '增加 VLAN 数量', '减少 IP 地址', '关闭 STP'],
+    answer: 0,
+    explain: 'BFD 快速发现故障并通知 VRRP，切换从秒级降到百毫秒级。',
+  },
+  {
+    id: 'rl3',
+    topic: 'reliability',
+    q: '链路聚合属于哪一层冗余？',
+    options: ['链路级', '设备级', '网关级', '应用级'],
+    answer: 0,
+    explain: '链路聚合把多条物理链路捆成一条逻辑链路，属于链路级冗余与带宽扩展。',
+  },
+  {
+    id: 'rl4',
+    topic: 'reliability',
+    q: 'FRR/TI-LFA 的作用是？',
+    options: ['故障后快速切换到预置备份路径', '分配组播地址', '加密隧道', '同步时钟'],
+    answer: 0,
+    explain: 'FRR/TI-LFA 预先计算无环备份路径，链路故障时亚秒级切换。',
+  },
+  {
+    id: 'rl5',
+    topic: 'reliability',
+    q: 'M-LAG/vPC 属于哪类可靠性技术？',
+    options: ['跨设备链路聚合（设备级冗余）', '路由协议', 'NAT', '组播'],
+    answer: 0,
+    explain: 'M-LAG/vPC 让两台设备共享系统标识、双归接入，属于设备级冗余与跨设备聚合。',
+  },
+
+  // ---------- IP 组播 ----------
+  {
+    id: 'mc1',
+    topic: 'multicast',
+    q: 'IPv4 组播地址范围是？',
+    options: ['224.0.0.0/4', '10.0.0.0/8', '192.168.0.0/16', '240.0.0.0/4'],
+    answer: 0,
+    explain: '224.0.0.0/4 是 IPv4 组播地址；224.0.0.0/24 为链路本地协议组播。',
+  },
+  {
+    id: 'mc2',
+    topic: 'multicast',
+    q: 'IGMP 的主要作用是？',
+    options: ['主机向路由器申请加入/离开组播组', '计算单播路由', '分配 MAC', '加密组播'],
+    answer: 0,
+    explain: 'IGMP 管理组播组成员关系，路由器据此决定哪些接口需要转发该组流量。',
+  },
+  {
+    id: 'mc3',
+    topic: 'multicast',
+    q: 'PIM-SM 中共享树的根是？',
+    options: ['源路由器', 'RP（汇聚点）', 'DR', 'ABR'],
+    answer: 1,
+    explain: 'PIM-SM 先建以 RP 为根的共享树 (*,G)，流量增大后再切换到源树 (S,G)。',
+  },
+  {
+    id: 'mc4',
+    topic: 'multicast',
+    q: 'RPF 检查要求组播报文？',
+    options: ['从去往源的最短路径接口进入', '从任意接口进入', '只检查目的地址', '只检查 TTL'],
+    answer: 0,
+    explain: 'RPF 要求报文从回到源的最短路径接口进入，否则丢弃，用于防止组播环路。',
+  },
+  {
+    id: 'mc5',
+    topic: 'multicast',
+    q: 'PIM-SSM 的特点是？',
+    options: ['直接指定源与组，不需要 RP', '必须使用共享树', '只支持广播', '不需要 IGMP'],
+    answer: 0,
+    explain: 'SSM 由接收者指定 (S,G)，跳过 RP 与共享树，适合直播等已知源的场景。',
+  },
+
+  // ---------- 园区规划 ----------
+  {
+    id: 'cp1',
+    topic: 'campus',
+    q: '典型园区网络的三层架构是？',
+    options: ['接入-汇聚-核心', '接入-出口-云', '核心-核心-核心', 'AP-AC-云'],
+    answer: 0,
+    explain: '接入接终端、汇聚做网关与策略、核心做高速转发与出口互联，是园区主流分层。',
+  },
+  {
+    id: 'cp2',
+    topic: 'campus',
+    q: '园区网关冗余常用？',
+    options: ['VRRP/HSRP', 'DHCP', 'NTP', 'SNMP'],
+    answer: 0,
+    explain: 'VRRP/HSRP 让两台网关共享虚拟 IP，主设备故障时备用接管，终端无感。',
+  },
+  {
+    id: 'cp3',
+    topic: 'campus',
+    q: '园区有线准入最常用的端口认证是？',
+    options: ['802.1X', 'WPA2', 'NAT', 'OSPF'],
+    answer: 0,
+    explain: '802.1X 在端口层做身份认证，可与动态 VLAN/ACL 联动，是有线准入的主流方案。',
+  },
+  {
+    id: 'cp4',
+    topic: 'campus',
+    q: '"业务随行"的核心理念是？',
+    options: ['策略绑定用户身份并跟随移动', '策略绑定交换机端口', '策略绑定 IP 地址', '只绑定 MAC'],
+    answer: 0,
+    explain: '业务随行把策略绑定到用户/用户组，用户换位置、换 IP 后策略仍然跟随。',
+  },
+  {
+    id: 'cp5',
+    topic: 'campus',
+    q: '华为 CloudCampus 方案的集中管理组件是？',
+    options: ['iMaster NCE', 'F5 LTM', 'ASA', 'WLC'],
+    answer: 0,
+    explain: 'iMaster NCE 统一管理园区交换机、AP/AC，提供模板化配置与云化管理。',
+  },
+
+  // ---------- SD-WAN 与承载 ----------
+  {
+    id: 'sw1',
+    topic: 'sdwan',
+    q: 'SD-WAN 的 Overlay 隧道常用？',
+    options: ['GRE/IPsec', 'STP', 'IGMP', 'ARP'],
+    answer: 0,
+    explain: 'SD-WAN 用 GRE/IPsec 在多种 Underlay 上建立加密 Overlay，实现拓扑解耦。',
+  },
+  {
+    id: 'sw2',
+    topic: 'sdwan',
+    q: 'SD-WAN 控制器故障时，数据面通常？',
+    options: ['继续按已有策略转发', '立即断网', '自动关闭所有隧道', '清空路由表'],
+    answer: 0,
+    explain: '成熟方案让控制面与数据面分离，控制器故障时数据面仍按已下发策略转发。',
+  },
+  {
+    id: 'sw3',
+    topic: 'sdwan',
+    q: 'SRv6 的 SID 是？',
+    options: ['IPv6 地址（Locator + Function）', 'MPLS 标签', 'VLAN ID', 'MAC 地址'],
+    answer: 0,
+    explain: 'SRv6 把段标识编码为 IPv6 地址，由 Locator 与 Function 组成。',
+  },
+  {
+    id: 'sw4',
+    topic: 'sdwan',
+    q: 'SRv6 Policy 的主要用途是？',
+    options: ['显式路径与流量工程', '分配地址', '同步时钟', '选举 DR'],
+    answer: 0,
+    explain: 'SRv6 Policy 用 Segment List 指定显式路径，可实现流量工程与业务保障。',
+  },
+  {
+    id: 'sw5',
+    topic: 'sdwan',
+    q: '网络切片的目标是？',
+    options: ['不同业务使用独立资源与路径，互不抢占', '把所有业务合并', '取消 QoS', '只保留语音'],
+    answer: 0,
+    explain: '网络切片为不同业务划分资源与路径，保障关键业务的带宽/时延。',
+  },
+
+  // ---------- 智能运维与排障 ----------
+  {
+    id: 'ai1',
+    topic: 'aiops',
+    q: 'Telemetry 相比 SNMP 轮询的优势是？',
+    options: ['设备主动推送、采样更细', '不需要网络', '只能采集告警', '必须人工触发'],
+    answer: 0,
+    explain: 'Telemetry 由设备持续推送指标，可达秒级，适合大规模实时监控。',
+  },
+  {
+    id: 'ai2',
+    topic: 'aiops',
+    q: 'AIOps 的核心价值是？',
+    options: ['异常检测与根因关联，收敛告警', '替代所有路由协议', '自动分配 IP', '加密流量'],
+    answer: 0,
+    explain: 'AIOps 学习基线、识别异常并关联根因，把告警风暴变成可行动事件。',
+  },
+  {
+    id: 'ai3',
+    topic: 'aiops',
+    q: '数字孪生在网络变更中的作用是？',
+    options: ['变更前仿真验证影响', '替代真实设备', '分配 VLAN', '加密配置'],
+    answer: 0,
+    explain: '数字孪生复制网络模型，变更前仿真配置影响，降低割接风险。',
+  },
+  {
+    id: 'ai4',
+    topic: 'aiops',
+    q: '网络割接前最重要的准备是？',
+    options: ['回滚方案与维护窗口', '关闭日志', '删除备份', '关闭监控'],
+    answer: 0,
+    explain: '割接前准备回滚配置、维护窗口与验证步骤，异常时能快速恢复。',
+  },
+  {
+    id: 'ai5',
+    topic: 'aiops',
+    q: '故障处理时"先恢复业务"的意义是？',
+    options: ['缩短业务中断时间，再从容定位根因', '掩盖问题', '不需要根因', '跳过验证'],
+    answer: 0,
+    explain: '先止损恢复业务，再分析根因并补监控/自动化检查，是运维的优先级原则。',
+  },
+
+  // ---------- 同 VLAN 隔离 ----------
+  {
+    id: 'iso1',
+    topic: 'isolation',
+    q: 'MUX VLAN 中 principal 端口的特点是？',
+    options: ['只能访问网关', '可与所有端口互通', '只能同组互访', '完全隔离'],
+    answer: 1,
+    explain: 'principal（思科 promiscuous）通常接网关/服务器，可与所有端口互通。',
+  },
+  {
+    id: 'iso2',
+    topic: 'isolation',
+    q: '两个 separate 端口之间的二层通信？',
+    options: ['可以互通', '被隔离', '只能广播', '取决于 MAC'],
+    answer: 1,
+    explain: 'separate（isolated）端口彼此隔离，只能访问 principal。',
+  },
+  {
+    id: 'iso3',
+    topic: 'isolation',
+    q: 'MUX VLAN 的 group 端口之间？',
+    options: ['全部隔离', '同组互通、跨组隔离', '全部互通', '只允许广播'],
+    answer: 1,
+    explain: 'group（community）端口同组内互通，跨组隔离，且可访问 principal。',
+  },
+  {
+    id: 'iso4',
+    topic: 'isolation',
+    q: '思科 Private VLAN 中，能访问所有端口的是？',
+    options: ['isolated 端口', 'community 端口', 'promiscuous 端口', 'trunk 端口'],
+    answer: 2,
+    explain: 'promiscuous 端口可访问 primary VLAN 内所有端口，isolated/community 受限制。',
+  },
+  {
+    id: 'iso5',
+    topic: 'isolation',
+    q: '端口隔离（port-isolate）中，同一隔离组的端口？',
+    options: ['可以互通', '二层不能互通', '只能通过网关互通', '自动聚合'],
+    answer: 1,
+    explain: '同一隔离组的端口二层互相隔离；不同组通常可以互通。',
+  },
+
+  // ---------- OSPFv3 ----------
+  {
+    id: 'ov1',
+    topic: 'ospfv3',
+    q: 'OSPFv3 的 Router ID 是？',
+    options: ['128 位 IPv6 地址', '32 位 IPv4 格式', 'MAC 地址', '16 位整数'],
+    answer: 1,
+    explain: 'OSPFv3 仍使用 32 位 Router ID，通常手工配置或取一个 IPv4 地址。',
+  },
+  {
+    id: 'ov2',
+    topic: 'ospfv3',
+    q: 'OSPFv3 邻居通常使用什么地址建立？',
+    options: ['全球单播', '链路本地地址', '组播 MAC', '环回地址'],
+    answer: 1,
+    explain: 'OSPFv3 邻居通常用 fe80::/10 链路本地地址建立，下一跳也是链路本地。',
+  },
+  {
+    id: 'ov3',
+    topic: 'ospfv3',
+    q: 'OSPFv3 中用于描述链路本地地址与前缀的 LSA 是？',
+    options: ['Router-LSA', 'Network-LSA', 'Link-LSA', 'External-LSA'],
+    answer: 2,
+    explain: 'Link-LSA 传递接口链路本地地址与 IPv6 前缀；SPF 仍基于 Router-LSA。',
+  },
+  {
+    id: 'ov4',
+    topic: 'ospfv3',
+    q: 'OSPFv3 头部的认证字段？',
+    options: ['与 OSPFv2 相同', '已移除，改用 IPv6 IPsec', '只支持 MD5', '使用 TLS'],
+    answer: 1,
+    explain: 'OSPFv3 头部不再带认证字段，认证依赖 IPv6 IPsec。',
+  },
+  {
+    id: 'ov5',
+    topic: 'ospfv3',
+    q: 'IPv6 路由表中 OSPFv3 路由通常标记为？',
+    options: ['C', 'S', 'O', 'B'],
+    answer: 2,
+    explain: 'OSPFv3 路由标记为 O；C 为直连、S 为静态、B 为 BGP。',
+  },
+
+  // ---------- SRv6 ----------
+  {
+    id: 'sr1',
+    topic: 'srv6',
+    q: 'SRv6 的 SID 本质上是？',
+    options: ['MPLS 标签', 'IPv6 地址', 'MAC 地址', 'VLAN ID'],
+    answer: 1,
+    explain: 'SRv6 用 IPv6 地址（Locator + Function）作为段标识，不依赖 MPLS 标签。',
+  },
+  {
+    id: 'sr2',
+    topic: 'srv6',
+    q: 'SRv6 Locator 的作用是？',
+    options: ['分配 MAC', '标识 SRv6 域内的节点/位置', '加密报文', '选举 DR'],
+    answer: 1,
+    explain: 'Locator 是一段 IPv6 前缀，标识节点/位置，SID 位于其中。',
+  },
+  {
+    id: 'sr3',
+    topic: 'srv6',
+    q: 'SRv6 BE 的特点是？',
+    options: ['指定单个远端 SID 封装转发', '必须使用多段列表', '不使用 IPv6', '只能二层转发'],
+    answer: 0,
+    explain: 'BE 用单个远端 SID 做外层目的，Underlay 按 IPv6 路由转发，出口解封装。',
+  },
+  {
+    id: 'sr4',
+    topic: 'srv6',
+    q: 'SRv6 Policy 使用什么表达显式路径？',
+    options: ['单个 SID', 'Segment List（SID 序列）', 'VLAN 列表', 'ACL'],
+    answer: 1,
+    explain: 'Policy 用 Segment List 指定多段路径，可实现流量工程与切片。',
+  },
+  {
+    id: 'sr5',
+    topic: 'srv6',
+    q: 'TI-LFA 的作用是？',
+    options: ['拓扑无关的无环备份，快速切换', '分配 SID', '加密隧道', '选举根桥'],
+    answer: 0,
+    explain: 'TI-LFA 预先计算无环备份路径，故障时亚秒级切换。',
+  },
 ];
 
 import { QUESTIONS_EN_1 } from './questions-en-1';
 import { QUESTIONS_EN_2 } from './questions-en-2';
 import { QUESTIONS_EN_3 } from './questions-en-3';
+import { QUESTIONS_EN_4 } from './questions-en-4';
+import { QUESTIONS_EN_5 } from './questions-en-5';
 
 /** 合并中英题目（英文缺失时回退中文）。 */
 export const QUESTIONS: Question[] = QUESTIONS_BASE.map((q) => ({
   ...q,
-  en: QUESTIONS_EN_1[q.id] ?? QUESTIONS_EN_2[q.id] ?? QUESTIONS_EN_3[q.id],
+  en:
+    QUESTIONS_EN_1[q.id] ??
+    QUESTIONS_EN_2[q.id] ??
+    QUESTIONS_EN_3[q.id] ??
+    QUESTIONS_EN_4[q.id] ??
+    QUESTIONS_EN_5[q.id],
 }));

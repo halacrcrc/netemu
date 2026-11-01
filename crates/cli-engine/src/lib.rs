@@ -206,6 +206,8 @@ pub enum Mode {
     SecurityRule,
     /// IPsec 隧道视图
     Ipsec,
+    /// OSPFv3 进程视图
+    Ospfv3,
 }
 
 #[derive(Debug)]

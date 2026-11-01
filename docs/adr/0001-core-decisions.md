@@ -172,6 +172,16 @@ EVPN：交换机 `evpn enable` + `evpn peer <IP>`，每 2s 向 EVPN peer 通告�
 
 F5 LTM：新增 `DeviceKind::LoadBalancer`（复用 RouterState），Device 增加 `ltm`（pool/virtual；会话瞬态）。`ltm pool NAME member IP PORT`、`ltm virtual NAME vip IP PORT pool NAME`；TCP 连接命中 VIP 时按池成员轮询选择，DNAT 到成员并记录会话，回程按会话把源地址改回 VIP；VIP 由本端口 MAC 应答 ARP。不做健康检查、持久化/源地址保持、SSL 卸载、iRules、SNAT pool、F5 tmsh 方言；仅 TCP 负载均衡（复用 D26 的 TCP 状态机）。
 
+### D32（M9 补充）同 VLAN 隔离、OSPFv3 与 SRv6 BE 的简化边界
+
+**同 VLAN 隔离**：`Port` 增加 `isolate_group: Option<u16>` 与 `mux_role: Option<MuxRole>`（Principal/Separate/Group(u16)）。数据面在二层转发时检查同 VLAN 的源/目的端口：principal 与所有端口互通；separate 两两隔离且与 group 隔离；group 仅同组互通；同 `isolate_group` 的端口不能互通（思科 `switchport protected` 用 group 0 表达）。命令 `mux-vlan principal|separate|group N`、`port-isolate enable group N`。不做 MUX VLAN 的跨 VLAN primary/subordinate 二层桥接（各 subordinate VLAN 仍需三层网关），也不做 PVLAN 的 trunk 承载与 VACL。
+
+**OSPFv3**：新增 `Ospfv3Packet`（Router ID/Area/源 IPv6/前缀数组）与独立 `Ospfv3Runtime`；接口 `ospfv3 1 area 0` 启用后周期发送本机前缀，邻居学习前缀并安装 `Route6`（`RouteSrc::Ospf`）。`lookup_route6` 将 OSPFv3 路由排在静态之后、直连之前。简化：不做完整 LSA 泛洪、DR/BDR、区域间汇总、LSA 老化与认证（认证交给 IPv6 IPsec）；仅支持直连邻居的前缀学习。
+
+**SRv6 BE**：`RouterState.srv6 { locator, sids, routes }`；命令 `srv6 locator`、`srv6 sid`、`srv6 route ... sid`。入口匹配业务前缀后封装 `Srv6Packet`（外层 IPv6 目的=SID，内层原始 IPv6），Underlay 用 `lookup_route6` 转发；目的 SID 属于本机 locator/SID 时解封装并按内层 IPv6 转发。不做 SRH、多段 Segment List、SRv6 Policy/TE、TI-LFA、切片与头压缩；BE 外层用广播 MAC 发送（同 IPsec 教学模型），依赖 Underlay 路由可达 SID。
+
+**拓扑与 STP**：前端 `add_device`/`add_link`/`remove_link` 后调用 `Engine::topology_changed()` 重算 STP 并启动 hello 定时器；`lab_checks::run_checks` 先推进 45s 虚拟时间，等 STP 从 Listening/Learning 进入 Forwarding，避免判分时端口仍在 Learning 被误判为不通。
+
 ## 后果
 
 - 三方言首版交付慢一些（M0 即验证多方言架构），但 M1+ 平移成本递减。

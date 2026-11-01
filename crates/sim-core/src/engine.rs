@@ -40,6 +40,8 @@ pub const LACP_TIMEOUT_NS: u64 = 3_500_000_000;
 /// OSPF Hello 周期与邻居失效时间（简化）。
 pub const OSPF_HELLO_NS: u64 = 2_000_000_000;
 pub const OSPF_DEAD_NS: u64 = 6_000_000_000;
+pub const OSPFV3_HELLO_NS: u64 = 2_000_000_000;
+pub const OSPFV3_DEAD_NS: u64 = 6_000_000_000;
 /// VRRP 通告周期与 Master 失效时间。
 pub const VRRP_ADVERT_NS: u64 = 1_000_000_000;
 pub const VRRP_MASTER_DOWN_NS: u64 = 3_500_000_000;
@@ -156,6 +158,10 @@ enum EKind {
     EvpnTimer {
         dev: DevId,
     },
+    /// OSPFv3 Hello 定时器
+    Ospfv3Timer {
+        dev: DevId,
+    },
 }
 
 /// OSPF 邻居（简化：仅记录存活、首次跳地址与接口）。
@@ -171,6 +177,21 @@ struct OspfNeighbor {
 struct OspfRuntime {
     lsdb: std::collections::HashMap<Ipv4Addr, OspfLsa>,
     neighbors: std::collections::HashMap<Ipv4Addr, OspfNeighbor>,
+    timer_pending: bool,
+}
+
+/// OSPFv3 邻居（简化：记录接口 IPv6 与本机前缀列表）。
+#[derive(Clone, Debug)]
+struct Ospfv3Neighbor {
+    ip: Ipv6Addr,
+    port: PortId,
+    last_ns: u64,
+    prefixes: Vec<(Ipv6Addr, u8)>,
+}
+
+#[derive(Default)]
+struct Ospfv3Runtime {
+    neighbors: std::collections::HashMap<Ipv4Addr, Ospfv3Neighbor>,
     timer_pending: bool,
 }
 
@@ -295,6 +316,7 @@ pub struct Engine {
     qos: std::collections::HashMap<(DevId, PortId), QosState>,
     bgp: std::collections::HashMap<DevId, BgpRuntime>,
     isis: std::collections::HashMap<DevId, IsisRuntime>,
+    ospfv3: std::collections::HashMap<DevId, Ospfv3Runtime>,
 }
 
 impl Engine {
@@ -312,6 +334,7 @@ impl Engine {
             qos: std::collections::HashMap::new(),
             bgp: std::collections::HashMap::new(),
             isis: std::collections::HashMap::new(),
+            ospfv3: std::collections::HashMap::new(),
         };
         // 启动时初始化 STP：全量重算 + 调度 hello
         eng.stp_recompute_all();
@@ -441,6 +464,7 @@ impl Engine {
                 EKind::BgpTimer { dev } => self.on_bgp_timer(dev),
                 EKind::IsisTimer { dev } => self.on_isis_timer(dev),
                 EKind::EvpnTimer { dev } => self.on_evpn_timer(dev),
+                EKind::Ospfv3Timer { dev } => self.on_ospfv3_timer(dev),
             }
         }
         self.stats()
@@ -696,8 +720,14 @@ impl Engine {
         // 4. 二层转发 / 洪泛（出方向过滤非 Forwarding 端口——STP 阻塞的关键）
         let from_fabric = self.is_fabric_link(dev_id, in_port);
         let out_ports: Vec<PortId> = match dst_port {
-            Some(p) if p != logical_in && self.can_forward(dev_id, p, vlan) => vec![p],
-            Some(_) => vec![], // 已知单播但源同端口或不可转发：丢弃
+            Some(p)
+                if p != logical_in
+                    && self.can_forward(dev_id, p, vlan)
+                    && !self.isolation_blocks(dev_id, in_port, p) =>
+            {
+                vec![p]
+            }
+            Some(_) => vec![], // 已知单播但源同端口/不可转发/被隔离：丢弃
             None => self
                 .logical_ports(dev_id)
                 .into_iter()
@@ -713,13 +743,39 @@ impl Engine {
                         // M-LAG peer-link 水平分割：peer 来的广播不再回送跨设备 LAG
                         return false;
                     }
-                    p != logical_in && self.can_forward(dev_id, p, vlan)
+                    p != logical_in
+                        && self.can_forward(dev_id, p, vlan)
+                        && !self.isolation_blocks(dev_id, in_port, p)
                 })
                 .collect(),
         };
         for p in out_ports {
             self.l2_egress(dev_id, p, vlan, frame);
         }
+    }
+
+    /// 端口隔离 / MUX VLAN：两个同 VLAN 端口之间是否禁止二层互通。
+    fn isolation_blocks(&self, dev: DevId, a: PortId, b: PortId) -> bool {
+        let Some(d) = self.net.device(dev) else {
+            return false;
+        };
+        let (Some(pa), Some(pb)) = (d.port(a), d.port(b)) else {
+            return false;
+        };
+        if let (Some(ra), Some(rb)) = (pa.mux_role, pb.mux_role) {
+            match (ra, rb) {
+                (MuxRole::Principal, _) | (_, MuxRole::Principal) => return false,
+                (MuxRole::Separate, MuxRole::Separate) => return true,
+                (MuxRole::Separate, MuxRole::Group(_)) | (MuxRole::Group(_), MuxRole::Separate) => {
+                    return true;
+                }
+                (MuxRole::Group(x), MuxRole::Group(y)) => return x != y,
+            }
+        }
+        matches!(
+            (pa.isolate_group, pb.isolate_group),
+            (Some(x), Some(y)) if x == y
+        )
     }
 
     /// 出方向：按端口口型决定加/剥 tag 后发送；不发则静默跳过。
@@ -841,6 +897,8 @@ impl Engine {
             L3::Capwap(pkt) => self.capwap_ingress(dev_id, pkt),
             L3::Vxlan(_) => {}
             L3::Evpn(_) => {}
+            L3::Ospfv3(_) => {}
+            L3::Srv6(_) => {}
             L3::Arp(arp) => {
                 if arp.sender_ip != 0 {
                     self.arp_learn(dev_id, in_port, Some(vlan), arp.sender_ip, arp.sender_mac);
@@ -992,7 +1050,11 @@ impl Engine {
             return;
         }
         if frame.ethertype == ETHERTYPE_IPV6 {
-            self.ipv6_on_frame(dev_id, port, frame);
+            match frame.payload {
+                L3::Ospfv3(pkt) => self.ospfv3_on_packet(dev_id, port, pkt),
+                L3::Srv6(pkt) => self.srv6_ingress(dev_id, port, pkt),
+                _ => self.ipv6_on_frame(dev_id, port, frame),
+            }
             return;
         }
         if frame.ethertype == ETHERTYPE_BGP {
@@ -1038,16 +1100,18 @@ impl Engine {
             L3::Tcp(tcp) => self.tcp_ingress(dev_id, port, tcp),
             L3::Ipsec(pkt) => self.ipsec_ingress(dev_id, port, pkt),
             L3::Capwap(pkt) => self.capwap_ingress(dev_id, pkt),
-            L3::Vxlan(_) => {} // 仅交换机 VTEP 处理
-            L3::Evpn(_) => {}  // EVPN 仅交换机处理
-            L3::Bpdu(_) => {}  // 主机/路由器不处理 802.1D BPDU
-            L3::Lacp(_) => {}  // 主机/路由器不做链路聚合
-            L3::Ospf(_) => {}  // OSPF 已在入口处理
-            L3::Vrrp(_) => {}  // VRRP 已在入口处理
-            L3::Ipv6(_) => {}  // IPv6 已在入口处理
-            L3::Bgp(_) => {}   // BGP 已在入口处理
-            L3::Isis(_) => {}  // IS-IS 已在入口处理
-            L3::Mpls(_) => {}  // MPLS 已在入口处理
+            L3::Vxlan(_) => {}  // 仅交换机 VTEP 处理
+            L3::Evpn(_) => {}   // EVPN 仅交换机处理
+            L3::Bpdu(_) => {}   // 主机/路由器不处理 802.1D BPDU
+            L3::Lacp(_) => {}   // 主机/路由器不做链路聚合
+            L3::Ospf(_) => {}   // OSPF 已在入口处理
+            L3::Vrrp(_) => {}   // VRRP 已在入口处理
+            L3::Ipv6(_) => {}   // IPv6 已在入口处理
+            L3::Ospfv3(_) => {} // OSPFv3 已在入口处理
+            L3::Srv6(_) => {}   // SRv6 已在入口处理
+            L3::Bgp(_) => {}    // BGP 已在入口处理
+            L3::Isis(_) => {}   // IS-IS 已在入口处理
+            L3::Mpls(_) => {}   // MPLS 已在入口处理
             L3::Dhcp(dhcp) => {
                 // DHCP 广播：主机客户端 / 路由器服务器各自处理
                 match d_kind(&self.net, dev_id) {
@@ -4851,6 +4915,230 @@ impl Engine {
         routes
     }
 
+    // ---------- OSPFv3（简化：邻居前缀学习 + IPv6 路由） ----------
+
+    pub fn ospfv3_config_changed(&mut self, dev: DevId) {
+        if self.ospfv3_enabled_ports(dev).is_empty() {
+            return;
+        }
+        self.ospfv3.entry(dev).or_default();
+        self.ospfv3_send_update(dev);
+        self.ospfv3_schedule(dev);
+    }
+
+    pub fn ospfv3_router_id_of(&self, dev: DevId) -> Ipv4Addr {
+        self.ospfv3_router_id(dev)
+    }
+
+    /// 存活邻居：(router id, 邻居接口 IPv6, 本地接口)。
+    pub fn ospfv3_neighbors_of(&self, dev: DevId) -> Vec<(Ipv4Addr, Ipv6Addr, PortId)> {
+        let now = self.now;
+        let mut v: Vec<_> = self
+            .ospfv3
+            .get(&dev)
+            .map(|rt| {
+                rt.neighbors
+                    .iter()
+                    .filter(|(_, nb)| now.saturating_sub(nb.last_ns) <= OSPFV3_DEAD_NS)
+                    .map(|(rid, nb)| (*rid, nb.ip, nb.port))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_by_key(|x| x.0);
+        v
+    }
+
+    /// 本机 OSPFv3 前缀（show 用）。
+    pub fn ospfv3_prefixes_of(&self, dev: DevId) -> Vec<(Ipv6Addr, u8)> {
+        let mut v: Vec<_> = self
+            .ospfv3_enabled_ports(dev)
+            .into_iter()
+            .map(|(_, ip, len)| (ip, len))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    fn ospfv3_enabled_ports(&self, dev: DevId) -> Vec<(PortId, Ipv6Addr, u8)> {
+        let Some(d) = self.net.device(dev) else {
+            return vec![];
+        };
+        if !matches!(&d.state, DeviceState::Router(rs) if rs.ospfv3_enabled) {
+            return vec![];
+        }
+        d.ports
+            .iter()
+            .filter(|p| {
+                p.admin_up
+                    && p.link.is_some()
+                    && p.ospfv3_area.is_some()
+                    && p.ipv6.is_some()
+                    && p.vrf.is_none()
+            })
+            .map(|p| (p.idx, p.ipv6.unwrap(), p.prefix6))
+            .collect()
+    }
+
+    fn ospfv3_router_id(&self, dev: DevId) -> Ipv4Addr {
+        let Some(d) = self.net.device(dev) else {
+            return 0x0101_0101;
+        };
+        if let DeviceState::Router(rs) = &d.state {
+            if let Some(id) = rs.ospfv3_router_id {
+                return id;
+            }
+        }
+        let mut best = 0u32;
+        for p in &d.ports {
+            if let Some(ip) = p.ip {
+                best = best.max(ip);
+            }
+        }
+        if best == 0 {
+            0x0101_0101
+        } else {
+            best
+        }
+    }
+
+    fn ospfv3_build_packet(&self, dev: DevId) -> Ospfv3Packet {
+        let mut pkt = Ospfv3Packet {
+            router_id: self.ospfv3_router_id(dev),
+            area: 0,
+            src: [0u8; 16],
+            prefixes: [None; 8],
+            count: 0,
+        };
+        let ports = self.ospfv3_enabled_ports(dev);
+        for (i, (_, ip, len)) in ports.iter().take(8).enumerate() {
+            pkt.prefixes[i] = Some((*ip, *len));
+            pkt.count += 1;
+        }
+        pkt
+    }
+
+    fn ospfv3_send_update(&mut self, dev: DevId) {
+        let base = self.ospfv3_build_packet(dev);
+        let ports = self.ospfv3_enabled_ports(dev);
+        for (port, ip, _) in ports {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            let Some(p) = d.port(port) else { continue };
+            let mut pkt = base;
+            pkt.src = ip;
+            let frame = EthernetFrame {
+                dst: BROADCAST_MAC,
+                src: p.mac,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV6,
+                payload: L3::Ospfv3(pkt),
+            };
+            self.transmit_frame(dev, port, frame);
+        }
+    }
+
+    fn ospfv3_schedule(&mut self, dev: DevId) {
+        let need = {
+            let rt = self.ospfv3.entry(dev).or_default();
+            if rt.timer_pending {
+                false
+            } else {
+                rt.timer_pending = true;
+                true
+            }
+        };
+        if need {
+            self.push(self.now + OSPFV3_HELLO_NS, EKind::Ospfv3Timer { dev });
+        }
+    }
+
+    fn ospfv3_on_packet(&mut self, dev: DevId, port: PortId, pkt: Ospfv3Packet) {
+        let enabled = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            matches!(&d.state, DeviceState::Router(rs) if rs.ospfv3_enabled)
+                && d.port(port).and_then(|p| p.ospfv3_area).is_some()
+        };
+        if !enabled || pkt.router_id == self.ospfv3_router_id(dev) {
+            return;
+        }
+        let mut prefixes = Vec::new();
+        for i in 0..pkt.count.min(8) as usize {
+            if let Some((ip, len)) = pkt.prefixes[i] {
+                prefixes.push((ip, len));
+            }
+        }
+        let rt = self.ospfv3.entry(dev).or_default();
+        rt.neighbors.insert(
+            pkt.router_id,
+            Ospfv3Neighbor {
+                ip: pkt.src,
+                port,
+                last_ns: self.now,
+                prefixes,
+            },
+        );
+        self.ospfv3_recompute(dev);
+    }
+
+    fn on_ospfv3_timer(&mut self, dev: DevId) {
+        let ports_empty = self.ospfv3_enabled_ports(dev).is_empty();
+        if ports_empty {
+            if let Some(rt) = self.ospfv3.get_mut(&dev) {
+                rt.timer_pending = false;
+                rt.neighbors.clear();
+            }
+            return;
+        }
+        let now = self.now;
+        if let Some(rt) = self.ospfv3.get_mut(&dev) {
+            rt.neighbors
+                .retain(|_, nb| now.saturating_sub(nb.last_ns) <= OSPFV3_DEAD_NS);
+            rt.timer_pending = false;
+        }
+        self.ospfv3_recompute(dev);
+        self.ospfv3_send_update(dev);
+        self.ospfv3_schedule(dev);
+    }
+
+    fn ospfv3_recompute(&mut self, dev: DevId) {
+        let connected: std::collections::HashSet<(Ipv6Addr, u8)> = self
+            .net
+            .device(dev)
+            .map(|d| {
+                d.ports
+                    .iter()
+                    .filter_map(|p| p.ipv6.map(|ip| (ip, p.prefix6)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut routes: Vec<Route6> = Vec::new();
+        let mut seen: std::collections::HashSet<(Ipv6Addr, u8)> = Default::default();
+        if let Some(rt) = self.ospfv3.get(&dev) {
+            for nb in rt.neighbors.values() {
+                for (net, len) in &nb.prefixes {
+                    let masked = *net;
+                    if connected.contains(&(masked, *len)) || !seen.insert((masked, *len)) {
+                        continue;
+                    }
+                    routes.push(Route6 {
+                        dst: masked,
+                        len: *len,
+                        nexthop: nb.ip,
+                        src: RouteSrc::Ospf,
+                    });
+                }
+            }
+        }
+        if let Some(d) = self.net.device_mut(dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                rs.ospfv3_routes6 = routes;
+            }
+        }
+    }
+
     // ---------- IPv6（简化：NDP + ICMPv6 ping + 静态路由） ----------
 
     pub fn start_ping6(&mut self, dev: DevId, target: Ipv6Addr) -> Option<u16> {
@@ -5218,6 +5506,9 @@ impl Engine {
             if !is_router || pkt.hop_limit <= 1 {
                 return;
             }
+            if self.srv6_encapsulate(dev, pkt) {
+                return;
+            }
             if let Some((out_port, nh)) = self.net.lookup_route6(dev, pkt.dst) {
                 let mut fwd = pkt;
                 fwd.hop_limit -= 1;
@@ -5226,6 +5517,112 @@ impl Engine {
                 self.dropped += 1;
             }
         }
+    }
+
+    // ---------- SRv6 BE（教学用 IPv6-in-IPv6） ----------
+
+    fn srv6_route_for(&self, dev: DevId, dst: Ipv6Addr) -> Option<Ipv6Addr> {
+        let Some(d) = self.net.device(dev) else {
+            return None;
+        };
+        let DeviceState::Router(rs) = &d.state else {
+            return None;
+        };
+        rs.srv6
+            .routes
+            .iter()
+            .filter(|r| ipv6_in_prefix(&dst, &r.dst, r.len))
+            .max_by_key(|r| r.len)
+            .map(|r| r.sid)
+    }
+
+    fn srv6_source(&self, dev: DevId) -> Option<Ipv6Addr> {
+        let d = self.net.device(dev)?;
+        let DeviceState::Router(rs) = &d.state else {
+            return None;
+        };
+        if let Some((net, _)) = rs.srv6.locator {
+            return Some(net);
+        }
+        d.ports.iter().find_map(|p| p.ipv6)
+    }
+
+    fn srv6_encapsulate(&mut self, dev: DevId, pkt: Ipv6Packet) -> bool {
+        let Some(sid) = self.srv6_route_for(dev, pkt.dst) else {
+            return false;
+        };
+        let Some(src) = self.srv6_source(dev) else {
+            return false;
+        };
+        let outer = Srv6Packet {
+            src,
+            dst: sid,
+            hop_limit: 64,
+            inner: pkt,
+        };
+        self.send_srv6_outer(dev, outer);
+        true
+    }
+
+    fn send_srv6_outer(&mut self, dev: DevId, mut pkt: Srv6Packet) {
+        let Some((out_port, _)) = self.net.lookup_route6(dev, pkt.dst) else {
+            self.dropped += 1;
+            return;
+        };
+        let Some(mac) = self
+            .net
+            .device(dev)
+            .and_then(|d| d.port(out_port))
+            .map(|p| p.mac)
+        else {
+            return;
+        };
+        if pkt.hop_limit > 0 {
+            pkt.hop_limit -= 1;
+        }
+        let frame = EthernetFrame {
+            dst: BROADCAST_MAC,
+            src: mac,
+            vlan: None,
+            ethertype: ETHERTYPE_IPV6,
+            payload: L3::Srv6(pkt),
+        };
+        self.transmit_frame(dev, out_port, frame);
+    }
+
+    fn srv6_ingress(&mut self, dev: DevId, port: PortId, pkt: Srv6Packet) {
+        let local = {
+            let Some(d) = self.net.device(dev) else {
+                return;
+            };
+            match &d.state {
+                DeviceState::Router(rs) => {
+                    rs.srv6.sids.contains(&pkt.dst)
+                        || rs
+                            .srv6
+                            .locator
+                            .map(|(net, len)| ipv6_in_prefix(&pkt.dst, &net, len))
+                            .unwrap_or(false)
+                }
+                _ => false,
+            }
+        };
+        if local {
+            let frame = EthernetFrame {
+                dst: BROADCAST_MAC,
+                src: BROADCAST_MAC,
+                vlan: None,
+                ethertype: ETHERTYPE_IPV6,
+                payload: L3::Ipv6(pkt.inner),
+            };
+            self.ipv6_on_frame(dev, port, frame);
+            return;
+        }
+        if pkt.hop_limit <= 1 {
+            self.dropped += 1;
+            return;
+        }
+        self.send_srv6_outer(dev, pkt);
     }
 
     // ---------- VRRP（主备虚拟网关，简化） ----------
@@ -5760,6 +6157,16 @@ impl Engine {
         for dev in evpn_devs {
             self.evpn_config_changed(dev);
         }
+        let ospfv3_devs: Vec<DevId> = self
+            .net
+            .devices
+            .iter()
+            .filter(|d| matches!(&d.state, DeviceState::Router(rs) if rs.ospfv3_enabled))
+            .map(|d| d.id)
+            .collect();
+        for dev in ospfv3_devs {
+            self.ospfv3_config_changed(dev);
+        }
     }
 
     /// 加载拓扑后初始化聚合状态。
@@ -6081,6 +6488,11 @@ impl Engine {
                 sw.stp.last_bpdu_ns.remove(&p);
             }
         }
+        self.stp_recompute_all();
+    }
+
+    /// 拓扑变化（前端增删设备/链路）后重算 STP 并启动定时器。
+    pub fn topology_changed(&mut self) {
         self.stp_recompute_all();
     }
 

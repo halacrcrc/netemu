@@ -83,6 +83,7 @@ impl Sim {
         let name = format!("{}{}", base, n);
         let id = self.eng.net.add_device(name, kind, dialect);
         self.sessions.insert(id, cli_engine::Session::default());
+        self.eng.topology_changed();
         Ok(id)
     }
 
@@ -90,6 +91,7 @@ impl Sim {
         self.eng.net.remove_device(dev);
         self.sessions.remove(&dev);
         self.sync_sessions();
+        self.eng.topology_changed();
     }
 
     pub fn rename_device(&mut self, dev: u32, name: &str) -> Result<(), JsValue> {
@@ -112,14 +114,18 @@ impl Sim {
 
     /// 连接两台设备（自动选取两端第一个空闲端口），返回链路 id。
     pub fn add_link(&mut self, a: u32, b: u32) -> Result<u32, JsValue> {
-        self.eng
+        let id = self
+            .eng
             .net
             .add_link(a, b)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.eng.topology_changed();
+        Ok(id)
     }
 
     pub fn remove_link(&mut self, link: u32) {
         self.eng.net.remove_link(link);
+        self.eng.topology_changed();
     }
 
     /// 启用/关闭主机 DHCP，并立即发起 Discover（驱动至静默）。
@@ -709,6 +715,105 @@ impl Sim {
         Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
     }
 
+    /// 检查端口隔离组。
+    pub fn check_port_isolate(
+        &mut self,
+        dev: u32,
+        port: u32,
+        group: u32,
+    ) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::PortIsolate {
+                    dev,
+                    port: port as usize,
+                    group: group as u16,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 MUX VLAN 端口角色。
+    pub fn check_mux_role(&mut self, dev: u32, port: u32, role: &str) -> Result<String, JsValue> {
+        let role = match role.to_ascii_lowercase().as_str() {
+            "principal" => sim_core::device::MuxRole::Principal,
+            "separate" => sim_core::device::MuxRole::Separate,
+            other => sim_core::device::MuxRole::Group(
+                other
+                    .parse()
+                    .map_err(|_| JsValue::from_str("invalid mux role"))?,
+            ),
+        };
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::MuxRole {
+                    dev,
+                    port: port as usize,
+                    role,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 OSPFv3 邻居数。
+    pub fn check_ospfv3_neighbors(&mut self, dev: u32, min: u32) -> Result<String, JsValue> {
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::Ospfv3Neighbors {
+                    dev,
+                    min: min as usize,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// 检查 SRv6 静态路由。
+    pub fn check_srv6_route(&mut self, dev: u32, dst: &str) -> Result<String, JsValue> {
+        let (addr, len) = dst
+            .split_once('/')
+            .ok_or_else(|| JsValue::from_str("invalid IPv6 prefix"))?;
+        let dst = sim_packets::ipv6_from_str(addr)
+            .ok_or_else(|| JsValue::from_str("invalid IPv6 address"))?;
+        let len: u8 = len
+            .parse()
+            .map_err(|_| JsValue::from_str("invalid prefix length"))?;
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::Srv6Route { dev, dst, len },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
+    /// IPv6 ping 探测。
+    pub fn check_ping6(&mut self, from: u32, to: &str) -> Result<String, JsValue> {
+        let to = sim_packets::ipv6_from_str(to)
+            .ok_or_else(|| JsValue::from_str("invalid IPv6 address"))?;
+        let r = lab_checks::run_checks(
+            &mut self.eng,
+            &[lab_checks::Check {
+                label: String::new(),
+                kind: lab_checks::CheckKind::Ping6 {
+                    from,
+                    to,
+                    expect: true,
+                },
+            }],
+        );
+        Ok(serde_json::json!({ "passed": r[0].passed, "detail": r[0].detail }).to_string())
+    }
+
     /// 检查静态 LSP 是否存在（MPLS 实验判分）。
     pub fn check_mpls_lsp(&mut self, dev: u32, name: &str) -> Result<String, JsValue> {
         let r = lab_checks::run_checks(
@@ -771,6 +876,7 @@ impl Sim {
             "SecurityPolicy" => cli_engine::Mode::SecurityPolicy,
             "SecurityRule" => cli_engine::Mode::SecurityRule,
             "Ipsec" => cli_engine::Mode::Ipsec,
+            "Ospfv3" => cli_engine::Mode::Ospfv3,
             _ => return false,
         };
         let trees = cli_dialects::trees(d);
@@ -1122,6 +1228,24 @@ impl Sim {
                             sim_packets::ipv6_str(&p.src),
                             sim_packets::ipv6_str(&p.dst),
                             p.hop_limit
+                        ),
+                    ),
+                    L3::Ospfv3(p) => (
+                        "OSPFv3",
+                        format!(
+                            "Router-ID {} src={} prefixes={}",
+                            sim_packets::ipv4_str(p.router_id),
+                            sim_packets::ipv6_str(&p.src),
+                            p.count
+                        ),
+                    ),
+                    L3::Srv6(s) => (
+                        "SRv6 BE",
+                        format!(
+                            "{} → {} hop={}",
+                            sim_packets::ipv6_str(&s.src),
+                            sim_packets::ipv6_str(&s.dst),
+                            s.hop_limit
                         ),
                     ),
                     L3::Bgp(b) => (

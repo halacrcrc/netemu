@@ -51,6 +51,20 @@ ipv6 route 2001:db8:20::/64 2001:db8:10::2
 
 验证：`show ipv6 interface brief` / `display ipv6 interface brief`、`show ipv6 route` / `display ipv6 routing-table`、`ping ipv6 2001:db8:20::2`。
 
+## IPv6 路由与 OSPFv3
+
+IPv6 的静态路由与 OSPFv3 是 HCIP 的常见考点：
+
+```
+ipv6 route 2001:db8:20::/64 2001:db8:10::2
+ospfv3 1
+ router-id 1.1.1.1
+interface g0/0
+ ospfv3 1 area 0
+```
+
+OSPFv3 与 OSPFv2 的邻居/区域概念一致，但用链路本地地址建立邻居、用 Link-LSA 传递链路信息；Router ID 仍是 32 位 IPv4 格式。排错时先确认 `display ospfv3 peer` 是否 Full，再看 IPv6 路由表。
+
 ## 过渡：双栈优先
 
 最稳妥的过渡是**双栈**：接口同时配 IPv4 与 IPv6，应用按 DNS 结果选择。还有 NAT64/DNS64、6PE/6VPE、隧道等方案，但双栈是基础。

@@ -323,6 +323,10 @@ pub enum L3 {
     Vrrp(VrrpPacket),
     /// IPv6（含 ICMPv6/NDP）
     Ipv6(Ipv6Packet),
+    /// OSPFv3（简化：邻居 + 前缀列表）
+    Ospfv3(Ospfv3Packet),
+    /// SRv6 BE（教学用 IPv6-in-IPv6，SID 作为外层目的）
+    Srv6(Srv6Packet),
     /// BGP（简化）
     Bgp(BgpPacket),
     /// IS-IS（简化）
@@ -434,6 +438,26 @@ pub struct Ipv6Packet {
     pub dst: Ipv6Addr,
     pub hop_limit: u8,
     pub icmp: Ipv6Icmp,
+}
+
+/// OSPFv3（简化）：用接口 IPv6 地址建立邻居，报文携带本机前缀列表。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ospfv3Packet {
+    pub router_id: Ipv4Addr,
+    pub area: u32,
+    /// 发送接口 IPv6 地址（作为下一跳）
+    pub src: Ipv6Addr,
+    pub prefixes: [Option<(Ipv6Addr, u8)>; 8],
+    pub count: u8,
+}
+
+/// SRv6 BE：外层 IPv6（目的为 SID）+ 内层原始 IPv6 报文。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Srv6Packet {
+    pub src: Ipv6Addr,
+    pub dst: Ipv6Addr,
+    pub hop_limit: u8,
+    pub inner: Ipv6Packet,
 }
 
 /// IPv6 文本表示（最长零压缩）。
@@ -635,14 +659,16 @@ impl EthernetFrame {
         let payload = match &self.payload {
             L3::Arp(_) => 28,
             L3::Ipv4(_) => 20 + ICMP_DATA_SIZE,
-            L3::Bpdu(_) => 35,           // 802.3+LLC 头 + 配置 BPDU 载荷近似
-            L3::Dhcp(_) => 20 + 8 + 272, // IP + UDP + DHCP 载荷近似
-            L3::Lacp(_) => 110,          // LACPDU 定长载荷近似
-            L3::Ospf(_) => 120,          // OSPF 字段近似
-            L3::Vrrp(_) => 40,           // VRRP 通告近似
-            L3::Ipv6(_) => 40 + 8 + 16,  // IPv6 头 + ICMPv6 近似
-            L3::Bgp(_) => 19 + 32,       // BGP 头 + 条目近似
-            L3::Isis(_) => 27 + 32,      // IS-IS 头 + 条目近似
+            L3::Bpdu(_) => 35,               // 802.3+LLC 头 + 配置 BPDU 载荷近似
+            L3::Dhcp(_) => 20 + 8 + 272,     // IP + UDP + DHCP 载荷近似
+            L3::Lacp(_) => 110,              // LACPDU 定长载荷近似
+            L3::Ospf(_) => 120,              // OSPF 字段近似
+            L3::Vrrp(_) => 40,               // VRRP 通告近似
+            L3::Ipv6(_) => 40 + 8 + 16,      // IPv6 头 + ICMPv6 近似
+            L3::Ospfv3(_) => 80,             // OSPFv3 字段近似
+            L3::Srv6(_) => 40 + 40 + 8 + 16, // 外层 IPv6 + 内层 IPv6/ICMPv6
+            L3::Bgp(_) => 19 + 32,           // BGP 头 + 条目近似
+            L3::Isis(_) => 27 + 32,          // IS-IS 头 + 条目近似
             L3::Mpls(m) => 14 + 4 * m.depth as u32 + 20 + ICMP_DATA_SIZE + 4,
             L3::Tcp(_) => 20 + 20 + 8,
             L3::Ipsec(_) => 20 + 20 + ICMP_DATA_SIZE + 20,

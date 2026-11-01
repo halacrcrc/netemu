@@ -47,7 +47,8 @@ fn h_exit(c: &mut Ctx) -> Result<String, CliError> {
         | Mode::Zone
         | Mode::SecurityPolicy
         | Mode::SecurityRule
-        | Mode::Ipsec => Mode::Config,
+        | Mode::Ipsec
+        | Mode::Ospfv3 => Mode::Config,
         _ => Mode::Exec,
     };
     if c.sess.mode != Mode::If {
@@ -153,8 +154,17 @@ fn show_branch() -> CNode {
                 .kid(CNode::lit("interface", "IPv6 interfaces").kid(
                     CNode::lit("brief", "Brief IPv6 interface status").run(cmd::show_ipv6_brief),
                 ))
-                .kid(CNode::lit("route", "IPv6 routing table").run(cmd::show_ipv6_route)),
+                .kid(CNode::lit("route", "IPv6 routing table").run(cmd::show_ipv6_route))
+                .kid(
+                    CNode::lit("ospf", "OSPFv3 information")
+                        .kid(
+                            CNode::lit("neighbor", "OSPFv3 neighbors")
+                                .run(cmd::show_ospfv3_neighbor),
+                        )
+                        .kid(CNode::lit("database", "OSPFv3 prefixes").run(cmd::show_ospfv3_db)),
+                ),
         )
+        .kid(CNode::lit("srv6", "SRv6 information").run(cmd::show_srv6))
         .kid(CNode::lit("route-map", "Show route maps").run(cmd::show_route_policy))
         .kid(
             CNode::lit("zone", "Security zones")
@@ -182,6 +192,8 @@ fn show_branch() -> CNode {
         .kid(CNode::lit("spanning-tree", "Spanning tree topology").run(cmd::show_stp))
         .kid(CNode::lit("vrrp", "VRRP status").run(cmd::show_vrrp))
         .kid(CNode::lit("port-security", "Port security").run(cmd::show_port_security))
+        .kid(CNode::lit("port-isolate", "Port isolation").run(cmd::show_port_isolate))
+        .kid(CNode::lit("mux-vlan", "MUX VLAN").run(cmd::show_mux_vlan))
         .kid(CNode::lit("storm-control", "Storm control").run(cmd::show_qos))
         .kid(
             CNode::lit("isis", "IS-IS information")
@@ -531,21 +543,49 @@ pub fn build() -> Trees {
                     .kid(CNode::param(ParamKind::Word, "name", "VRF name").run(cmd::vrf_create)),
             ),
             CNode::lit("mpls", "MPLS configuration").kid(mpls_lsp_node()),
-            CNode::lit("ipv6", "IPv6 configuration").kid(
-                CNode::lit("route", "IPv6 static route").kid(
-                    CNode::param(ParamKind::Word, "prefix", "Prefix, e.g. 2001:db8:2::/64")
-                        .kid(
-                            CNode::param(ParamKind::Number, "len", "Prefix length").kid(
+            CNode::lit("ipv6", "IPv6 configuration")
+                .kid(
+                    CNode::lit("route", "IPv6 static route").kid(
+                        CNode::param(ParamKind::Word, "prefix", "Prefix, e.g. 2001:db8:2::/64")
+                            .kid(
+                                CNode::param(ParamKind::Number, "len", "Prefix length").kid(
+                                    CNode::param(
+                                        ParamKind::Word,
+                                        "nexthop",
+                                        "Next hop IPv6 address",
+                                    )
+                                    .run(cmd::ipv6_route),
+                                ),
+                            )
+                            .kid(
                                 CNode::param(ParamKind::Word, "nexthop", "Next hop IPv6 address")
                                     .run(cmd::ipv6_route),
                             ),
-                        )
-                        .kid(
-                            CNode::param(ParamKind::Word, "nexthop", "Next hop IPv6 address")
-                                .run(cmd::ipv6_route),
+                    ),
+                )
+                .kid(CNode::lit("router", "IPv6 routing process").kid(
+                    CNode::lit("ospf", "OSPFv3").kid(
+                        CNode::param(ParamKind::Number, "pid", "Process ID").run(cmd::ospfv3_enter),
+                    ),
+                )),
+            CNode::lit("srv6", "SRv6 configuration")
+                .kid(
+                    CNode::lit("locator", "Locator prefix").kid(
+                        CNode::param(ParamKind::Word, "prefix", "e.g. 2001:db8:100::/64")
+                            .run(cmd::srv6_locator),
+                    ),
+                )
+                .kid(
+                    CNode::lit("sid", "Local SID")
+                        .kid(CNode::param(ParamKind::Word, "sid", "IPv6 SID").run(cmd::srv6_sid)),
+                )
+                .kid(CNode::lit("route", "Static SRv6 route").kid(
+                    CNode::param(ParamKind::Word, "prefix", "Destination /64").kid(
+                        CNode::lit("sid", "Remote SID").kid(
+                            CNode::param(ParamKind::Word, "sid", "IPv6 SID").run(cmd::srv6_route),
                         ),
-                ),
-            ),
+                    ),
+                )),
             CNode::lit("username", "Establish a local user").kid(
                 CNode::param(ParamKind::Word, "name", "User name")
                     .run(cmd::mgmt_username)
@@ -811,16 +851,27 @@ pub fn build() -> Trees {
             CNode::lit("security-level", "Set the ASA security level")
                 .kid(CNode::param(ParamKind::Number, "level", "0-100").run(cmd::security_level)),
             // 交换机二层口命令
-            CNode::lit("ipv6", "IPv6 interface configuration").kid(
-                CNode::lit("address", "Set the IPv6 address").kid(
-                    CNode::param(
-                        ParamKind::Word,
-                        "addr",
-                        "Address/prefix, e.g. 2001:db8::1/64",
-                    )
-                    .run(cmd::ipv6_address),
+            CNode::lit("ipv6", "IPv6 interface configuration")
+                .kid(
+                    CNode::lit("address", "Set the IPv6 address").kid(
+                        CNode::param(
+                            ParamKind::Word,
+                            "addr",
+                            "Address/prefix, e.g. 2001:db8::1/64",
+                        )
+                        .run(cmd::ipv6_address),
+                    ),
+                )
+                .kid(
+                    CNode::lit("ospf", "OSPFv3 on this interface").kid(
+                        CNode::param(ParamKind::Number, "pid", "Process ID").kid(
+                            CNode::lit("area", "OSPFv3 area").kid(
+                                CNode::param(ParamKind::Number, "area", "Area ID")
+                                    .run(cmd::ospfv3_area),
+                            ),
+                        ),
+                    ),
                 ),
-            ),
             CNode::lit("switchport", "Set switching mode characteristics")
                 .kid(
                     CNode::lit("mode", "Set trunking mode of the interface")
@@ -873,6 +924,10 @@ pub fn build() -> Trees {
                         .kid(CNode::lit("mac-address", "Secure MAC address options").kid(
                             CNode::lit("sticky", "Sticky learning").run(cmd::port_security_sticky),
                         )),
+                )
+                .kid(
+                    CNode::lit("protected", "Protect this port from other protected ports")
+                        .run(cmd::switchport_protected),
                 ),
             CNode::lit("spanning-tree", "Spanning Tree Protocol subgroup").kid(
                 CNode::lit("vlan", "VLAN spanning tree configuration").kid(
@@ -909,6 +964,12 @@ pub fn build() -> Trees {
                         ),
                     ),
             ),
+            CNode::lit("mux-vlan", "MUX VLAN port role")
+                .kid(CNode::lit("principal", "Principal port").run(cmd::mux_vlan_principal))
+                .kid(CNode::lit("separate", "Separate port").run(cmd::mux_vlan_separate))
+                .kid(CNode::lit("group", "Group port").kid(
+                    CNode::param(ParamKind::Number, "group", "Group ID").run(cmd::mux_vlan_group),
+                )),
             CNode::lit("storm-control", "Broadcast storm control").kid(
                 CNode::lit("broadcast", "Broadcast storm control").kid(
                     CNode::lit("level", "Allowed broadcast rate").kid(
@@ -993,6 +1054,12 @@ pub fn build() -> Trees {
                     ),
                 ),
             ),
+            CNode::lit("exit", "Exit from router configuration mode").run(h_exit),
+            CNode::lit("end", "Exit to privileged mode").run(h_end),
+        ],
+        ospfv3: vec![
+            CNode::lit("router-id", "Set the OSPFv3 router ID")
+                .kid(CNode::param(ParamKind::Ipv4, "id", "Router ID").run(cmd::ospfv3_router_id)),
             CNode::lit("exit", "Exit from router configuration mode").run(h_exit),
             CNode::lit("end", "Exit to privileged mode").run(h_end),
         ],

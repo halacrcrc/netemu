@@ -41,6 +41,7 @@ pub struct Trees {
     pub security_policy: Vec<cli_engine::CNode>,
     pub security_rule: Vec<cli_engine::CNode>,
     pub ipsec: Vec<cli_engine::CNode>,
+    pub ospfv3: Vec<cli_engine::CNode>,
 }
 
 impl Trees {
@@ -64,6 +65,7 @@ impl Trees {
             Mode::SecurityPolicy => &self.security_policy,
             Mode::SecurityRule => &self.security_rule,
             Mode::Ipsec => &self.ipsec,
+            Mode::Ospfv3 => &self.ospfv3,
         }
     }
 }
@@ -1302,6 +1304,122 @@ pub mod cmd {
         Ok(show::ospf_neighbors(c.eng, c.dev, c.dialect))
     }
 
+    pub fn ospfv3_enter(c: &mut Ctx) -> Result<String, CliError> {
+        if !matches!(c.device_kind(), DeviceKind::Router) {
+            return Err(CliError::Custom(
+                "Command is only available on routers".into(),
+            ));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                rs.ospfv3_enabled = true;
+            }
+        }
+        c.sess.mode = Mode::Ospfv3;
+        Ok(String::new())
+    }
+
+    pub fn ospfv3_router_id(c: &mut Ctx) -> Result<String, CliError> {
+        let id = c.ipv4("id");
+        if id == 0 {
+            return Err(CliError::Custom("Invalid router id".into()));
+        }
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                rs.ospfv3_router_id = Some(id);
+            }
+        }
+        c.eng.ospfv3_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn ospfv3_area(c: &mut Ctx) -> Result<String, CliError> {
+        let area = c.number("area").unwrap_or(0);
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        let Some(d) = c.eng.net.device_mut(c.dev) else {
+            return Ok(String::new());
+        };
+        let Some(p) = d.port_mut(port) else {
+            return Ok(String::new());
+        };
+        p.ospfv3_area = Some(area);
+        c.eng.ospfv3_config_changed(c.dev);
+        Ok(String::new())
+    }
+
+    pub fn show_ospfv3_neighbor(c: &mut Ctx) -> Result<String, CliError> {
+        Ok(show::ospfv3_neighbors(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_ospfv3_db(c: &mut Ctx) -> Result<String, CliError> {
+        Ok(show::ospfv3_prefixes(c.eng, c.dev, c.dialect))
+    }
+
+    fn ipv6_prefix_arg(c: &mut Ctx, key: &str) -> Result<(sim_packets::Ipv6Addr, u8), CliError> {
+        let raw = c.word(key);
+        let (addr, len) = raw
+            .split_once('/')
+            .ok_or_else(|| CliError::Custom("Expected IPv6 prefix, e.g. 2001:db8::/64".into()))?;
+        let ip = sim_packets::ipv6_from_str(addr)
+            .ok_or_else(|| CliError::Custom("Invalid IPv6 address".into()))?;
+        let prefix: u8 = len
+            .parse()
+            .map_err(|_| CliError::Custom("Invalid prefix length".into()))?;
+        if prefix > 128 {
+            return Err(CliError::Custom("Invalid prefix length".into()));
+        }
+        Ok((ip, prefix))
+    }
+
+    /// `srv6 locator 2001:db8:100::/64`
+    pub fn srv6_locator(c: &mut Ctx) -> Result<String, CliError> {
+        let (net, len) = ipv6_prefix_arg(c, "prefix")?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                rs.srv6.locator = Some((net, len));
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// `srv6 sid 2001:db8:100::1`
+    pub fn srv6_sid(c: &mut Ctx) -> Result<String, CliError> {
+        let raw = c.word("sid");
+        let sid = sim_packets::ipv6_from_str(&raw)
+            .ok_or_else(|| CliError::Custom("Invalid SID".into()))?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                if !rs.srv6.sids.contains(&sid) {
+                    rs.srv6.sids.push(sid);
+                }
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// `srv6 route 2001:db8:2::/64 sid 2001:db8:100::1`
+    pub fn srv6_route(c: &mut Ctx) -> Result<String, CliError> {
+        let (dst, len) = ipv6_prefix_arg(c, "prefix")?;
+        let raw = c.word("sid");
+        let sid = sim_packets::ipv6_from_str(&raw)
+            .ok_or_else(|| CliError::Custom("Invalid SID".into()))?;
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let DeviceState::Router(rs) = &mut d.state {
+                rs.srv6.routes.retain(|r| !(r.dst == dst && r.len == len));
+                rs.srv6
+                    .routes
+                    .push(sim_core::device::Srv6Route { dst, len, sid });
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub fn show_srv6(c: &mut Ctx) -> Result<String, CliError> {
+        Ok(show::srv6_table(c.eng, c.dev, c.dialect))
+    }
+
     pub fn show_ospf_db(c: &mut Ctx) -> Result<String, CliError> {
         if !matches!(
             c.device_kind(),
@@ -1567,6 +1685,69 @@ pub mod cmd {
 
     pub fn port_security_sticky(c: &mut Ctx) -> Result<String, CliError> {
         port_sec_upsert(c, |cfg| cfg.sticky = true)
+    }
+
+    /// 端口隔离：`port-isolate enable group N` / `switchport protected`。
+    pub fn port_isolate_enable(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        let group = c.number("group").unwrap_or(0) as u16;
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.isolate_group = Some(group);
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// 思科 `switchport protected`：所有 protected 端口两两隔离。
+    pub fn switchport_protected(c: &mut Ctx) -> Result<String, CliError> {
+        require_switch(c)?;
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.isolate_group = Some(0);
+            }
+        }
+        Ok(String::new())
+    }
+
+    fn mux_set(c: &mut Ctx, role: sim_core::device::MuxRole) -> Result<String, CliError> {
+        require_switch(c)?;
+        let Some(cli_engine::IfCtx::Physical(port)) = c.sess.cur_if else {
+            return Err(CliError::Custom("no interface selected".into()));
+        };
+        if let Some(d) = c.eng.net.device_mut(c.dev) {
+            if let Some(p) = d.port_mut(port) {
+                p.mux_role = Some(role);
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub fn mux_vlan_principal(c: &mut Ctx) -> Result<String, CliError> {
+        mux_set(c, sim_core::device::MuxRole::Principal)
+    }
+
+    pub fn mux_vlan_separate(c: &mut Ctx) -> Result<String, CliError> {
+        mux_set(c, sim_core::device::MuxRole::Separate)
+    }
+
+    pub fn mux_vlan_group(c: &mut Ctx) -> Result<String, CliError> {
+        let group = c.number("group").unwrap_or(0) as u16;
+        mux_set(c, sim_core::device::MuxRole::Group(group))
+    }
+
+    pub fn show_port_isolate(c: &mut Ctx) -> Result<String, CliError> {
+        Ok(show::port_isolate(c.eng, c.dev, c.dialect))
+    }
+
+    pub fn show_mux_vlan(c: &mut Ctx) -> Result<String, CliError> {
+        Ok(show::mux_vlan(c.eng, c.dev, c.dialect))
     }
 
     /// 广播风暴抑制（每秒广播帧上限）。
@@ -3324,7 +3505,7 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
             Mode::Line => format!("{}(config-line)#", d.name),
             Mode::Aaa => format!("{}(config-aaa)#", d.name),
             Mode::Mst => format!("{}(config-mst)#", d.name),
-            Mode::Ospf | Mode::OspfArea | Mode::Bgp | Mode::Isis => {
+            Mode::Ospf | Mode::OspfArea | Mode::Bgp | Mode::Isis | Mode::Ospfv3 => {
                 format!("{}(config-router)#", d.name)
             }
             Mode::RoutePolicy => format!("{}(config-route-map)#", d.name),
@@ -3398,6 +3579,7 @@ pub fn prompt(eng: &Engine, sess: &Session, dev: DevId) -> String {
                 d.name,
                 sess.sub.ipsec.clone().unwrap_or_default()
             ),
+            Mode::Ospfv3 => format!("[{}-ospfv3-1]", d.name),
         },
     }
 }

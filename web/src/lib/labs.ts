@@ -35,6 +35,11 @@ export interface LabCheckDef {
     | { type: 'evpnRoute'; dev: string; vtep: string; vni: number }
     | { type: 'ltmVirtual'; dev: string; name: string; vip: string; port: number }
     | { type: 'tcpProbe'; from: string; to: string; port: number; expect?: boolean }
+    | { type: 'portIsolate'; dev: string; port: number; group: number }
+    | { type: 'muxRole'; dev: string; port: number; role: 'principal' | 'separate' | 'group'; group?: number }
+    | { type: 'ospfv3Neighbors'; dev: string; min: number }
+    | { type: 'srv6Route'; dev: string; dst: string }
+    | { type: 'ping6'; from: string; to: string; expect?: boolean }
     | {
         type: 'securityPolicy';
         dev: string;
@@ -238,6 +243,36 @@ export function runLabChecks(lab: LabDef): { label: string; passed: boolean; det
           )
         ) as { passed: boolean; detail: string };
         out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'portIsolate') {
+        const r = JSON.parse(
+          sim.check_port_isolate(need(ck.kind.dev), ck.kind.port, ck.kind.group)
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'muxRole') {
+        const role = ck.kind.role === 'group' ? String(ck.kind.group ?? 0) : ck.kind.role;
+        const r = JSON.parse(
+          sim.check_mux_role(need(ck.kind.dev), ck.kind.port, role)
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'ospfv3Neighbors') {
+        const r = JSON.parse(
+          sim.check_ospfv3_neighbors(need(ck.kind.dev), ck.kind.min)
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'srv6Route') {
+        const r = JSON.parse(
+          sim.check_srv6_route(need(ck.kind.dev), ck.kind.dst)
+        ) as { passed: boolean; detail: string };
+        out.push({ label: ck.label, passed: r.passed, detail: r.detail });
+      } else if (ck.kind.type === 'ping6') {
+        const r = JSON.parse(
+          sim.check_ping6(need(ck.kind.from), ck.kind.to)
+        ) as { passed: boolean; detail: string };
+        out.push({
+          label: ck.label,
+          passed: r.passed === (ck.kind.expect !== false),
+          detail: r.detail,
+        });
       } else if (ck.kind.type === 'stackMember') {
         const r = JSON.parse(
           sim.check_stack_member(need(ck.kind.dev), ck.kind.domain, ck.kind.member)
@@ -1286,7 +1321,132 @@ export const lab19: LabDef = {
   },
 };
 
-export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12, lab13, lab14, lab15, lab16, lab17, lab18, lab19];
+// ---------- 实验二十：MUX VLAN / 端口隔离 ----------
+
+export const lab20: LabDef = {
+  id: 'port-isolation',
+  title: '实验二十 · MUX VLAN 与端口隔离',
+  brief:
+    '同一 VLAN 里再做二层隔离：PC1（separate）不能访问 PC2（group），但两者都能访问 PC3（principal）。这就是 MUX VLAN / 私有 VLAN 的核心行为。',
+  tasks: [
+    'SW1：vlan batch 10；G0/0/1 接 PC1、G0/0/2 接 PC2、G0/0/3 接 PC3，全部 access VLAN10',
+    'SW1：G0/0/1 → mux-vlan separate；G0/0/2 → mux-vlan group 1；G0/0/3 → mux-vlan principal',
+    '（选做）对 PC1/PC2 接口执行 port-isolate enable group 1，观察同样的隔离效果',
+    'display mux-vlan / display port-isolate 检查端口角色',
+    'PC1 ping PC2 应不通；PC1 ping PC3、PC2 ping PC3 应通',
+  ],
+  checks: [
+    { label: 'G0/0/1 为 separate 端口', kind: { type: 'muxRole', dev: 'SW1', port: 0, role: 'separate' } },
+    { label: 'G0/0/2 为 group 1 端口', kind: { type: 'muxRole', dev: 'SW1', port: 1, role: 'group', group: 1 } },
+    { label: 'G0/0/3 为 principal 端口', kind: { type: 'muxRole', dev: 'SW1', port: 2, role: 'principal' } },
+    { label: 'PC1 → PC2 被隔离', kind: { type: 'ping', from: 'PC1', to: '192.168.10.12', expect: false } },
+    { label: 'PC1 → PC3（principal）连通', kind: { type: 'ping', from: 'PC1', to: '192.168.10.13' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const pc2 = sim.add_device('Host', 'Ios');
+    const pc3 = sim.add_device('Host', 'Ios');
+    const sw1 = sim.add_device('Switch', 'Vrp');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(pc2, 'PC2');
+    sim.rename_device(pc3, 'PC3');
+    sim.rename_device(sw1, 'SW1');
+    sim.add_link(pc1, sw1); // SW1 p0
+    sim.add_link(pc2, sw1); // SW1 p1
+    sim.add_link(pc3, sw1); // SW1 p2
+    sim.set_host_config(pc1, '192.168.10.11', 24, '');
+    sim.set_host_config(pc2, '192.168.10.12', 24, '');
+    sim.set_host_config(pc3, '192.168.10.13', 24, '');
+    setPosition(pc1, { x: 60, y: 40 });
+    setPosition(pc2, { x: 60, y: 160 });
+    setPosition(pc3, { x: 60, y: 280 });
+    setPosition(sw1, { x: 330, y: 160 });
+  },
+};
+
+// ---------- 实验二十一：OSPFv3 ----------
+
+export const lab21: LabDef = {
+  id: 'ospfv3',
+  title: '实验二十一 · OSPFv3 动态路由',
+  brief:
+    '两台路由器通过 IPv6 链路互联，各自连接一个 IPv6 网段。启用 OSPFv3 后，两端自动学习对端前缀，PC1 与 PC2 可以跨路由器互 ping6。',
+  tasks: [
+    'R1：g0/0/0 配 2001:db8:1::1/64（接 PC1），g0/0/1 配 2001:db8:12::1/64（接 R2），undo shutdown',
+    'R2：g0/0/0 配 2001:db8:12::2/64（接 R1），g0/0/1 配 2001:db8:2::1/64（接 PC2），undo shutdown',
+    'R1/R2：ospfv3 1 → router-id 1.1.1.1 / 2.2.2.2',
+    'R1/R2：互联口与业务口执行 ospfv3 1 area 0',
+    'display ospfv3 peer 应看到邻居；display ipv6 routing-table 应看到对端网段',
+    'PC1：ping6 2001:db8:2::10 应通',
+  ],
+  checks: [
+    { label: 'R1 建立 OSPFv3 邻居', kind: { type: 'ospfv3Neighbors', dev: 'R1', min: 1 } },
+    { label: 'R2 建立 OSPFv3 邻居', kind: { type: 'ospfv3Neighbors', dev: 'R2', min: 1 } },
+    { label: 'PC1 → PC2 跨路由器 ping6 连通', kind: { type: 'ping6', from: 'PC1', to: '2001:db8:2::10' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const r1 = sim.add_device('Router', 'Vrp');
+    const r2 = sim.add_device('Router', 'Vrp');
+    const pc2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(r1, 'R1');
+    sim.rename_device(r2, 'R2');
+    sim.rename_device(pc2, 'PC2');
+    sim.add_link(pc1, r1); // R1 p0
+    sim.add_link(r1, r2); // R1 p1 / R2 p0
+    sim.add_link(r2, pc2); // R2 p1
+    sim.set_host_v6(pc1, '2001:db8:1::10', 64, '2001:db8:1::1');
+    sim.set_host_v6(pc2, '2001:db8:2::10', 64, '2001:db8:2::1');
+    setPosition(pc1, { x: 40, y: 100 });
+    setPosition(r1, { x: 260, y: 100 });
+    setPosition(r2, { x: 500, y: 100 });
+    setPosition(pc2, { x: 720, y: 100 });
+  },
+};
+
+// ---------- 实验二十二：SRv6 BE ----------
+
+export const lab22: LabDef = {
+  id: 'srv6-be',
+  title: '实验二十二 · SRv6 BE 跨网段转发',
+  brief:
+    '两台路由器用 IPv6 Underlay 互联，各自配置 Locator 与本地 SID。入口把去往对端业务网段的报文封装到远端 SID，出口解封装后交付——这就是 SRv6 BE。',
+  tasks: [
+    'R1：g0/0/0 2001:db8:1::1/64；g0/0/1 2001:db8:12::1/64；R2：g0/0/0 2001:db8:12::2/64；g0/0/1 2001:db8:2::1/64',
+    'R1：srv6 locator 2001:db8:100::/64；srv6 sid 2001:db8:100::1',
+    'R2：srv6 locator 2001:db8:200::/64；srv6 sid 2001:db8:200::1',
+    'R1：srv6 route 2001:db8:2::/64 sid 2001:db8:200::1；R2：srv6 route 2001:db8:1::/64 sid 2001:db8:100::1',
+    'R1：ipv6 route-static 2001:db8:200:: 64 2001:db8:12::2；R2：ipv6 route-static 2001:db8:100:: 64 2001:db8:12::1',
+    'display srv6 应看到 Locator、本地 SID 与路由；PC1 ping6 2001:db8:2::10 应通',
+  ],
+  checks: [
+    { label: 'R1 配置去往业务网段的 SRv6 路由', kind: { type: 'srv6Route', dev: 'R1', dst: '2001:db8:2::/64' } },
+    { label: 'R2 配置回程 SRv6 路由', kind: { type: 'srv6Route', dev: 'R2', dst: '2001:db8:1::/64' } },
+    { label: 'PC1 → PC2 经 SRv6 连通', kind: { type: 'ping6', from: 'PC1', to: '2001:db8:2::10' } },
+  ],
+  build: (sim) => {
+    const pc1 = sim.add_device('Host', 'Ios');
+    const r1 = sim.add_device('Router', 'Vrp');
+    const r2 = sim.add_device('Router', 'Vrp');
+    const pc2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(pc1, 'PC1');
+    sim.rename_device(r1, 'R1');
+    sim.rename_device(r2, 'R2');
+    sim.rename_device(pc2, 'PC2');
+    sim.add_link(pc1, r1);
+    sim.add_link(r1, r2);
+    sim.add_link(r2, pc2);
+    sim.set_host_v6(pc1, '2001:db8:1::10', 64, '2001:db8:1::1');
+    sim.set_host_v6(pc2, '2001:db8:2::10', 64, '2001:db8:2::1');
+    setPosition(pc1, { x: 40, y: 100 });
+    setPosition(r1, { x: 260, y: 100 });
+    setPosition(r2, { x: 500, y: 100 });
+    setPosition(pc2, { x: 720, y: 100 });
+  },
+};
+
+export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12, lab13, lab14, lab15, lab16, lab17, lab18, lab19, lab20, lab21, lab22];
 
 // 合并英文文案
 for (const l of LABS) {

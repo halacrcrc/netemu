@@ -39,15 +39,15 @@
 
 ### M2c 新增（题库 / 错题本 / 进度看板）
 
-- **题库 v3**：163 道单选题，17 个主题——网络基础 23、IPv4 与子网/静态路由/IPv6/网络服务/WLAN/OSPF/BGP/IS-IS/MPLS VPN/QoS 与组播/自动化与 SDN 各 5、VLAN/STP/DHCP/ACL/NAT 各 17；原创题面 + 解析，顶栏「题库」进入，按主题或全部练习，即答即判 + 解析。
+- **题库 v5**：228 道单选题，27 个主题——网络基础 23、OSPF/IS-IS/网络服务各 10，IPv4/静态路由/IPv6/WLAN/BGP/MPLS VPN/QoS/链路聚合与堆叠/IP 组播/网络可靠性/运维入门/园区规划/SD-WAN/智能运维/同 VLAN 隔离/OSPFv3/SRv6/自动化各 5，VLAN/STP/DHCP/ACL/NAT 各 17；原创题面 + 解析，顶栏「题库」进入，按主题或全部练习，即答即判 + 解析。
 - **错题本**：答错自动入本，"错题重做"专项练习；统计页一键清空记录。
 - **进度看板**：总体进度（已答/错题数/最近正确率）+ 分主题掌握度条形图；本地持久化。
 - **实验进度徽章**：实验判分全过会在实验卡上打 ✓（本地记忆）。
 
 ### M3a 新增（课程 / 三厂商对照 / 笔记 / 云同步）
 
-- **课程视图**：33 篇原创课程，按 **IA 初级（10）/ IP 中级（7）/ IE 高级（10）/ 厂商对照（6）** 分组——IA 覆盖网络基础/TCP-IP、IPv4 子网、静态路由、IPv6、网络服务、WLAN；IP 覆盖 OSPF+VRRP、BGP、MPLS L3VPN、防火墙、IPsec、SSL VPN、无线；IE 覆盖 OSPF 多区域、BGP 选路/RR、IS-IS+SR、MPLS 跨域/TE、QoS+组播、自动化+SDN、VXLAN/EVPN、堆叠/M-LAG、F5 LTM、园区综合；厂商对照讲 EtherChannel/Eth-Trunk、StackWise/iStack/IRF、vPC/M-LAG/DRNI、HSRP/VRRP、PVST+/MSTP、VXLAN/EVPN 三家实现。Markdown 阅读器（零依赖自研渲染器），frontmatter 关联实验——课程页一键跳进对应实验。
-- **三厂商命令对照表**：单一数据源（`cmdmap.ts`）驱动，**每条命令在运行时经 wasm `verify_command` 校验**，表格标注 ✓ = 与模拟器行为一致（125 条对照全绿）。这是与 eNSP/Packet Tracer 的根本差异之一。
+- **课程视图**：45 篇原创课程，按 **IA 初级（13）/ IP 中级（11）/ IE 高级（14）/ 厂商对照（7）** 分组——IA 覆盖 TCP/IP、IPv4、静态路由、OSPF 单区域、IPv6、网络服务/接入安全、WLAN、链路聚合/堆叠、运维与自动化入门；IP 覆盖 OSPF+VRRP、BGP、MPLS L3VPN、防火墙、IPsec、SSL VPN、无线、IS-IS 基础、BFD/可靠性、组播、OSPFv3；IE 覆盖 OSPF 多区域、BGP 选路/RR、IS-IS+SR、MPLS 跨域/TE、QoS、VXLAN/EVPN、堆叠/M-LAG、F5 LTM、园区综合、CloudCampus 规划、SD-WAN/CloudWAN、智能运维与排障、SRv6；厂商对照讲 EtherChannel/Eth-Trunk、StackWise/iStack/IRF、vPC/M-LAG/DRNI、HSRP/VRRP、PVST+/MSTP、VXLAN/EVPN、MUX VLAN/私有 VLAN/端口隔离。Markdown 阅读器（零依赖自研渲染器），frontmatter 关联实验——课程页一键跳进对应实验。
+- **三厂商命令对照表**：单一数据源（`cmdmap.ts`）驱动，**每条命令在运行时经 wasm `verify_command` 校验**，表格标注 ✓ = 与模拟器行为一致（141 条对照全绿）。这是与 eNSP/Packet Tracer 的根本差异之一。
 - **笔记**：Markdown 编辑/预览、自动保存本地。
 - **Gist 云同步**：经典 PAT（gist 权限）备份/恢复笔记+题库记录+实验进度到私有 Gist；题库按答题次数合并、实验进度并集。Token 仅存本机。
 - **导航**：练习场 / 题库 / 课程 / 笔记 四视图切换。
@@ -80,7 +80,7 @@
 
 - **MSTP 多实例**：`spanning-tree mode mst` / `stp mode mstp`，`spanning-tree mst 1 priority 4096` / `stp instance 1 priority 4096`，MST 域视图配置 `instance 1 vlan 10` 映射；每个实例独立发送 BPDU、独立选根，数据面按 VLAN 归属实例转发（同一端口可在不同 VLAN 分别转发/阻塞，实现负载分担）。`show spanning-tree` / `display stp brief` 按实例展示。
   说明：不做 MST 域协商（name/revision 仅接受），详见 ADR D17。
-- **界面双语**：顶栏「EN / 中」一键切换，界面骨架、练习场、题库/课程/笔记的操作文案均为中英双语；33 篇课程与题库内容也提供英文译文。
+- **界面双语**：顶栏「EN / 中」一键切换，界面骨架、练习场、题库/课程/笔记的操作文案均为中英双语；45 篇课程与题库内容也提供英文译文。
 - **URL 分享拓扑**：拓扑管理面板「复制分享链接」把工作区（含设备位置）压缩进 `#topo=`，打开链接即还原；同时补上导出/导入文件入口。分享链接优先于本地工作区。
 
 ### M4（IP 进阶与二层安全）
@@ -91,7 +91,7 @@
 - **DHCP Snooping**：全局开关 + 信任端口；非信任口的 Offer/Ack 被丢弃，从 Request/Ack 学习绑定表（MAC/IP/VLAN/端口），`show ip dhcp snooping binding` / `display dhcp snooping user-binding`。
 - **端口安全**：最大 MAC 数、`restrict` / `shutdown` 违规动作、sticky 标记；超限帧丢弃与违规计数，`show/display port-security`。
 - **QoS 基础**：入方向广播风暴抑制（每秒广播上限）与令牌桶限速（kbps），显示丢弃/抑制计数；`storm-control` / `broadcast-suppression`、`rate-limit input` / `qos car|lr inbound cir`、`show/display storm-control|qos`。
-- **英文内容**：33 篇课程、163 道题库、19 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
+- **英文内容**：45 篇课程、228 道题库、22 个实验的文案均已有英文译文，切 EN 后内容与界面一起切换。
 
 ### M5（BGP / IS-IS / VRF / MPLS / route-policy / L3VPN）
 
@@ -148,10 +148,18 @@
 - **堆叠/IRF/CSS**：`stack domain` + `stack member` + `stack priority`；同 domain 成员间链路视为内部 fabric，不参与 STP；一台逻辑设备跨成员二层转发，`display stack` 显示 Master/成员。
 - **M-LAG**：`mlag domain` + 接口 `mlag peer-link`；两台交换机共享系统 MAC（跨设备 LACP 呈现同一对端），peer-link 作为内部链路并做水平分割，接入交换机可 LACP 双归两台成员，双链路同时转发。
 - **F5 LTM**：新增 LoadBalancer 设备，`ltm pool NAME member IP PORT` 与 `ltm virtual NAME vip IP PORT pool NAME`；TCP 连接按轮询选择池成员，目的地址改为成员、回程源地址改回 VIP；`show/display ltm` 显示虚拟服务器/池/会话。
-- **实验十五「VXLAN 数据中心跨 DC 二层互通」**、**实验十六「堆叠/IRF」**、**实验十七「M-LAG」**、**实验十八「EVPN 控制面」**、**实验十九「F5 LTM」**。
+- **实验十五「VXLAN 数据中心跨 DC 二层互通」**、**实验十六「堆叠/IRF」**、**实验十七「M-LAG」**、**实验十八「EVPN 控制面」**、**实验十九「F5 LTM」**、**实验二十「MUX VLAN 与端口隔离」**、**实验二十一「OSPFv3」**、**实验二十二「SRv6 BE」**。
 - 简化边界见 ADR D29/D30/D31（静态/简化 EVPN Type-3、无真实 BGP EVPN 属性/RT、堆叠/M-LAG 为共享 MAC+fabric、LTM 无健康检查/持久化/SSL 卸载）。
 
-**已验证**：139 个 Rust 测试全绿；实验十五 3/3、实验十六 3/3、实验十七 4/4、实验十八 3/3、实验十九 3/3。
+**已验证**：139 个 Rust 测试全绿；实验十五 3/3、实验十六 3/3、实验十七 4/4、实验十八 3/3、实验十九 3/3、实验二十 5/5、实验二十一 3/3、实验二十二 3/3。
+
+### M9 补充（同 VLAN 隔离 / OSPFv3 / SRv6）
+
+- **MUX VLAN / 私有 VLAN / 端口隔离**：端口角色 `principal / separate / group N` 与隔离组 `port-isolate enable group N`；数据面在同一 VLAN 内按角色/组阻断二层互通，`display mux-vlan` / `display port-isolate` 展示配置；实验二十验证 separate 与 group 隔离、principal 可达。
+- **OSPFv3**：`ospfv3 1` + `router-id` + 接口 `ospfv3 1 area 0`；邻居交换 IPv6 前缀并安装 `O` 路由，`display ospfv3 peer` / `show ipv6 ospf neighbor`；实验二十一验证跨路由器 ping6。
+- **SRv6 BE**：`srv6 locator` / `srv6 sid` / `srv6 route ... sid`；入口 IPv6-in-IPv6 封装到远端 SID，出口解封装，`display srv6` 展示 Locator/SID/路由；实验二十二验证跨网段 ping6。
+- 实验二十/二十一/二十二已加入实验列表；拓扑变化后自动重算并启动 STP 定时器，判分前等待 STP 收敛，避免 Learning 状态误判。
+- 简化边界见 ADR D32（MUX VLAN 不做跨 VLAN 桥接、OSPFv3 仅直连邻居前缀学习、SRv6 仅 BE 无 SRH/Policy/TI-LFA）。
 
 ## 本地开发
 
@@ -187,6 +195,17 @@ web/
 
 核心设计原则：**设备状态厂商中立，CLI 方言只是"前端"**。同一拓扑可随时切换思科/华为/华三方言练习——这是与 eNSP / Packet Tracer / HCL 的根本差异，也让"三厂商命令对照表"未来能直接从命令树元数据生成，与模拟器行为永远一致。
 
+## 与华为 Datacom 认证大纲的对照
+
+- **HCIA-Datacom V2.0（H12-811）**：网络基础、IP 网络、以太交换、安全接入、网络服务、WLAN、WAN、运维、IPv6、SDN/自动化。IA 的 13 篇课程覆盖 TCP/IP、IPv4/子网、静态路由、OSPF 单区域、IPv6、网络服务/接入安全、WLAN、链路聚合/堆叠、运维与自动化入门；**WAN 基础（PPP/PPPoE）** 课程未单列、模拟器也未建模。
+- **HCIP-Datacom Core（H12-821）**：OSPF/IS-IS/BGP、交换（VLAN/STP/堆叠）、IPv6、BFD/VRRP、组播、QoS、MPLS VPN、运维。IP 的 11 篇课程覆盖 OSPF/VRRP、OSPFv3、BGP、IS-IS 基础、BFD/可靠性、组播、MPLS VPN、安全与 WLAN；**MUX VLAN / 端口隔离** 已建模（端口角色 + 隔离组，同一 VLAN 内生效；不做 MUX VLAN 的跨 VLAN 二层桥接）。
+- **HCIE-Datacom V2.0（H12-891）**：园区 43%、广域 33%、自动化 10%、智能运维 14%。IE 的 40/41/42/45 分别对应园区规划/CloudCampus、SD-WAN/CloudWAN、智能运维与结构化排障、SRv6；EVPN、MPLS 跨域、自动化由 IE 12/31/33 承接。
+- **已知缺口（下一批）**：
+  - WAN 基础（PPP/PPPoE）：课程与模拟器均未实现；
+  - MUX VLAN：已做同 VLAN 端口隔离；真正的跨 VLAN primary/subordinate 桥接未建模；
+  - 大型 WLAN 组网：基础/漫游已有，信道/射频与大规模容量规划未建模；
+  - SRv6 Policy/网络切片：BE 已建模；多段 Segment List、TI-LFA、切片未建模。
+
 ## 路线图
 
 | 里程碑 | 内容 | 状态 |
@@ -200,7 +219,7 @@ web/
 | M6 安全方向 | 防火墙设备/安全区域/区域策略 ✅、ASA 安全级别 ✅、TCP 状态机 ✅、IPsec 站点 VPN ✅、SSL VPN ✅ | ✅ |
 | M7 无线方向 | AC/AP ✅、CAPWAP ✅、多 SSID ✅、WPA2/WPA3 ✅、无线 VLAN 隔离 ✅、漫游 ✅、实验十三/十四 ✅；信道/射频/802.1X/AP 冗余 | ✅ |
 | M8 数据中心 | VXLAN ✅、EVPN ✅、堆叠/IRF ✅、M-LAG ✅、F5 LTM ✅、实验十五~十九 ✅ | ✅ |
-| M9 打磨 | 大拓扑 Canvas 渲染、英文界面与内容（界面+课程/题库/实验文案 ✅）、社区内容贡献管线 | 进行中 |
+| M9 打磨 | 大拓扑 Canvas 渲染、英文界面与内容（界面+课程/题库/实验文案 ✅）、MUX VLAN/端口隔离 ✅、OSPFv3 ✅、SRv6 BE ✅、社区内容贡献管线 | 进行中 |
 
 ## 部署（GitHub Pages）
 

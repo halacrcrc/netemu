@@ -130,6 +130,25 @@ pub struct Route6 {
     pub src: RouteSrc,
 }
 
+/// SRv6 静态路由：目的前缀 → 远端 SID（BE）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Srv6Route {
+    pub dst: Ipv6Addr,
+    pub len: u8,
+    pub sid: Ipv6Addr,
+}
+
+/// SRv6 配置（BE 简化：locator + 本地 SID + 静态路由）。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Srv6Config {
+    #[serde(default)]
+    pub locator: Option<(Ipv6Addr, u8)>,
+    #[serde(default)]
+    pub sids: Vec<Ipv6Addr>,
+    #[serde(default)]
+    pub routes: Vec<Srv6Route>,
+}
+
 /// 等 NDP 解析后发送的 IPv6 报文。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending6 {
@@ -382,6 +401,16 @@ pub struct RouterState {
     pub isis: Option<IsisConfig>,
     #[serde(default)]
     pub isis_routes: Vec<Route>,
+    /// OSPFv3（简化：邻居前缀学习）
+    #[serde(default)]
+    pub ospfv3_enabled: bool,
+    #[serde(default)]
+    pub ospfv3_router_id: Option<Ipv4Addr>,
+    #[serde(default)]
+    pub ospfv3_routes6: Vec<Route6>,
+    /// SRv6 BE 配置
+    #[serde(default)]
+    pub srv6: Srv6Config,
     /// VRF 表
     #[serde(default)]
     pub vrfs: Vec<Vrf>,
@@ -966,6 +995,15 @@ pub enum DeviceState {
 }
 
 /// 交换机/路由器端口的二层口型。
+/// MUX VLAN（简化端口角色）：principal 与所有端口互通；
+/// separate 两两隔离；group 仅同组互通。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MuxRole {
+    Principal,
+    Separate,
+    Group(u16),
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortMode {
     /// 接入口：只收发 pvid 的 untagged 流量。
@@ -1011,6 +1049,15 @@ pub struct Port {
     /// 接口入口限速（kbps）
     #[serde(default)]
     pub rate_limit_kbps: Option<u32>,
+    /// 端口隔离组：同组端口二层不能互通（0 = 思科 protected 语义）。
+    #[serde(default)]
+    pub isolate_group: Option<u16>,
+    /// MUX VLAN 端口角色（简化：principal/separate/group）。
+    #[serde(default)]
+    pub mux_role: Option<MuxRole>,
+    /// OSPFv3 区域（Some(0) = 接口参与 OSPFv3）。
+    #[serde(default)]
+    pub ospfv3_area: Option<u32>,
     /// 是否参与 IS-IS
     #[serde(default)]
     pub isis_enable: bool,
@@ -1373,6 +1420,9 @@ impl Device {
                 port_security: None,
                 broadcast_limit_pps: None,
                 rate_limit_kbps: None,
+                isolate_group: None,
+                mux_role: None,
+                ospfv3_area: None,
                 isis_enable: false,
                 vrf: None,
                 zone: None,

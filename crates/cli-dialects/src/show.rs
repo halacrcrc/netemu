@@ -11,7 +11,7 @@ use sim_core::device::{
 };
 use sim_core::engine::Engine;
 use sim_core::{port_mac, Device};
-use sim_packets::{ipv4_str, mask_from_prefix};
+use sim_packets::{ipv4_str, ipv6_str, mask_from_prefix};
 
 use crate::ifname;
 
@@ -832,12 +832,30 @@ pub fn ipv6_route_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
                     .unwrap_or_else(|| "?".into()),
             });
         }
+        for r in &rs.ospfv3_routes6 {
+            let port = d.ports.iter().find(|p| {
+                p.ipv6
+                    .map(|ip| sim_packets::ipv6_in_prefix(&r.nexthop, &ip, p.prefix6))
+                    .unwrap_or(false)
+            });
+            rows.push(Row6 {
+                dst: sim_packets::ipv6_str(&r.dst),
+                len: r.len,
+                proto: "O",
+                nh: sim_packets::ipv6_str(&r.nexthop),
+                iface: port
+                    .map(|p| ifname::display(dialect, d.kind, p.idx))
+                    .unwrap_or_else(|| "?".into()),
+            });
+        }
     }
     rows.sort_by(|a, b| b.len.cmp(&a.len).then(a.dst.cmp(&b.dst)));
     let mut out = String::new();
     match dialect {
         Dialect::Ios => {
-            out.push_str("IPv6 Routing Table - default\nCodes: C - connected, S - static\n\n");
+            out.push_str(
+                "IPv6 Routing Table - default\nCodes: C - connected, S - static, O - OSPFv3\n\n",
+            );
             for r in &rows {
                 out.push_str(&format!(
                     "{}   {}/{} [0/0] via {}, {}\n",
@@ -963,6 +981,179 @@ pub fn dhcp_snooping_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String
                 ));
             }
         }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show ipv6 ospf neighbor` / `display ospfv3 peer`。
+pub fn ospfv3_neighbors(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let rows = eng.ospfv3_neighbors_of(dev);
+    if rows.is_empty() {
+        return if dialect == Dialect::Ios {
+            "No OSPFv3 neighbors.".into()
+        } else {
+            " Info: No OSPFv3 neighbor.".into()
+        };
+    }
+    let mut out = String::new();
+    if dialect == Dialect::Ios {
+        out.push_str(&format!(
+            "{:<16}{:<28}{}\n",
+            "Neighbor ID", "Interface IPv6", "Local Port"
+        ));
+    } else {
+        out.push_str(&format!(
+            " {:<16}{:<28}{}\n",
+            "Router ID", "Neighbor IPv6", "Interface"
+        ));
+    }
+    for (rid, ip, port) in rows {
+        out.push_str(&format!(
+            "{:<16}{:<28}{}\n",
+            ipv4_str(rid),
+            ipv6_str(&ip),
+            ifname::display(dialect, DeviceKind::Router, port)
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// OSPFv3 本机前缀（`display ospfv3 lsdb` 简化）。
+pub fn ospfv3_prefixes(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let rows = eng.ospfv3_prefixes_of(dev);
+    if rows.is_empty() {
+        return if dialect == Dialect::Ios {
+            "No OSPFv3 prefixes.".into()
+        } else {
+            " Info: No OSPFv3 prefix.".into()
+        };
+    }
+    let mut out = String::new();
+    if dialect == Dialect::Ios {
+        out.push_str(&format!("{:<32}{}\n", "Prefix", "Length"));
+    } else {
+        out.push_str(&format!(" {:<30}{}\n", "Prefix", "Length"));
+    }
+    for (ip, len) in rows {
+        out.push_str(&format!("{:<32}{}\n", ipv6_str(&ip), len));
+    }
+    out.trim_end().to_string()
+}
+
+/// `show srv6` / `display srv6`。
+pub fn srv6_table(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let DeviceState::Router(rs) = &d.state else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let loc = rs
+        .srv6
+        .locator
+        .map(|(ip, len)| format!("{}/{}", ipv6_str(&ip), len))
+        .unwrap_or_else(|| "-".into());
+    if dialect == Dialect::Ios {
+        out.push_str(&format!("Locator: {}\n", loc));
+        out.push_str(&format!("{:<32}\n", "Local SID"));
+        for sid in &rs.srv6.sids {
+            out.push_str(&format!("{}\n", ipv6_str(sid)));
+        }
+        out.push_str(&format!("\n{:<32}{}\n", "Destination", "SID"));
+        for r in &rs.srv6.routes {
+            out.push_str(&format!(
+                "{:<32}{}\n",
+                format!("{}/{}", ipv6_str(&r.dst), r.len),
+                ipv6_str(&r.sid)
+            ));
+        }
+    } else {
+        out.push_str(&format!(" Locator : {}\n", loc));
+        out.push_str(&format!(" {:<30}{}\n", "Destination", "SID"));
+        for r in &rs.srv6.routes {
+            out.push_str(&format!(
+                " {:<30}{}\n",
+                format!("{}/{}", ipv6_str(&r.dst), r.len),
+                ipv6_str(&r.sid)
+            ));
+        }
+        out.push_str(" Local SID:\n");
+        for sid in &rs.srv6.sids {
+            out.push_str(&format!("  {}\n", ipv6_str(sid)));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `show port-isolate` / `display port-isolate`。
+pub fn port_isolate(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let rows: Vec<_> = d
+        .ports
+        .iter()
+        .filter_map(|p| p.isolate_group.map(|g| (p.idx, g)))
+        .collect();
+    if rows.is_empty() {
+        return if dialect == Dialect::Ios {
+            "No isolated ports.".into()
+        } else {
+            " Info: No isolated port.".into()
+        };
+    }
+    let mut out = String::new();
+    if dialect == Dialect::Ios {
+        out.push_str(&format!("{:<22}{}\n", "Port", "Group"));
+    } else {
+        out.push_str(&format!(" {:<20}{}\n", "Interface", "Group"));
+    }
+    for (port, group) in rows {
+        out.push_str(&format!(
+            "{:<22}{}\n",
+            ifname::display(dialect, DeviceKind::Switch, port),
+            group
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// `show mux-vlan` / `display mux-vlan`。
+pub fn mux_vlan(eng: &Engine, dev: DevId, dialect: Dialect) -> String {
+    let Some(d) = eng.net.device(dev) else {
+        return String::new();
+    };
+    let rows: Vec<_> = d
+        .ports
+        .iter()
+        .filter_map(|p| p.mux_role.map(|r| (p.idx, r)))
+        .collect();
+    if rows.is_empty() {
+        return if dialect == Dialect::Ios {
+            "No MUX VLAN ports.".into()
+        } else {
+            " Info: No MUX VLAN port.".into()
+        };
+    }
+    let mut out = String::new();
+    if dialect == Dialect::Ios {
+        out.push_str(&format!("{:<22}{:<12}{}\n", "Port", "Role", "Group"));
+    } else {
+        out.push_str(&format!(" {:<20}{:<12}{}\n", "Interface", "Role", "Group"));
+    }
+    for (port, role) in rows {
+        let (name, group) = match role {
+            sim_core::device::MuxRole::Principal => ("principal", "-".to_string()),
+            sim_core::device::MuxRole::Separate => ("separate", "-".to_string()),
+            sim_core::device::MuxRole::Group(g) => ("group", g.to_string()),
+        };
+        out.push_str(&format!(
+            "{:<22}{:<12}{}\n",
+            ifname::display(dialect, DeviceKind::Switch, port),
+            name,
+            group
+        ));
     }
     out.trim_end().to_string()
 }

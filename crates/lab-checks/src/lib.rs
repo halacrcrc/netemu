@@ -2,9 +2,9 @@
 //!
 //! 检查项由实验文件（M1 起为 TOML）声明；这里提供通用执行器。
 
-use sim_core::device::{DevId, MgmtProto, RouteSrc, VtyTransport};
+use sim_core::device::{DevId, MgmtProto, MuxRole, RouteSrc, VtyTransport};
 use sim_core::engine::{Engine, PING_HORIZON_NS};
-use sim_packets::{ipv4_from_str, ipv4_str, Ipv4Addr};
+use sim_packets::{ipv4_from_str, ipv4_str, Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Debug)]
 pub enum CheckKind {
@@ -130,6 +130,24 @@ pub enum CheckKind {
         port: u16,
         expect: bool,
     },
+    /// 检查端口隔离组。
+    PortIsolate { dev: DevId, port: usize, group: u16 },
+    /// 检查 MUX VLAN 端口角色。
+    MuxRole {
+        dev: DevId,
+        port: usize,
+        role: MuxRole,
+    },
+    /// 检查 OSPFv3 邻居数量。
+    Ospfv3Neighbors { dev: DevId, min: usize },
+    /// 检查 SRv6 静态路由。
+    Srv6Route { dev: DevId, dst: Ipv6Addr, len: u8 },
+    /// 发起 IPv6 ping 并检查结果。
+    Ping6 {
+        from: DevId,
+        to: Ipv6Addr,
+        expect: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +164,8 @@ pub struct CheckResult {
 }
 
 pub fn run_checks(eng: &mut Engine, checks: &[Check]) -> Vec<CheckResult> {
+    // 让 STP 完成 Listening/Learning（约 30s）后再判分，避免端口仍在 Learning 时误判不通。
+    eng.run_to_quiescence(45_000_000_000);
     checks.iter().map(|c| run_one(eng, c)).collect()
 }
 
@@ -714,6 +734,57 @@ fn run_one(eng: &mut Engine, c: &Check) -> CheckResult {
                 },
             )
         }
+        CheckKind::PortIsolate { dev, port, group } => {
+            let got = eng
+                .net
+                .device(*dev)
+                .and_then(|d| d.port(*port))
+                .and_then(|p| p.isolate_group);
+            (
+                got == Some(*group),
+                match got {
+                    Some(g) => format!("隔离组 {}", g),
+                    None => "未配置端口隔离".into(),
+                },
+            )
+        }
+        CheckKind::MuxRole { dev, port, role } => {
+            let got = eng
+                .net
+                .device(*dev)
+                .and_then(|d| d.port(*port))
+                .and_then(|p| p.mux_role);
+            (got == Some(*role), format!("MUX 角色 {:?}", got))
+        }
+        CheckKind::Ospfv3Neighbors { dev, min } => {
+            let n = eng.ospfv3_neighbors_of(*dev).len();
+            (n >= *min, format!("OSPFv3 邻居 {}", n))
+        }
+        CheckKind::Srv6Route { dev, dst, len } => {
+            let found = eng.net.device(*dev).is_some_and(|d| {
+                matches!(&d.state, sim_core::device::DeviceState::Router(rs)
+                    if rs.srv6.routes.iter().any(|r| r.dst == *dst && r.len == *len))
+            });
+            (
+                found,
+                if found {
+                    format!("SRv6 路由 {}/{} 存在", sim_packets::ipv6_str(dst), len)
+                } else {
+                    format!("SRv6 路由 {}/{} 缺失", sim_packets::ipv6_str(dst), len)
+                },
+            )
+        }
+        CheckKind::Ping6 { from, to, expect } => {
+            let ok = ping6_ok(eng, *from, *to);
+            (
+                ok == *expect,
+                if ok {
+                    format!("ping6 {} 连通", sim_packets::ipv6_str(to))
+                } else {
+                    format!("ping6 {} 不通", sim_packets::ipv6_str(to))
+                },
+            )
+        }
         CheckKind::SviIp { dev, vlan, ip } => {
             let got = eng.net.device(*dev).and_then(|d| match &d.state {
                 sim_core::device::DeviceState::Switch(sw) => sw.svi.get(vlan).map(|s| s.ip),
@@ -741,6 +812,18 @@ fn run_one(eng: &mut Engine, c: &Check) -> CheckResult {
 }
 
 /// 发起一次 ping 并驱动引擎至静默，返回是否 5/5 全通。
+fn ping6_ok(eng: &mut Engine, from: DevId, to: Ipv6Addr) -> bool {
+    let Some(sid) = eng.start_ping6(from, to) else {
+        return false;
+    };
+    eng.run_to_quiescence(PING_HORIZON_NS);
+    let sessions = eng.take_unreported_ping6(from);
+    let Some(s) = sessions.into_iter().find(|s| s.id == sid) else {
+        return false;
+    };
+    s.received == sim_core::device::Ping6Session::TOTAL
+}
+
 fn ping_ok(eng: &mut Engine, from: DevId, to: Ipv4Addr) -> bool {
     let Some(sid) = eng.start_ping(from, to) else {
         return false;

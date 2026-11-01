@@ -28,6 +28,17 @@ line vty 0 4
  transport input ssh
 ```
 
+## Access security: AAA, 802.1X, and Layer-2 protection
+
+- **AAA**: authentication, authorization, accounting; local users suit small networks, while centralized RADIUS/TACACS+ suits many devices;
+- **802.1X**: port-level authentication; unauthenticated endpoints may only send EAP/DHCP/DNS, often combined with dynamic VLAN/ACL;
+- **MAC authentication**: suits printers/IoT, simple but easy to spoof;
+- **Port security**: limits learned MAC addresses per port; violations trigger `restrict` or `shutdown`;
+- **DHCP Snooping**: trusts only ports facing the DHCP server, drops Offers/Acks from untrusted ports, and builds a binding table;
+- **IPSG**: checks source IPs against the DHCP Snooping binding table to block address spoofing.
+
+These features are usually combined: authenticate first, then constrain MAC/IP, and finally control access with ACLs.
+
 ## Time, logs, and monitoring
 
 - **NTP**: synchronize clocks so log timestamps line up; lower stratum is closer to the authoritative clock;

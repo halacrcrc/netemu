@@ -28,7 +28,8 @@ fn h_quit(c: &mut Ctx) -> Result<String, CliError> {
         | Mode::Zone
         | Mode::SecurityPolicy
         | Mode::SecurityRule
-        | Mode::Ipsec => Mode::Config,
+        | Mode::Ipsec
+        | Mode::Ospfv3 => Mode::Config,
         _ => Mode::Exec,
     };
     if c.sess.mode != Mode::If {
@@ -118,6 +119,12 @@ fn display_branch() -> CNode {
                 .kid(CNode::lit("peer", "OSPF neighbors").run(cmd::show_ospf_neighbor))
                 .kid(CNode::lit("lsdb", "OSPF link state database").run(cmd::show_ospf_db)),
         )
+        .kid(
+            CNode::lit("ospfv3", "Display OSPFv3 information")
+                .kid(CNode::lit("peer", "OSPFv3 neighbors").run(cmd::show_ospfv3_neighbor))
+                .kid(CNode::lit("lsdb", "OSPFv3 prefixes").run(cmd::show_ospfv3_db)),
+        )
+        .kid(CNode::lit("srv6", "Display SRv6 information").run(cmd::show_srv6))
         .kid(CNode::lit("vrrp", "Display VRRP information").run(cmd::show_vrrp))
         .kid(
             CNode::lit("ipv6", "Display IPv6 information")
@@ -135,6 +142,8 @@ fn display_branch() -> CNode {
             ),
         )
         .kid(CNode::lit("port-security", "Port security").run(cmd::show_port_security))
+        .kid(CNode::lit("port-isolate", "Port isolation").run(cmd::show_port_isolate))
+        .kid(CNode::lit("mux-vlan", "MUX VLAN").run(cmd::show_mux_vlan))
         .kid(CNode::lit("storm-control", "Storm control").run(cmd::show_qos))
         .kid(CNode::lit("qos", "QoS statistics").run(cmd::show_qos))
         .kid(
@@ -409,6 +418,26 @@ pub fn build() -> Trees {
                 .run(cmd::hostname),
             CNode::lit("ospf", "OSPF process")
                 .kid(CNode::param(ParamKind::Number, "pid", "Process ID").run(cmd::ospf_enter)),
+            CNode::lit("ospfv3", "OSPFv3 process")
+                .kid(CNode::param(ParamKind::Number, "pid", "Process ID").run(cmd::ospfv3_enter)),
+            CNode::lit("srv6", "SRv6 configuration")
+                .kid(
+                    CNode::lit("locator", "Locator prefix").kid(
+                        CNode::param(ParamKind::Word, "prefix", "e.g. 2001:db8:100::/64")
+                            .run(cmd::srv6_locator),
+                    ),
+                )
+                .kid(
+                    CNode::lit("sid", "Local SID")
+                        .kid(CNode::param(ParamKind::Word, "sid", "IPv6 SID").run(cmd::srv6_sid)),
+                )
+                .kid(CNode::lit("route", "Static SRv6 route").kid(
+                    CNode::param(ParamKind::Word, "prefix", "Destination /64").kid(
+                        CNode::lit("sid", "Remote SID").kid(
+                            CNode::param(ParamKind::Word, "sid", "IPv6 SID").run(cmd::srv6_route),
+                        ),
+                    ),
+                )),
             CNode::lit("bgp", "BGP process")
                 .kid(CNode::param(ParamKind::Number, "asn", "Local AS number").run(cmd::bgp_enter)),
             CNode::lit("security-policy", "Security policy")
@@ -878,6 +907,13 @@ pub fn build() -> Trees {
                     .run(cmd::ipv6_address),
                 ),
             ),
+            CNode::lit("ospfv3", "OSPFv3 on this interface").kid(
+                CNode::param(ParamKind::Number, "pid", "Process ID").kid(
+                    CNode::lit("area", "OSPFv3 area").kid(
+                        CNode::param(ParamKind::Number, "area", "Area ID").run(cmd::ospfv3_area),
+                    ),
+                ),
+            ),
             CNode::lit("isis", "IS-IS on this interface")
                 .run(cmd::isis_enable_if)
                 .kid(
@@ -935,6 +971,20 @@ pub fn build() -> Trees {
                             .run(cmd::port_security_violation),
                     ),
                 ),
+            CNode::lit("port-isolate", "Port isolation").kid(
+                CNode::lit("enable", "Enable port isolation").kid(
+                    CNode::lit("group", "Isolation group").kid(
+                        CNode::param(ParamKind::Number, "group", "Group ID")
+                            .run(cmd::port_isolate_enable),
+                    ),
+                ),
+            ),
+            CNode::lit("mux-vlan", "MUX VLAN port role")
+                .kid(CNode::lit("principal", "Principal port").run(cmd::mux_vlan_principal))
+                .kid(CNode::lit("separate", "Separate port").run(cmd::mux_vlan_separate))
+                .kid(CNode::lit("group", "Group port").kid(
+                    CNode::param(ParamKind::Number, "group", "Group ID").run(cmd::mux_vlan_group),
+                )),
             CNode::lit("broadcast-suppression", "Broadcast storm suppression").kid(
                 CNode::param(ParamKind::Number, "pps", "Broadcast frames per second")
                     .run(cmd::storm_control),
@@ -1066,6 +1116,12 @@ pub fn build() -> Trees {
                 CNode::param(ParamKind::Word, "area", "Area ID, e.g. 0 or 0.0.0.0")
                     .run(cmd::ospf_area_enter),
             ),
+            CNode::lit("quit", "Quit from the current view").run(h_quit),
+            CNode::lit("return", "Return to the user view").run(h_return),
+        ],
+        ospfv3: vec![
+            CNode::lit("router-id", "Set the OSPFv3 router ID")
+                .kid(CNode::param(ParamKind::Ipv4, "id", "Router ID").run(cmd::ospfv3_router_id)),
             CNode::lit("quit", "Quit from the current view").run(h_quit),
             CNode::lit("return", "Return to the user view").run(h_return),
         ],

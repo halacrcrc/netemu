@@ -56,6 +56,13 @@ pub struct PortSummary {
     pub broadcast_limit_pps: Option<u32>,
     #[serde(default)]
     pub rate_limit_kbps: Option<u32>,
+    /// 端口隔离 / MUX VLAN / OSPFv3
+    #[serde(default)]
+    pub isolate_group: Option<u16>,
+    #[serde(default)]
+    pub mux_role: Option<MuxRole>,
+    #[serde(default)]
+    pub ospfv3_area: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,6 +161,25 @@ pub struct DevSummary {
     /// IPv6 静态路由
     #[serde(default)]
     pub static_routes6: Vec<StaticRoute6Summary>,
+    /// OSPFv3
+    #[serde(default)]
+    pub ospfv3_enabled: bool,
+    #[serde(default)]
+    pub ospfv3_router_id: Option<String>,
+    /// SRv6 BE
+    #[serde(default)]
+    pub srv6_locator: Option<(String, u8)>,
+    #[serde(default)]
+    pub srv6_sids: Vec<String>,
+    #[serde(default)]
+    pub srv6_routes: Vec<Srv6RouteSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Srv6RouteSummary {
+    pub dst: String,
+    pub len: u8,
+    pub sid: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +411,9 @@ impl Net {
                             zone: p.zone.clone(),
                             nameif: p.nameif.clone(),
                             security_level: p.security_level,
+                            isolate_group: p.isolate_group,
+                            mux_role: p.mux_role,
+                            ospfv3_area: p.ospfv3_area,
                         })
                         .collect(),
                     gw: match &d.state {
@@ -748,6 +777,40 @@ impl Net {
                             .collect(),
                         _ => vec![],
                     },
+                    ospfv3_enabled: match &d.state {
+                        DeviceState::Router(rs) => rs.ospfv3_enabled,
+                        _ => false,
+                    },
+                    ospfv3_router_id: match &d.state {
+                        DeviceState::Router(rs) => rs.ospfv3_router_id.map(ipv4_str),
+                        _ => None,
+                    },
+                    srv6_locator: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .srv6
+                            .locator
+                            .map(|(ip, len)| (sim_packets::ipv6_str(&ip), len)),
+                        _ => None,
+                    },
+                    srv6_sids: match &d.state {
+                        DeviceState::Router(rs) => {
+                            rs.srv6.sids.iter().map(sim_packets::ipv6_str).collect()
+                        }
+                        _ => vec![],
+                    },
+                    srv6_routes: match &d.state {
+                        DeviceState::Router(rs) => rs
+                            .srv6
+                            .routes
+                            .iter()
+                            .map(|r| Srv6RouteSummary {
+                                dst: sim_packets::ipv6_str(&r.dst),
+                                len: r.len,
+                                sid: sim_packets::ipv6_str(&r.sid),
+                            })
+                            .collect(),
+                        _ => vec![],
+                    },
                 })
                 .collect(),
             links: self
@@ -798,6 +861,9 @@ impl Net {
                     p.zone = ps.zone.clone();
                     p.nameif = ps.nameif.clone();
                     p.security_level = ps.security_level;
+                    p.isolate_group = ps.isolate_group;
+                    p.mux_role = ps.mux_role;
+                    p.ospfv3_area = ps.ospfv3_area;
                     if let Some(txt) = &ps.ipv6 {
                         p.ipv6 = sim_packets::ipv6_from_str(txt);
                     }
@@ -868,6 +934,28 @@ impl Net {
                     for r in &ds.static_routes {
                         rs.static_routes.push(static_from(r));
                     }
+                    rs.ospfv3_enabled = ds.ospfv3_enabled;
+                    rs.ospfv3_router_id =
+                        ds.ospfv3_router_id.as_ref().and_then(|s| ipv4_from_str(s));
+                    if let Some((ip, len)) = &ds.srv6_locator {
+                        rs.srv6.locator = sim_packets::ipv6_from_str(ip).map(|ip| (ip, *len));
+                    }
+                    rs.srv6.sids = ds
+                        .srv6_sids
+                        .iter()
+                        .filter_map(|s| sim_packets::ipv6_from_str(s))
+                        .collect();
+                    rs.srv6.routes = ds
+                        .srv6_routes
+                        .iter()
+                        .filter_map(|r| {
+                            Some(Srv6Route {
+                                dst: sim_packets::ipv6_from_str(&r.dst)?,
+                                len: r.len,
+                                sid: sim_packets::ipv6_from_str(&r.sid)?,
+                            })
+                        })
+                        .collect();
                     for l in &ds.mpls_lsps {
                         rs.mpls_lsps.push(StaticLsp {
                             name: l.name.clone(),

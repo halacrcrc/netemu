@@ -51,6 +51,20 @@ ipv6 route 2001:db8:20::/64 2001:db8:10::2
 
 Verify with `show ipv6 interface brief` / `display ipv6 interface brief`, `show ipv6 route` / `display ipv6 routing-table`, and `ping ipv6 2001:db8:20::2`.
 
+## IPv6 routing and OSPFv3
+
+IPv6 static routes and OSPFv3 are common HCIP topics:
+
+```
+ipv6 route 2001:db8:20::/64 2001:db8:10::2
+ospfv3 1
+ router-id 1.1.1.1
+interface g0/0
+ ospfv3 1 area 0
+```
+
+OSPFv3 keeps the same neighbor and area concepts as OSPFv2, but forms neighbors over link-local addresses and uses Link-LSAs to carry link information; the Router ID remains a 32-bit IPv4-format value. Troubleshoot by checking `display ospfv3 peer` for Full, then the IPv6 routing table.
+
 ## Transition: dual stack first
 
 The safest transition is **dual stack**: an interface carries both IPv4 and IPv6, and applications choose based on DNS. NAT64/DNS64, 6PE/6VPE, and tunnels also exist, but dual stack is the foundation.

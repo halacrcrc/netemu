@@ -210,10 +210,21 @@ impl Net {
                 consider(*len, 3, *port, dst);
             }
         }
-        let statics: &[Route6] = match &d.state {
-            DeviceState::Router(rs) => &rs.static_routes6,
-            _ => &[],
+        let (statics, ospf): (&[Route6], &[Route6]) = match &d.state {
+            DeviceState::Router(rs) => (&rs.static_routes6, &rs.ospfv3_routes6),
+            _ => (&[], &[]),
         };
+        for r in ospf {
+            if !sim_packets::ipv6_in_prefix(&dst, &r.dst, r.len) {
+                continue;
+            }
+            if let Some((port, _, _)) = connected
+                .iter()
+                .find(|(_, ip, len)| sim_packets::ipv6_in_prefix(&r.nexthop, ip, *len))
+            {
+                consider(r.len, 1, *port, r.nexthop);
+            }
+        }
         for r in statics {
             if !sim_packets::ipv6_in_prefix(&dst, &r.dst, r.len) {
                 continue;

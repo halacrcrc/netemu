@@ -28,6 +28,17 @@ line vty 0 4
  transport input ssh
 ```
 
+## 接入安全：AAA、802.1X 与二层防护
+
+- **AAA**：认证/授权/计费；本地用户适合小网，集中 RADIUS/TACACS+ 适合多设备；
+- **802.1X**：端口级认证，未认证终端只能发 EAP/DHCP/DNS；常与动态 VLAN/ACL 联动；
+- **MAC 认证**：适合打印机/IoT，配置简单但易伪造；
+- **端口安全**：限制端口学习的 MAC 数，违规 `restrict` 或 `shutdown`；
+- **DHCP Snooping**：只信任接 DHCP 服务器的端口，丢弃非信任口的 Offer/Ack，并建立绑定表；
+- **IPSG**：依据 DHCP Snooping 绑定表检查源 IP，防止私设地址冒用。
+
+这些能力通常组合使用：先认证，再限制 MAC/地址，最后用 ACL 控制访问。
+
 ## 时间、日志与监控
 
 - **NTP**：所有设备对时，日志时间戳才能对齐；分层（stratum）越小越接近权威时钟；

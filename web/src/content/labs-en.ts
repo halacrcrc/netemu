@@ -373,6 +373,61 @@ export const LABS_EN: Record<string, LabEn> = {
       'H1 -> H2 reachable through EVPN-discovered VTEPs',
     ],
   },
+  'port-isolation': {
+    title: 'Lab 20 · MUX VLAN and Port Isolation',
+    brief:
+      'Isolate ports inside one VLAN: PC1 (separate) cannot reach PC2 (group), but both can reach PC3 (principal). This is the core behavior of MUX VLAN / private VLAN.',
+    tasks: [
+      'SW1: vlan batch 10; G0/0/1 to PC1, G0/0/2 to PC2, G0/0/3 to PC3, all access VLAN10',
+      'SW1: G0/0/1 -> mux-vlan separate; G0/0/2 -> mux-vlan group 1; G0/0/3 -> mux-vlan principal',
+      '(Optional) run port-isolate enable group 1 on PC1/PC2 ports and observe the same isolation',
+      'Check port roles with display mux-vlan / display port-isolate',
+      'PC1 -> PC2 should fail; PC1 -> PC3 and PC2 -> PC3 should succeed',
+    ],
+    checkLabels: [
+      'G0/0/1 is a separate port',
+      'G0/0/2 is a group 1 port',
+      'G0/0/3 is a principal port',
+      'PC1 -> PC2 is isolated',
+      'PC1 -> PC3 (principal) is reachable',
+    ],
+  },
+  ospfv3: {
+    title: 'Lab 21 · OSPFv3 Dynamic Routing',
+    brief:
+      'Two routers interconnect over IPv6 and each serves an IPv6 subnet. With OSPFv3 enabled, both learn the remote prefix and PC1 can ping6 PC2 across routers.',
+    tasks: [
+      'R1: g0/0/0 2001:db8:1::1/64 (to PC1), g0/0/1 2001:db8:12::1/64 (to R2), undo shutdown',
+      'R2: g0/0/0 2001:db8:12::2/64 (to R1), g0/0/1 2001:db8:2::1/64 (to PC2), undo shutdown',
+      'R1/R2: ospfv3 1 -> router-id 1.1.1.1 / 2.2.2.2',
+      'R1/R2: run ospfv3 1 area 0 on the interconnect and service interfaces',
+      'display ospfv3 peer should show neighbors; display ipv6 routing-table should show the remote subnet',
+      'PC1: ping6 2001:db8:2::10 should succeed',
+    ],
+    checkLabels: [
+      'R1 forms an OSPFv3 neighbor',
+      'R2 forms an OSPFv3 neighbor',
+      'PC1 -> PC2 ping6 across routers succeeds',
+    ],
+  },
+  'srv6-be': {
+    title: 'Lab 22 · SRv6 BE Forwarding',
+    brief:
+      'Two routers share an IPv6 underlay and each has a Locator and local SID. The ingress encapsulates traffic to the remote business subnet toward the remote SID, and the egress decapsulates and delivers it — SRv6 BE.',
+    tasks: [
+      'R1: g0/0/0 2001:db8:1::1/64; g0/0/1 2001:db8:12::1/64; R2: g0/0/0 2001:db8:12::2/64; g0/0/1 2001:db8:2::1/64',
+      'R1: srv6 locator 2001:db8:100::/64; srv6 sid 2001:db8:100::1',
+      'R2: srv6 locator 2001:db8:200::/64; srv6 sid 2001:db8:200::1',
+      'R1: srv6 route 2001:db8:2::/64 sid 2001:db8:200::1; R2: srv6 route 2001:db8:1::/64 sid 2001:db8:100::1',
+      'R1: ipv6 route-static 2001:db8:200:: 64 2001:db8:12::2; R2: ipv6 route-static 2001:db8:100:: 64 2001:db8:12::1',
+      'display srv6 should show the locator, local SID, and routes; PC1 ping6 2001:db8:2::10 should succeed',
+    ],
+    checkLabels: [
+      'R1 has an SRv6 route to the remote business subnet',
+      'R2 has the return SRv6 route',
+      'PC1 -> PC2 succeeds through SRv6',
+    ],
+  },
   'f5-ltm': {
     title: 'Lab 19 · F5 LTM Load Balancing',
     brief:
