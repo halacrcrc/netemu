@@ -28,7 +28,8 @@ export type TopicId =
   | 'isolation'
   | 'ospfv3'
   | 'srv6'
-  | 'automation';
+  | 'automation'
+  | 'mgmt';
 
 export const TOPICS: { id: TopicId; name: string; nameEn: string }[] = [
   { id: 'basics', name: '网络基础', nameEn: 'Networking basics' },
@@ -58,6 +59,104 @@ export const TOPICS: { id: TopicId; name: string; nameEn: string }[] = [
   { id: 'ospfv3', name: 'OSPFv3', nameEn: 'OSPFv3' },
   { id: 'srv6', name: 'SRv6', nameEn: 'SRv6' },
   { id: 'automation', name: '自动化与 SDN', nameEn: 'Automation and SDN' },
+  { id: 'mgmt', name: '远程管理', nameEn: 'Remote management' },
+  // ---------- 远程管理（VTY / SSH / 本地用户 / AAA） ----------
+  {
+    id: 'mg1',
+    topic: 'mgmt',
+    q: '在 VTY 线路上配置 transport input ssh 后，Telnet 登录会？',
+    options: ['照常登录', '被拒绝，只允许 SSH 登录', '自动升级为 SSH', '回退到 Console 登录'],
+    answer: 1,
+    explain: 'transport input 决定该 VTY 线路允许的入站协议；设为 ssh 后 Telnet 客户端将被直接拒绝。',
+  },
+  {
+    id: 'mg2',
+    topic: 'mgmt',
+    q: 'line vty 0 4 表示？',
+    options: ['最多 5 个并发远程会话', '5 个 VLAN', '4 条物理链路', '第 5 号 Console 口'],
+    answer: 0,
+    explain: 'VTY 是虚拟终端线路，0~4 共 5 条，即最多允许 5 个并发远程登录会话。',
+  },
+  {
+    id: 'mg3',
+    topic: 'mgmt',
+    q: 'IOS 创建本地用户（用于 SSH/VTY 本地认证）的命令是？',
+    options: ['username admin secret cisco123', 'user add admin', 'local-user admin', 'set user admin'],
+    answer: 0,
+    explain: 'IOS 用 username <名> secret <密码> 创建本地用户；配合 line vty 下 login local 启用本地认证。',
+  },
+  {
+    id: 'mg4',
+    topic: 'mgmt',
+    q: '华为设备进入 AAA 视图（配置用户前）的命令是？',
+    options: ['aaa', 'user view', 'local-user view', 'auth enter'],
+    answer: 0,
+    explain: '系统视图下输入 aaa 进入 AAA 视图；随后 local-user <名> 创建用户并进入用户视图配置密码。',
+  },
+  {
+    id: 'mg5',
+    topic: 'mgmt',
+    q: 'SSH 登录时验证用户名/密码的依据是？',
+    options: [
+      '客户端本地的用户表',
+      '被登录设备（服务器端）的本地用户表或 AAA',
+      'DNS 服务器',
+      'STP 根桥',
+    ],
+    answer: 1,
+    explain: '认证发生在服务器端——查它的本地用户表或 AAA；所以必须先在被登录设备上创建用户并启用服务。',
+  },
+  {
+    id: 'mg6',
+    topic: 'mgmt',
+    q: '通过 SSH 登录对端设备后，终端提示符与后续命令作用于？',
+    options: ['本地设备', '远端设备的 CLI', '跳板服务器', '无意义'],
+    answer: 1,
+    explain: '会话建立后，提示符切换为远端设备 CLI，后续每条命令都在远端执行，直到 exit 关闭会话。',
+  },
+  {
+    id: 'mg7',
+    topic: 'mgmt',
+    q: 'SSH 服务端已启用、本地用户已创建，但客户端仍无法登录，最可能的原因是？',
+    options: [
+      'VTY 线路的入站协议未放行 SSH（或未生成加密密钥）',
+      'STP 未收敛',
+      'VLAN 未创建',
+      'NAT 未配置',
+    ],
+    answer: 0,
+    explain: 'VTY 默认可能允许 telnet/all 或密钥未生成——逐项检查 transport input / protocol inbound 与密钥状态。',
+  },
+  {
+    id: 'mg8',
+    topic: 'mgmt',
+    q: 'SSH 使用 TCP 端口、Telnet 使用 TCP 端口分别是？',
+    options: ['22 与 23', '23 与 22', '80 与 443', '161 与 162'],
+    answer: 0,
+    explain: 'SSH 监听 TCP 22，Telnet 监听 TCP 23——这也是防火墙上区分放行的依据。',
+  },
+  // ---------- 链路聚合补充 ----------
+  {
+    id: 'lg6',
+    topic: 'lag',
+    q: 'LACPDU 的默认发送周期是？',
+    options: ['每 1 秒', '每 2 秒', '每 30 秒', '只在链路故障时发送'],
+    answer: 0,
+    explain: 'LACP 成员口每秒发送 LACPDU 协商；超时未收到对端报文（约 3 倍周期）则成员退出聚合。',
+  },
+  {
+    id: 'lg7',
+    topic: 'lag',
+    q: '静态聚合与 LACP 动态聚合的关键区别是？',
+    options: [
+      '静态聚合不与对端协商，对端误接时可能产生回环风险',
+      '静态聚合带宽更低',
+      'LACP 不支持多链路',
+      '静态聚合只能在路由器上配置',
+    ],
+    answer: 0,
+    explain: 'LACP 通过 LACPDU 确认两端配置一致后才放行流量；静态聚合不协商，配置失误时风险更高。',
+  },
 ];
 
 export interface QuestionEn {

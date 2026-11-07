@@ -167,7 +167,7 @@
         <h3>{t('quiz.mastery')}</h3>
         <div class="pad">
           {#each TOPICS as topic (topic.id)}
-            {@const st = topicStats(t.id)}
+            {@const st = topicStats(topic.id)}
             {@const pct = st.attempted ? Math.round((st.correct / st.attempted) * 100) : 0}
             <div class="topic-row">
               <span class="tname">{topicName(topic)}</span>

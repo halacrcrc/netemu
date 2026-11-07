@@ -284,4 +284,13 @@ export const CMDMAP: CmdRow[] = [
   { feature: '配置本地 SID', topic: 'srv6', ios: 'srv6 sid 2001:db8:100::1', vrp: 'srv6 sid 2001:db8:100::1', comware: 'srv6 sid 2001:db8:100::1', mode: 'Config' },
   { feature: '静态 SRv6 路由', topic: 'srv6', ios: 'srv6 route 2001:db8:2::/64 sid 2001:db8:200::1', vrp: 'srv6 route 2001:db8:2::/64 sid 2001:db8:200::1', comware: 'srv6 route 2001:db8:2::/64 sid 2001:db8:200::1', mode: 'Config' },
   { feature: '查看 SRv6', topic: 'srv6', ios: 'show srv6', vrp: 'display srv6', comware: 'display srv6', mode: 'Exec' },
+  // ---------- 远程管理（VTY / SSH / 本地用户） ----------
+  { feature: '进入 VTY 线路', topic: 'mgmt', ios: 'line vty 0 4', vrp: 'user-interface vty 0 4', comware: 'line vty 0 4', mode: 'Config' },
+  { feature: '设置登录认证为本地', topic: 'mgmt', ios: 'login local', vrp: 'authentication-mode aaa', comware: 'authentication-mode aaa', mode: 'Line' },
+  { feature: '限制登录协议为 SSH', topic: 'mgmt', ios: 'transport input ssh', vrp: 'protocol inbound ssh', comware: 'protocol inbound ssh', mode: 'Line' },
+  { feature: '创建本地用户', topic: 'mgmt', ios: 'username admin secret cisco123', vrp: 'local-user admin', comware: 'local-user admin', mode: 'Config' },
+  { feature: 'SSH 登录对端', topic: 'mgmt', ios: 'ssh 10.0.0.2', vrp: 'ssh 10.0.0.2', comware: 'ssh 10.0.0.2', mode: 'Exec' },
+  // ---------- 链路聚合 ----------
+  { feature: '成员加入聚合组', topic: 'lag', ios: 'channel-group 1 mode active', vrp: 'eth-trunk 1', comware: 'port link-aggregation group 1', mode: 'If' },
+  { feature: '查看聚合状态', topic: 'lag', ios: 'show etherchannel summary', vrp: 'display eth-trunk', comware: 'display link-aggregation brief', mode: 'Exec' },
 ];
