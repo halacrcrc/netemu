@@ -194,7 +194,7 @@ F5 LTM：新增 `DeviceKind::LoadBalancer`（复用 RouterState），Device 增�
 
 **封装帧发送 VLAN 解析**：`vxlan_encap`/`evpn_send` 的 peer 若经静态路由可达，路由表项无 VLAN（`out_vlan=None`），会落到 SVI 伪端口 `transmit_frame(port=0)` 从错误口发出——直连拓扑（peer 在直连段）从未暴露。修复：按下一跳所在直连网段二次解析出发送 VLAN（`lookup_route(nh)`），再走 `flood_in_vlan_except`。
 
-**TCP over VXLAN**： 增加  变体，/解封装处理 TCP 载荷（，ETHERTYPE_IPV4）——此前只封装 Ipv4/Arp，tcpProbe 的 SYN 无法跨 VXLAN（数据中心综合实验的 VIP 探针场景暴露）。同时 M-LAG 组网的 DSW 侧也应 ： 的共享系统 MAC 使两台桥 ID 相同、STP 选举平局，peer-link 两侧全 DESI 转发会形成广播风暴，淹没交换机自身发起的 ARP。
+**TCP over VXLAN**：`VxlanPayload` 增加 `Tcp(TcpPacket)` 变体，`vxlan_encap`/解封装处理 TCP 载荷（`L3::Tcp`，ETHERTYPE_IPV4）——此前只封装 Ipv4/Arp，tcpProbe 的 SYN 无法跨 VXLAN（数据中心综合实验的 VIP 探针场景暴露）。同时 M-LAG 组网的 DSW 侧也应 `stp disable`：`mlag domain` 的共享系统 MAC 使两台桥 ID 相同、STP 选举平局，peer-link 两侧全 DESI 转发会形成广播风暴，淹没交换机自身发起的 ARP。
 
 **拓扑升级原则**：判分新增项只用于表达新增的学习点（如“Underlay 贯通”“过滤传导到下游”），不改引擎既有判分语义；任务文案必须与模拟器的 CLI 行为一致（VRP 接口 `quit` 落回系统视图、静态路由用前缀长度格式）。
 

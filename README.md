@@ -148,10 +148,10 @@
 - **堆叠/IRF/CSS**：`stack domain` + `stack member` + `stack priority`；同 domain 成员间链路视为内部 fabric，不参与 STP；一台逻辑设备跨成员二层转发，`display stack` 显示 Master/成员。
 - **M-LAG**：`mlag domain` + 接口 `mlag peer-link`；两台交换机共享系统 MAC（跨设备 LACP 呈现同一对端），peer-link 作为内部链路并做水平分割，接入交换机可 LACP 双归两台成员，双链路同时转发。
 - **F5 LTM**：新增 LoadBalancer 设备，`ltm pool NAME member IP PORT` 与 `ltm virtual NAME vip IP PORT pool NAME`；TCP 连接按轮询选择池成员，目的地址改为成员、回程源地址改回 VIP；`show/display ltm` 显示虚拟服务器/池/会话。
-- **实验十五「VXLAN 数据中心跨 DC 二层互通」**、**实验十六「堆叠/IRF」**、**实验十七「M-LAG」**、**实验十八「EVPN 控制面」**、**实验十九「F5 LTM」**、**实验二十「MUX VLAN 与端口隔离」**、**实验二十一「OSPFv3」**、**实验二十二「SRv6 BE」**。
-- 简化边界见 ADR D29/D30/D31（静态/简化 EVPN Type-3、无真实 BGP EVPN 属性/RT、堆叠/M-LAG 为共享 MAC+fabric、LTM 无健康检查/持久化/SSL 卸载）。
+- **实验十五「VXLAN 数据中心跨 DC 二层互通」**、**实验十六「堆叠/IRF」**、**实验十七「M-LAG」**、**实验十八「EVPN 控制面」**、**实验十九「F5 LTM」**、**实验二十「MUX VLAN 与端口隔离」**、**实验二十一「OSPFv3」**、**实验二十二「SRv6 BE」**、**实验二十三「数据中心综合（M-LAG + VXLAN + F5）」**（SW1 LACP 双归 M-LAG 对 → SPINE Underlay → VXLAN 跨 DC → F5 VIP，10 台 11 链，判分 7 项）。
+- 简化边界见 ADR D29/D30/D31/D33（静态/简化 EVPN Type-3、无真实 BGP EVPN 属性/RT、堆叠/M-LAG 为共享 MAC+fabric、LTM 无健康检查/持久化/SSL 卸载；D33 为多节点组网的封装帧 Underlay 转发与 TCP over VXLAN）。
 
-**已验证**：139 个 Rust 测试全绿；实验十五 3/3、实验十六 3/3、实验十七 4/4、实验十八 3/3、实验十九 3/3、实验二十 5/5、实验二十一 3/3、实验二十二 3/3。
+**已验证**：139 个 Rust 测试全绿；实验十五 4/4、实验十六 3/3、实验十七 4/4、实验十八 3/3、实验十九 3/3、实验二十 5/5、实验二十一 4/4、实验二十二 4/4、实验二十三 7/7（实验十五/二十一/二十二已升级多节点组网，判分项随之增加）。
 
 ### M9 补充（同 VLAN 隔离 / OSPFv3 / SRv6）
 
