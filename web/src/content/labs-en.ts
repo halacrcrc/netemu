@@ -366,4 +366,29 @@ export const LABS_EN: Record<string, LabEn> = {
     ],
   },
 
+  'dc-comprehensive': {
+    title: 'Lab 23 · Data Center Comprehensive (M-LAG + VXLAN + F5)',
+    brief:
+      'A Spine-Leaf style data center tying M8 together: access switch SW1 dual-homes over LACP to the DSW1/DSW2 M-LAG pair, both M-LAG members act as VTEPs whose VXLAN crosses a SPINE router (IPv4 underlay) to reach DSW3 on the server side, and F5 LTM fronts the real servers with a VIP. One TCP connection from an app server to the VIP crosses M-LAG dual-homing, VXLAN encapsulation, underlay routing, and LTM translation.',
+    tasks: [
+      'Access: SW1 vlan batch 10 -> stp disable (M-LAG dual-homing does not rely on STP); app ports access VLAN10',
+      'SW1 dual-homing: interface eth-trunk 1 -> mode lacp-static -> G0/0/2 (to DSW1) and G0/0/3 (to DSW2) join eth-trunk 1, both trunk allow-pass vlan 10',
+      'M-LAG pair: DSW1/DSW2 vlan batch 10 -> mlag domain 1 -> interconnect (peer-link) trunk allow-pass vlan 10 and mlag peer-link',
+      'M-LAG uplinks: eth-trunk 1 on DSW1/DSW2 (G0/0/1) trunk allow-pass vlan 10, both links forwarding',
+      'Underlay: DSW1 vlan 100 -> vlanif100 10.0.0.1/24 to SPINE G0/0/0 10.0.0.2/24; DSW2 vlan 100 -> vlanif100 10.0.1.2/24 to SPINE G0/0/1 10.0.1.1/24; DSW3 vlan 100 -> vlanif100 10.0.2.2/24 to SPINE G0/0/2 10.0.2.1/24 (all undo shutdown)',
+      'Underlay routes: DSW1 ip route-static 10.0.1.0 24 and 10.0.2.0 24 both via 10.0.0.2; DSW2 both via 10.0.1.1; DSW3 both via 10.0.2.1. SPINE has only three connected segments — zero extra config',
+      'VXLAN: DSW1 vxlan local 10.0.0.1 -> vni 10000 vlan 10 -> vxlan peer 10.0.2.2; DSW2 local 10.0.1.2 -> peer 10.0.2.2; DSW3 local 10.0.2.2 -> peer 10.0.0.1 -> peer 10.0.1.2 (DSW3 needs two peers)',
+      'Application delivery: F5 G0/0/0 192.168.10.254/24 to DSW3 (access VLAN10) -> G0/0/1 10.10.1.1/24 to SRV1 -> G0/0/2 10.10.2.1/24 to SRV2; ltm pool WEB member 10.10.1.10 80 and 10.10.2.10 80; ltm virtual VS vip 192.168.10.100 80 pool WEB',
+      'Verify: from DSW1 ping 10.0.2.2 should succeed (underlay across the SPINE); APP1 tcp 192.168.10.100 80 twice in a row should both succeed (F5 round-robin); display ltm should show two sessions',
+    ],
+    checkLabels: [
+      'DSW1 has M-LAG domain 1',
+      'SW1 LACP selected both dual-home members',
+      'DSW1 maps VNI 10000 to VLAN10',
+      'DSW3 maps VNI 10000 to VLAN10',
+      'Underlay reachable across the SPINE (DSW1 -> DSW3 VTEP address)',
+      'F5 virtual server VS = 192.168.10.100:80',
+      'APP1 -> VIP:80 delivered across the full chain',
+    ],
+  },
 };

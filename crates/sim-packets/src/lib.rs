@@ -360,6 +360,7 @@ pub struct EvpnPacket {
 pub enum VxlanPayload {
     Ipv4(Ipv4Packet),
     Arp(ArpPacket),
+    Tcp(TcpPacket),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

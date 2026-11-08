@@ -1487,7 +1487,83 @@ export const lab22: LabDef = {
   },
 };
 
-export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12, lab13, lab14, lab15, lab16, lab17, lab18, lab19, lab20, lab21, lab22];
+// ---------- 实验二十三：数据中心综合（M-LAG 双归 + VXLAN Underlay + F5 应用交付） ----------
+
+export const lab23: LabDef = {
+  id: 'dc-comprehensive',
+  title: '实验二十三 · 数据中心综合（M-LAG + VXLAN + F5）',
+  brief:
+    '把 M8 的数据中心技术串成一个 Spine-Leaf 组网：接入交换机 SW1 用 LACP 双归到 DSW1/DSW2 组成的 M-LAG 对，两台 M-LAG 成员作为 VTEP 与另一侧的 DSW3 跨过 SPINE 路由器（IPv4 Underlay）建 VXLAN 隧道，业务 VLAN10 二层延伸到服务器侧；F5 LTM 对外提供 VIP，把应用流量轮询交付给两台真实服务器。一台应用服务器到 VIP 的 TCP 连接要穿过 M-LAG 双归、VXLAN 封装、Underlay 路由与 LTM 转换四层机制。',
+  tasks: [
+    '接入层：SW1 vlan batch 10 → stp disable（M-LAG 双归不依赖 STP）；APP1/APP2 的接入口 access VLAN10',
+    'SW1 双归：interface eth-trunk 1 → mode lacp-static → G0/0/2（接 DSW1）、G0/0/3（接 DSW2）分别 eth-trunk 1，两口 trunk allow-pass vlan 10',
+    'M-LAG 对：DSW1/DSW2 vlan batch 10 → mlag domain 1 → 互连接口（peer-link）trunk allow-pass vlan 10 并 mlag peer-link',
+    'M-LAG 对上联：DSW1/DSW2 的 eth-trunk 1（G0/0/1）trunk allow-pass vlan 10，双归口同时转发',
+    'Underlay：DSW1 vlan 100 → vlanif100 10.0.0.1/24 接 SPINE G0/0/0 10.0.0.2/24；DSW2 vlan 100 → vlanif100 10.0.1.2/24 接 SPINE G0/0/1 10.0.1.1/24；DSW3 vlan 100 → vlanif100 10.0.2.2/24 接 SPINE G0/0/2 10.0.2.1/24（均 undo shutdown）',
+    'Underlay 路由：DSW1 ip route-static 10.0.1.0 24 与 10.0.2.0 24 均走 10.0.0.2；DSW2 两条均走 10.0.1.1；DSW3 两条均走 10.0.2.1。SPINE 只有三条直连——零额外配置',
+    'VXLAN：DSW1 vxlan local 10.0.0.1 → vni 10000 vlan 10 → vxlan peer 10.0.2.2；DSW2 local 10.0.1.2 → peer 10.0.2.2；DSW3 local 10.0.2.2 → peer 10.0.0.1 → peer 10.0.1.2（DSW3 需要 peers 双条）',
+    '应用交付：F5 G0/0/0 192.168.10.254/24 接 DSW3（access VLAN10）→ G0/0/1 10.10.1.1/24 接 SRV1 → G0/0/2 10.10.2.1/24 接 SRV2；ltm pool WEB member 10.10.1.10 80 与 10.10.2.10 80；ltm virtual VS vip 192.168.10.100 80 pool WEB',
+    '验证：从 DSW1 ping 10.0.2.2 应通（Underlay 跨 SPINE）；APP1 tcp 192.168.10.100 80 连续两次都成功（F5 轮询到不同成员）；display ltm 应看到两条会话',
+  ],
+  checks: [
+    { label: 'DSW1 配置 M-LAG domain 1', kind: { type: 'mlagDomain', dev: 'DSW1', domain: 1 } },
+    { label: 'SW1 双归 LACP 选中 2 个成员', kind: { type: 'lagSelected', dev: 'SW1', group: 1, count: 2 } },
+    { label: 'DSW1 配置 VNI 10000 ↔ VLAN10', kind: { type: 'vxlanVni', dev: 'DSW1', vlan: 10, vni: 10000 } },
+    { label: 'DSW3 配置 VNI 10000 ↔ VLAN10', kind: { type: 'vxlanVni', dev: 'DSW3', vlan: 10, vni: 10000 } },
+    { label: 'Underlay 跨 SPINE 贯通（DSW1 → DSW3 的 VTEP 地址）', kind: { type: 'ping', from: 'DSW1', to: '10.0.2.2' } },
+    { label: 'F5 虚拟服务器 VS = 192.168.10.100:80', kind: { type: 'ltmVirtual', dev: 'F5', name: 'VS', vip: '192.168.10.100', port: 80 } },
+    { label: 'APP1 → VIP:80 经全链路应用交付成功', kind: { type: 'tcpProbe', from: 'APP1', to: '192.168.10.100', port: 80 } },
+  ],
+  build: (sim) => {
+    const app1 = sim.add_device('Host', 'Ios');
+    const app2 = sim.add_device('Host', 'Ios');
+    const sw1 = sim.add_device('Switch', 'Vrp');
+    const d1 = sim.add_device('Switch', 'Vrp');
+    const d2 = sim.add_device('Switch', 'Vrp');
+    const spine = sim.add_device('Router', 'Vrp');
+    const d3 = sim.add_device('Switch', 'Vrp');
+    const f5 = sim.add_device('LoadBalancer', 'Vrp');
+    const srv1 = sim.add_device('Host', 'Ios');
+    const srv2 = sim.add_device('Host', 'Ios');
+    sim.rename_device(app1, 'APP1');
+    sim.rename_device(app2, 'APP2');
+    sim.rename_device(sw1, 'SW1');
+    sim.rename_device(d1, 'DSW1');
+    sim.rename_device(d2, 'DSW2');
+    sim.rename_device(spine, 'SPINE');
+    sim.rename_device(d3, 'DSW3');
+    sim.rename_device(f5, 'F5');
+    sim.rename_device(srv1, 'SRV1');
+    sim.rename_device(srv2, 'SRV2');
+    sim.add_link(app1, sw1); // SW1 p0
+    sim.add_link(app2, sw1); // SW1 p1
+    sim.add_link(sw1, d1); // SW1 p2 / DSW1 p0
+    sim.add_link(sw1, d2); // SW1 p3 / DSW2 p0
+    sim.add_link(d1, d2); // DSW1 p1 / DSW2 p1 peer-link
+    sim.add_link(d1, spine); // DSW1 p2 / SPINE p0
+    sim.add_link(d2, spine); // DSW2 p2 / SPINE p1
+    sim.add_link(spine, d3); // SPINE p2 / DSW3 p0
+    sim.add_link(d3, f5); // DSW3 p1 / F5 p0
+    sim.add_link(f5, srv1); // F5 p1
+    sim.add_link(f5, srv2); // F5 p2
+    sim.set_host_config(app1, '192.168.10.11', 24, '');
+    sim.set_host_config(app2, '192.168.10.12', 24, '');
+    sim.set_host_config(srv1, '10.10.1.10', 24, '10.10.1.1');
+    sim.set_host_config(srv2, '10.10.2.10', 24, '10.10.2.1');
+    setPosition(app1, { x: 50, y: 40 });
+    setPosition(app2, { x: 50, y: 200 });
+    setPosition(sw1, { x: 220, y: 120 });
+    setPosition(d1, { x: 420, y: 40 });
+    setPosition(d2, { x: 420, y: 200 });
+    setPosition(spine, { x: 620, y: 120 });
+    setPosition(d3, { x: 810, y: 120 });
+    setPosition(f5, { x: 990, y: 120 });
+    setPosition(srv1, { x: 1160, y: 60 });
+    setPosition(srv2, { x: 1160, y: 180 });
+  },
+};
+
+export const LABS: LabDef[] = [lab1, lab2, lab3, lab4, lab5, lab6, lab7, lab8, lab9, lab10, lab11, lab12, lab13, lab14, lab15, lab16, lab17, lab18, lab19, lab20, lab21, lab22, lab23];
 
 // 合并英文文案
 for (const l of LABS) {

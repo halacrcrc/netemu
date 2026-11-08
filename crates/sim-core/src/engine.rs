@@ -2907,6 +2907,7 @@ impl Engine {
         let payload = match frame.payload {
             L3::Ipv4(p) => VxlanPayload::Ipv4(p),
             L3::Arp(a) => VxlanPayload::Arp(a),
+            L3::Tcp(t) => VxlanPayload::Tcp(t),
             _ => return,
         };
         for peer in peers {
@@ -3016,6 +3017,7 @@ impl Engine {
         let (ethertype, payload) = match vx.payload {
             VxlanPayload::Ipv4(p) => (ETHERTYPE_IPV4, L3::Ipv4(p)),
             VxlanPayload::Arp(a) => (ETHERTYPE_ARP, L3::Arp(a)),
+            VxlanPayload::Tcp(t) => (ETHERTYPE_IPV4, L3::Tcp(t)),
         };
         let inner = EthernetFrame {
             dst: vx.inner_dst,
