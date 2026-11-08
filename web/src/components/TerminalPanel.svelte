@@ -174,7 +174,7 @@
   function mountEditor(container: HTMLDivElement, dev: number): Editor {
     const term = new Terminal({
       fontSize: 13,
-      fontFamily: "Consolas, 'Cascadia Mono', monospace",
+      fontFamily: "'Maple Mono', Consolas, 'Cascadia Mono', monospace",
       theme: TERM_THEMES[theme.name],
       cursorBlink: true,
       scrollback: 5000,

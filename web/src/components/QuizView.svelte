@@ -252,7 +252,7 @@
   }
   .pos {
     margin-left: auto;
-    font-family: Consolas, monospace;
+    font-family: 'Maple Mono', Consolas, monospace;
   }
   .q-text {
     padding: 8px 12px 4px;
@@ -277,7 +277,7 @@
     line-height: 1.6;
   }
   .opt .key {
-    font-family: Consolas, monospace;
+    font-family: 'Maple Mono', Consolas, monospace;
     color: var(--text-dim);
     font-weight: 700;
   }

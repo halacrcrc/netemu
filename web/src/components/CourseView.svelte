@@ -160,7 +160,7 @@
     margin-top: 0;
   }
   .level-badge {
-    font-family: Consolas, monospace;
+    font-family: 'Maple Mono', Consolas, monospace;
     font-size: 11px;
     padding: 1px 5px;
     border: 1px solid var(--border-strong);
@@ -169,7 +169,7 @@
   }
   .level-count {
     margin-left: auto;
-    font-family: Consolas, monospace;
+    font-family: 'Maple Mono', Consolas, monospace;
     opacity: 0.7;
   }
   .lesson {
@@ -183,7 +183,7 @@
     color: var(--accent);
   }
   .lesson .no {
-    font-family: Consolas, monospace;
+    font-family: 'Maple Mono', Consolas, monospace;
     color: var(--text-dim);
     font-size: 12px;
   }
