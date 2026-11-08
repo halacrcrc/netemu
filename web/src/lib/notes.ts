@@ -81,7 +81,16 @@ export function collectBackup(): Record<string, unknown> {
 /** 应用恢复的数据（笔记直接覆盖；题库/实验进度由调用方决定策略后写回）。 */
 export function applyBackup(data: Record<string, unknown>) {
   if (Array.isArray(data.notes)) {
-    saveNotes(data.notes as Note[]);
+    // 远端数据（Gist 可被他人篡改）：逐条校验形状，防畸形记录让渲染层 $derived 抛错
+    const notes = (data.notes as unknown[]).filter(
+      (n): n is Note =>
+        !!n &&
+        typeof n === 'object' &&
+        typeof (n as Note).id === 'string' &&
+        typeof (n as Note).title === 'string' &&
+        typeof (n as Note).body === 'string'
+    );
+    saveNotes(notes);
   }
   if (data.quiz && typeof data.quiz === 'object') {
     // 按答题次数合并（次数多者保留）
@@ -90,6 +99,9 @@ export function applyBackup(data: Record<string, unknown>) {
       const remote = data.quiz as { records: Record<string, QuizRec> };
       const merged: Record<string, QuizRec> = { ...local.records };
       for (const [qid, r] of Object.entries(remote.records ?? {})) {
+        // 跳过危险键，避免改写对象原型
+        if (qid === '__proto__' || qid === 'constructor' || qid === 'prototype') continue;
+        if (!r || typeof r !== 'object') continue;
         const cur = merged[qid];
         if (!cur || r.wrong + r.right > cur.wrong + cur.right) {
           merged[qid] = r;
@@ -106,9 +118,14 @@ export function applyBackup(data: Record<string, unknown>) {
   if (data.labs && typeof data.labs === 'object') {
     try {
       const local = JSON.parse(localStorage.getItem('netemu.labs.v1') ?? '{}');
+      const remoteLabs: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(data.labs as object)) {
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+        remoteLabs[k] = v;
+      }
       localStorage.setItem(
         'netemu.labs.v1',
-        JSON.stringify({ ...local, ...(data.labs as object) })
+        JSON.stringify({ ...local, ...remoteLabs })
       );
     } catch {
       /* 忽略 */

@@ -839,5 +839,9 @@ fn ping_ok(eng: &mut Engine, from: DevId, to: Ipv4Addr) -> bool {
 /// 解析 "192.168.2.0/24" 形式的网段。
 pub fn parse_net(s: &str) -> Option<(Ipv4Addr, u8)> {
     let (addr, len) = s.split_once('/')?;
-    Some((ipv4_from_str(addr)?, len.parse().ok()?))
+    let len: u8 = len.parse().ok()?;
+    if len > 32 {
+        return None;
+    }
+    Some((ipv4_from_str(addr)?, len))
 }

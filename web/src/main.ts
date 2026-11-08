@@ -5,7 +5,7 @@ import { mount } from 'svelte';
 import App from './App.svelte';
 import { loadSim, dumpSummary } from './lib/sim';
 import { app, refreshFrom } from './lib/store.svelte';
-import { currentWorkspace, loadWorkspace, markDirty, type Workspace } from './lib/persistence';
+import { currentWorkspace, loadWorkspace, markDirty, normalizeWorkspace, type Workspace } from './lib/persistence';
 import { buildShareUrl, decodeWorkspace } from './lib/share';
 
 function applyEditor(ws: Workspace) {
@@ -36,7 +36,7 @@ async function boot() {
   const hash = location.hash;
   if (hash.startsWith('#topo=')) {
     try {
-      const ws = await decodeWorkspace(hash.slice('#topo='.length));
+      const ws = normalizeWorkspace(await decodeWorkspace(hash.slice('#topo='.length)));
       sim.load(JSON.stringify(ws.net));
       applyEditor(ws);
       loaded = true;
@@ -79,4 +79,9 @@ async function boot() {
   mount(App, { target: document.getElementById('app')! });
 }
 
-void boot();
+void boot().catch((e) => {
+  // 兜底：任何启动失败都给出可见错误，而不是永久白屏
+  console.error('启动失败', e);
+  const el = document.getElementById('app');
+  if (el) el.textContent = '应用启动失败，请刷新页面；若反复出现，请清除本站 localStorage 数据。';
+});

@@ -171,10 +171,12 @@ pub fn ipv4_from_str(s: &str) -> Option<Ipv4Addr> {
 }
 
 pub fn mask_from_prefix(len: u8) -> Ipv4Addr {
+    // 外部入口（导入文件/wasm 传参）可能传入 >32，clamp 防止减法/位移越界
+    let len = len.min(32) as u32;
     if len == 0 {
         0
     } else {
-        u32::MAX << (32 - len as u32)
+        u32::MAX << (32 - len)
     }
 }
 
@@ -558,8 +560,10 @@ pub fn ipv6_net_addr(addr: &Ipv6Addr, len: u8) -> Ipv6Addr {
 
 /// IPv6 前缀比较（按位）。
 pub fn ipv6_in_prefix(addr: &Ipv6Addr, net: &Ipv6Addr, len: u8) -> bool {
-    let full = (len as usize) / 8;
-    let rem = (len as usize) % 8;
+    // len>128 会对 [u8;16] 越界（导入/wasm 入口可能传入），clamp 防御
+    let len = (len as usize).min(128);
+    let full = len / 8;
+    let rem = len % 8;
     if addr[..full] != net[..full] {
         return false;
     }

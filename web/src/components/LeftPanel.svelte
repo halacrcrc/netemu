@@ -448,7 +448,7 @@
         <div class="hint">{labBrief(activeLab)}</div>
         <ol class="task">
           {#each labTasks(activeLab) as task}
-            <li>{@html task}</li>
+            <li>{task}</li>
           {/each}
         </ol>
         <button

@@ -2466,7 +2466,8 @@ impl Engine {
             } else {
                 let base = pool.0;
                 let host = 2 + rs.sslvpn_clients.len() as u32;
-                if host >= (1u32 << (32 - pool.1)) - 1 {
+                // pool.1 过小（如 /0）会使位移越界，clamp 到合理池范围
+                if host >= (1u32 << (32 - pool.1.clamp(1, 24))) - 1 {
                     return Err("SSL VPN pool exhausted".into());
                 }
                 let v = base + host;

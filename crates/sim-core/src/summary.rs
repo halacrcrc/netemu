@@ -371,6 +371,7 @@ pub struct LinkSummary {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NetSummary {
     pub devices: Vec<DevSummary>,
+    #[serde(default)]
     pub links: Vec<LinkSummary>,
 }
 
@@ -844,7 +845,7 @@ impl Net {
                     p.admin_up = ps.admin_up;
                     if let Some(txt) = &ps.ip {
                         p.ip = Some(ipv4_from_str(txt).ok_or("非法 IP")?);
-                        p.prefix = ps.prefix;
+                        p.prefix = ps.prefix.min(32);
                     }
                     p.mode = ps.mode;
                     p.pvid = ps.pvid;
@@ -852,7 +853,7 @@ impl Net {
                     p.acl_in = ps.acl_in;
                     p.acl_out = ps.acl_out;
                     p.lag = ps.lag;
-                    p.prefix6 = ps.prefix6;
+                    p.prefix6 = ps.prefix6.min(128);
                     p.dhcp_trust = ps.dhcp_trust;
                     p.port_security = ps.port_security;
                     p.broadcast_limit_pps = ps.broadcast_limit_pps;
@@ -925,7 +926,7 @@ impl Net {
                         ) {
                             rs.static_routes6.push(Route6 {
                                 dst,
-                                len: r.len,
+                                len: r.len.min(128),
                                 nexthop: nh,
                                 src: RouteSrc::Static,
                             });
@@ -951,7 +952,7 @@ impl Net {
                         .filter_map(|r| {
                             Some(Srv6Route {
                                 dst: sim_packets::ipv6_from_str(&r.dst)?,
-                                len: r.len,
+                                len: r.len.min(128),
                                 sid: sim_packets::ipv6_from_str(&r.sid)?,
                             })
                         })
@@ -960,7 +961,8 @@ impl Net {
                         rs.mpls_lsps.push(StaticLsp {
                             name: l.name.clone(),
                             net: l.net.as_ref().and_then(|n| {
-                                l.len.map(|len| (ipv4_from_str(n).unwrap_or(0), len))
+                                l.len
+                                    .map(|len| (ipv4_from_str(n).unwrap_or(0), len.min(32)))
                             }),
                             in_label: l.in_label,
                             out_label: l.out_label,
@@ -973,7 +975,7 @@ impl Net {
                         rs.dhcp_pools.push(DhcpPool {
                             name: pool.name.clone(),
                             network: ipv4_from_str(&pool.network).unwrap_or(0),
-                            prefix: pool.prefix,
+                            prefix: pool.prefix.min(32),
                             gateway: ipv4_from_str(&pool.gateway).unwrap_or(0),
                             dns: ipv4_from_str(&pool.dns).unwrap_or(0),
                         });
@@ -1012,7 +1014,7 @@ impl Net {
                         }
                         for (net, len) in &ds.bgp_networks {
                             if let Some(net) = ipv4_from_str(net) {
-                                bgp.networks.push((net, *len));
+                                bgp.networks.push((net, (*len).min(32)));
                             }
                         }
                         for (ip, import, name) in &ds.bgp_peer_policies {
@@ -1167,7 +1169,7 @@ impl Net {
                             sv.vlan,
                             SviState {
                                 ip,
-                                prefix: sv.prefix,
+                                prefix: sv.prefix.min(32),
                                 admin_up: sv.admin_up,
                             },
                         );
@@ -1218,6 +1220,15 @@ impl Net {
             if self.device(ls.a.0).is_none() || self.device(ls.b.0).is_none() {
                 return Err(format!("链路 {} 引用了不存在的设备", ls.id));
             }
+            // 端口索引来自外部文件/分享链接，必须校验，否则 ports[idx] 直接 panic
+            for (dev, idx) in [ls.a, ls.b] {
+                if self.device(dev).unwrap().port(idx).is_none() {
+                    return Err(format!(
+                        "链路 {} 引用了不存在的端口：设备 {} 端口 {}",
+                        ls.id, dev, idx
+                    ));
+                }
+            }
             let id = self.next_link;
             self.next_link += 1;
             self.links.push(Link {
@@ -1242,7 +1253,7 @@ impl Net {
         if let Some(d) = self.device_mut(dev) {
             if let Some(p) = d.port_mut(port) {
                 p.ip = ip;
-                p.prefix = prefix;
+                p.prefix = prefix.min(32);
             }
         }
     }
@@ -1257,7 +1268,7 @@ impl Net {
         if let Some(d) = self.device_mut(dev) {
             if let Some(p) = d.port_mut(port) {
                 p.ipv6 = ip;
-                p.prefix6 = prefix;
+                p.prefix6 = prefix.min(128);
             }
         }
     }
@@ -1284,7 +1295,7 @@ impl Net {
         }
         rs.static_routes6.push(Route6 {
             dst,
-            len,
+            len: len.min(128),
             nexthop,
             src: RouteSrc::Static,
         });
@@ -1303,7 +1314,7 @@ impl Net {
         };
         if let Some(p) = d.port_mut(0) {
             p.ipv6 = ip;
-            p.prefix6 = prefix;
+            p.prefix6 = prefix.min(128);
         }
         if let DeviceState::Host(h) = &mut d.state {
             h.gw6 = gw;
@@ -1468,6 +1479,7 @@ impl Net {
             return false;
         };
         sw.ensure_vlan(vlan);
+        let prefix = prefix.min(32);
         match (sw.svi.get_mut(&vlan), ip) {
             (Some(s), Some(ip)) => {
                 s.ip = ip;
@@ -1540,7 +1552,7 @@ impl Net {
         };
         if let Some(p) = d.port_mut(0) {
             p.ip = ip;
-            p.prefix = prefix;
+            p.prefix = prefix.min(32);
         }
         if let DeviceState::Host(h) = &mut d.state {
             h.gw = gw;
@@ -1579,7 +1591,8 @@ fn static_summaries(routes: &[Route]) -> Vec<StaticRouteSummary> {
 fn static_from(s: &StaticRouteSummary) -> Route {
     Route {
         dst: ipv4_from_str(&s.dst).unwrap_or(0),
-        len: s.len,
+        // len 来自外部文件，clamp 到合法范围防下游位移/掩码计算越界
+        len: s.len.min(32),
         nexthop: ipv4_from_str(&s.nexthop).unwrap_or(0),
         vlan: None,
         port: 0,

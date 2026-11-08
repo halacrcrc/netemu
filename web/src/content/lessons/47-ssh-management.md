@@ -1,6 +1,7 @@
 ---
 title: SSH 远程管理：VTY、本地用户与传输
 order: 47
+level: IA
 topic: mgmt
 lab: mgmt-ssh
 ---
@@ -22,6 +23,8 @@ SSH 需要设备生成加密密钥。密钥没生成时，用户名密码都对�
 2. 检查 VTY 的 transport / protocol inbound   ← 放行 SSH 了吗？
 3. 检查本地用户是否存在                        ← 有凭据可验证吗？
 ```
+
+> 模拟器注记：`show ip ssh` / `display ssh server status` 暂未实现（SSH 服务默认开启、无需生成密钥）。在模拟器里验证前两步可以直接发起 `ssh` 登录：连接被拒查 VTY 传输，`Permission denied` 查用户与口令。真实设备上密钥未生成（IOS 缺 `crypto key generate rsa`）是"配了用户仍登不上"的头号原因。
 
 ## SSH 会话的行为
 

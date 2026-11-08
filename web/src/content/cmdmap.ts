@@ -290,7 +290,4 @@ export const CMDMAP: CmdRow[] = [
   { feature: '限制登录协议为 SSH', topic: 'mgmt', ios: 'transport input ssh', vrp: 'protocol inbound ssh', comware: 'protocol inbound ssh', mode: 'Line' },
   { feature: '创建本地用户', topic: 'mgmt', ios: 'username admin secret cisco123', vrp: 'local-user admin', comware: 'local-user admin', mode: 'Config' },
   { feature: 'SSH 登录对端', topic: 'mgmt', ios: 'ssh 10.0.0.2', vrp: 'ssh 10.0.0.2', comware: 'ssh 10.0.0.2', mode: 'Exec' },
-  // ---------- 链路聚合 ----------
-  { feature: '成员加入聚合组', topic: 'lag', ios: 'channel-group 1 mode active', vrp: 'eth-trunk 1', comware: 'port link-aggregation group 1', mode: 'If' },
-  { feature: '查看聚合状态', topic: 'lag', ios: 'show etherchannel summary', vrp: 'display eth-trunk', comware: 'display link-aggregation brief', mode: 'Exec' },
 ];

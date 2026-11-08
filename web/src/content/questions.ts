@@ -2225,10 +2225,10 @@ const QUESTIONS_BASE: Question[] = [
   {
     id: 'lg6',
     topic: 'lag',
-    q: 'LACPDU 的默认发送周期是？',
+    q: 'IEEE 802.1AX 中，LACPDU 默认（slow 模式）的发送周期是？',
     options: ['每 1 秒', '每 2 秒', '每 30 秒', '只在链路故障时发送'],
-    answer: 0,
-    explain: 'LACP 成员口每秒发送 LACPDU 协商；超时未收到对端报文（约 3 倍周期）则成员退出聚合。',
+    answer: 2,
+    explain: '默认 slow 模式每 30 秒发送一个 LACPDU，约 90 秒（3 倍周期）未收到对端报文则成员退出聚合；fast 模式为每 1 秒。本模拟器为加快教学收敛采用 fast 速率。',
   },
   {
     id: 'lg7',

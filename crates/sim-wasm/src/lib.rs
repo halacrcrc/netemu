@@ -281,14 +281,15 @@ impl Sim {
     pub fn load(&mut self, json: &str) -> Result<(), JsValue> {
         let summary: NetSummary = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("invalid topology: {}", e)))?;
-        self.eng = Engine::new(Net::new());
-        self.sessions.clear();
-        self.kind_counts.clear();
-        self.eng
-            .net
+        // 先在临时引擎上构建，全部校验通过才替换——失败时保留当前拓扑
+        let mut eng = Engine::new(Net::new());
+        eng.net
             .apply_summary(&summary)
             .map_err(|e| JsValue::from_str(&e))?;
-        self.eng.after_load();
+        eng.after_load();
+        self.eng = eng;
+        self.sessions.clear();
+        self.kind_counts.clear();
         // 重建自动命名计数（从现有名字推断）
         for d in &self.eng.net.devices {
             let base = match d.kind {
