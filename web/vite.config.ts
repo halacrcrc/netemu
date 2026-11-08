@@ -33,7 +33,8 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,wasm,png,svg,ico,woff2}'],
+        // 字体切片不进预缓存：在线按需加载文楷，离线回退系统雅黑
+        globPatterns: ['**/*.{js,css,html,wasm,png,svg,ico}'],
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         navigateFallback: 'index.html',
         cleanupOutdatedCaches: true,

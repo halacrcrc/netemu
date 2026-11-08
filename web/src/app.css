@@ -5,6 +5,9 @@
    所有组件只允许消费以下 CSS 变量，不允许硬编码颜色。
    ============================================================ */
 
+/* 霞鹜文楷屏幕版（GB 常用字子集，97 切片按需加载；不进 PWA 预缓存，离线回退雅黑） */
+@import 'lxgw-wenkai-screen-webfont/lxgwwenkaigbscreen.css';
+
 :root,
 :root[data-theme='dark'] {
   color-scheme: dark;
@@ -198,8 +201,9 @@ select:focus {
 
 /* ---------- Markdown 阅读区（课程 / 笔记共用，由自研渲染器注入） ---------- */
 .md {
-  font-size: 15.5px;
-  line-height: 1.85;
+  font-family: 'LXGW WenKai Screen', 'Kaiti SC', 'KaiTi', 'Microsoft YaHei', serif;
+  font-size: 16px;
+  line-height: 1.9;
   color: var(--text);
   overflow-wrap: break-word;
 }

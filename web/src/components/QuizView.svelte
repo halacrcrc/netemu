@@ -256,9 +256,10 @@
   }
   .q-text {
     padding: 8px 12px 4px;
-    font-size: 16.5px;
+    font-family: 'LXGW WenKai Screen', 'Kaiti SC', 'KaiTi', 'Microsoft YaHei', serif;
+    font-size: 17px;
     font-weight: 600;
-    line-height: 1.7;
+    line-height: 1.75;
   }
   .options {
     display: flex;
@@ -305,8 +306,9 @@
   }
   .explain p {
     margin: 0;
-    color: var(--text-dim);
-    line-height: 1.75;
+    font-family: 'LXGW WenKai Screen', 'Kaiti SC', 'KaiTi', 'Microsoft YaHei', serif;
+    font-size: 14.5px;
+    line-height: 1.8;
   }
   .explain button {
     align-self: flex-start;
