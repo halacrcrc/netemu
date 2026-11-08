@@ -662,18 +662,20 @@ export const lab7: LabDef = {
   id: 'bgp-route-policy',
   title: '实验七 · BGP 路由策略（route-policy）',
   brief:
-    'R1 通过 BGP 向 R2 宣告两个网段，其中 172.16.9.0/24 是受控业务。用 route-policy + ACL 在 R2 的入方向只过滤这一个前缀，其余路由照常放行。',
+    'R1—R2—R3 组成三个自治系统链式互联（AS65001—AS65002—AS65003）。R1 宣告两个网段，其中 172.16.9.0/24 是受控业务：用 route-policy + ACL 在 R2 的入方向只过滤这一个前缀。观察过滤效果如何沿 BGP 传递——R3 同样学不到受控网段，策略影响的是整条下游。',
   tasks: [
     'R1：G0/0/0 192.168.1.1/24、G0/0/1 10.0.0.1/24、G0/0/2 172.16.9.1/24，全部 undo shutdown',
-    'R2：G0/0/0 10.0.0.2/24、G0/0/1 192.168.2.1/24，全部 undo shutdown',
+    'R2：G0/0/0 10.0.0.2/24、G0/0/1 10.0.1.1/24，全部 undo shutdown（中转 AS，没有业务网段）',
+    'R3：G0/0/0 10.0.1.2/24、G0/0/1 192.168.3.1/24，全部 undo shutdown',
     'R1：bgp 65001 → peer 10.0.0.2 as-number 65002 → network 192.168.1.0 255.255.255.0 → network 172.16.9.0 255.255.255.0',
-    'R2：bgp 65002 → peer 10.0.0.1 as-number 65001 → network 192.168.2.0 255.255.255.0 → quit',
+    'R2：bgp 65002 → peer 10.0.0.1 as-number 65001 → peer 10.0.1.2 as-number 65003 → quit',
+    'R3：bgp 65003 → peer 10.0.1.1 as-number 65002 → network 192.168.3.0 255.255.255.0',
     'R2：acl 2000 → rule permit source 172.16.9.0 0.0.0.255 → quit（只匹配受控网段）',
     'R2：route-policy FILTER deny node 10 → if-match acl 2000 → quit',
     'R2：route-policy FILTER permit node 20 → quit',
     'R2：bgp 65002 → peer 10.0.0.1 route-policy FILTER import → quit',
-    'R2：display bgp routing-table —— 应只有 192.168.1.0/24，没有 172.16.9.0/24（IOS：route-map + match ip address + neighbor ... route-map ... in）',
-    'PC2 ping 192.168.1.10 应通；ping 172.16.9.10 应不通（被策略过滤）',
+    'display bgp routing-table：R2 只有 192.168.1.0/24 与 192.168.3.0/24；R3 也学不到 172.16.9.0/24——R2 的过滤沿 BGP 传导到了下游 AS（IOS：route-map + match ip address + neighbor ... route-map ... in）',
+    'PC2 ping 192.168.1.10 应通；ping 172.16.9.10 应不通',
   ],
   checks: [
     {
@@ -685,8 +687,16 @@ export const lab7: LabDef = {
       kind: { type: 'routeAbsent', dev: 'R2', net: '172.16.9.0/24' },
     },
     {
-      label: 'R1 学到 R2 的 192.168.2.0/24（回程路由存在）',
-      kind: { type: 'routeExists', dev: 'R1', net: '192.168.2.0/24' },
+      label: 'R3 学到 192.168.1.0/24（路由跨 AS 传递）',
+      kind: { type: 'routeExists', dev: 'R3', net: '192.168.1.0/24' },
+    },
+    {
+      label: 'R3 也学不到受控网段（过滤传导到下游 AS）',
+      kind: { type: 'routeAbsent', dev: 'R3', net: '172.16.9.0/24' },
+    },
+    {
+      label: 'R1 学到 R3 的 192.168.3.0/24（回程路由传递）',
+      kind: { type: 'routeExists', dev: 'R1', net: '192.168.3.0/24' },
     },
     { label: 'PC2 → PC1（192.168.1.10）连通', kind: { type: 'ping', from: 'PC2', to: '192.168.1.10' } },
     {
@@ -698,25 +708,29 @@ export const lab7: LabDef = {
     const pc1 = sim.add_device('Host', 'Ios');
     const r1 = sim.add_device('Router', 'Vrp');
     const r2 = sim.add_device('Router', 'Vrp');
+    const r3 = sim.add_device('Router', 'Vrp');
     const pc2 = sim.add_device('Host', 'Ios');
     const srv = sim.add_device('Host', 'Ios');
     sim.rename_device(pc1, 'PC1');
     sim.rename_device(r1, 'R1');
     sim.rename_device(r2, 'R2');
+    sim.rename_device(r3, 'R3');
     sim.rename_device(pc2, 'PC2');
     sim.rename_device(srv, 'SRV');
     sim.add_link(pc1, r1); // R1 G0/0/0
     sim.add_link(r1, r2); // R1 G0/0/1 — R2 G0/0/0
-    sim.add_link(r2, pc2); // R2 G0/0/1
+    sim.add_link(r2, r3); // R2 G0/0/1 — R3 G0/0/0
+    sim.add_link(r3, pc2); // R3 G0/0/1
     sim.add_link(r1, srv); // R1 G0/0/2
     sim.set_host_config(pc1, '192.168.1.10', 24, '192.168.1.1');
-    sim.set_host_config(pc2, '192.168.2.10', 24, '192.168.2.1');
+    sim.set_host_config(pc2, '192.168.3.10', 24, '192.168.3.1');
     sim.set_host_config(srv, '172.16.9.10', 24, '172.16.9.1');
     setPosition(pc1, { x: 40, y: 40 });
-    setPosition(r1, { x: 250, y: 110 });
-    setPosition(srv, { x: 250, y: 250 });
-    setPosition(r2, { x: 480, y: 110 });
-    setPosition(pc2, { x: 690, y: 110 });
+    setPosition(r1, { x: 230, y: 110 });
+    setPosition(srv, { x: 230, y: 250 });
+    setPosition(r2, { x: 430, y: 110 });
+    setPosition(r3, { x: 630, y: 110 });
+    setPosition(pc2, { x: 830, y: 110 });
   },
 };
 
@@ -904,39 +918,45 @@ export const lab11: LabDef = {
   id: 'ipsec-site',
   title: '实验十一 · IPsec 站点到站点 VPN',
   brief:
-    '两个分支机构各有一台路由器，通过公网互联。配置 IPsec 隧道把 192.168.1.0/24 与 192.168.2.0/24 的流量封装到 10.0.0.0/30 公网链路上，实现站点私网互通。',
+    '两个分支机构的路由器跨越一台 ISP 路由器组成的公网互联（R1—ISP—R2）。配置 IPsec 隧道把 192.168.1.0/24 与 192.168.2.0/24 的流量封装进公网报文，实现站点私网互通。在 ISP 与 R2 的链路上抓包：中间只能看到外层封装报文，看不到内网私网流量——这就是 VPN 的意义。',
   tasks: [
-    'R1：G0/0/0 192.168.1.1/24、G0/0/1 10.0.0.1/30，均 undo shutdown',
-    'R2：G0/0/0 10.0.0.2/30、G0/0/1 192.168.2.1/24，均 undo shutdown',
-    'R1：ipsec tunnel T1 local 10.0.0.1 remote 10.0.0.2 → local-subnet 192.168.1.0 24 → remote-subnet 192.168.2.0 24 → quit',
-    'R2：ipsec tunnel T1 local 10.0.0.2 remote 10.0.0.1 → local-subnet 192.168.2.0 24 → remote-subnet 192.168.1.0 24 → quit',
+    'R1：G0/0/0 192.168.1.1/24、G0/0/1 10.0.0.1/24，均 undo shutdown；ISP：G0/0/0 10.0.0.2/24、G0/0/1 10.0.1.1/24，均 undo shutdown；R2：G0/0/0 10.0.1.2/24、G0/0/1 192.168.2.1/24，均 undo shutdown',
+    '公网路由：R1 ip route-static 10.0.1.0 24 10.0.0.2；R2 ip route-static 10.0.0.0 24 10.0.1.1（VRP 接口 quit 回到系统视图，可直接续配）。ISP 只有两条直连公网段——不要给它配任何内网路由',
+    'R1：ipsec tunnel T1 local 10.0.0.1 remote 10.0.1.2 → local-subnet 192.168.1.0 24 → remote-subnet 192.168.2.0 24 → quit',
+    'R2：ipsec tunnel T1 local 10.0.1.2 remote 10.0.0.1 → local-subnet 192.168.2.0 24 → remote-subnet 192.168.1.0 24 → quit',
     'display ipsec tunnel 应看到两端保护子网；PC1 ping 192.168.2.10 应通',
+    '选中 ISP—R2 链路抓包：看到的报文是公网到公网的封装流量（10.0.x.x），内网 192.168.x.x 完全不可见',
     '（IOS：ipsec tunnel T1 local … remote … 同一套简化命令）',
   ],
   checks: [
     { label: 'R1 已配置 IPsec 隧道 T1', kind: { type: 'ipsecTunnel', dev: 'R1', name: 'T1' } },
     { label: 'R2 已配置 IPsec 隧道 T1', kind: { type: 'ipsecTunnel', dev: 'R2', name: 'T1' } },
+    { label: 'ISP 无内网路由（公网不可达私网）', kind: { type: 'routeAbsent', dev: 'ISP', net: '192.168.1.0/24' } },
     { label: 'PC1 → PC2 经 IPsec 隧道连通', kind: { type: 'ping', from: 'PC1', to: '192.168.2.10' } },
     { label: 'PC2 → PC1 回程连通', kind: { type: 'ping', from: 'PC2', to: '192.168.1.10' } },
   ],
   build: (sim) => {
     const pc1 = sim.add_device('Host', 'Ios');
     const r1 = sim.add_device('Router', 'Vrp');
+    const isp = sim.add_device('Router', 'Vrp');
     const r2 = sim.add_device('Router', 'Vrp');
     const pc2 = sim.add_device('Host', 'Ios');
     sim.rename_device(pc1, 'PC1');
     sim.rename_device(r1, 'R1');
+    sim.rename_device(isp, 'ISP');
     sim.rename_device(r2, 'R2');
     sim.rename_device(pc2, 'PC2');
     sim.add_link(pc1, r1);
-    sim.add_link(r1, r2);
+    sim.add_link(r1, isp); // R1 G0/0/1 — ISP G0/0/0
+    sim.add_link(isp, r2); // ISP G0/0/1 — R2 G0/0/0
     sim.add_link(r2, pc2);
     sim.set_host_config(pc1, '192.168.1.10', 24, '192.168.1.1');
     sim.set_host_config(pc2, '192.168.2.10', 24, '192.168.2.1');
-    setPosition(pc1, { x: 50, y: 100 });
-    setPosition(r1, { x: 250, y: 100 });
-    setPosition(r2, { x: 470, y: 100 });
-    setPosition(pc2, { x: 680, y: 100 });
+    setPosition(pc1, { x: 50, y: 120 });
+    setPosition(r1, { x: 230, y: 120 });
+    setPosition(isp, { x: 430, y: 60 });
+    setPosition(r2, { x: 630, y: 120 });
+    setPosition(pc2, { x: 820, y: 120 });
   },
 };
 
@@ -1370,38 +1390,43 @@ export const lab21: LabDef = {
   id: 'ospfv3',
   title: '实验二十一 · OSPFv3 动态路由',
   brief:
-    '两台路由器通过 IPv6 链路互联，各自连接一个 IPv6 网段。启用 OSPFv3 后，两端自动学习对端前缀，PC1 与 PC2 可以跨路由器互 ping6。',
+    '三台路由器链式组成 IPv6 网络，两端各接一个业务网段。R1 与 R3 不直连——R3 学到 R1 的网段，靠的正是 OSPFv3 的 LSA 泛洪穿越中间节点；R2 则同时维持两个邻居。启用 OSPFv3 后，PC1 与 PC2 可以跨三台路由器互 ping6。',
   tasks: [
-    'R1：g0/0/0 配 2001:db8:1::1/64（接 PC1），g0/0/1 配 2001:db8:12::1/64（接 R2），undo shutdown',
-    'R2：g0/0/0 配 2001:db8:12::2/64（接 R1），g0/0/1 配 2001:db8:2::1/64（接 PC2），undo shutdown',
-    'R1/R2：ospfv3 1 → router-id 1.1.1.1 / 2.2.2.2',
-    'R1/R2：互联口与业务口执行 ospfv3 1 area 0',
-    'display ospfv3 peer 应看到邻居；display ipv6 routing-table 应看到对端网段',
-    'PC1：ping6 2001:db8:2::10 应通',
+    '接口地址（全部 undo shutdown）：R1 g0/0/0 2001:db8:1::1/64、g0/0/1 2001:db8:12::1/64；R2 g0/0/0 2001:db8:12::2/64、g0/0/1 2001:db8:23::1/64；R3 g0/0/0 2001:db8:23::2/64、g0/0/1 2001:db8:3::1/64',
+    'R1/R2/R3：ospfv3 1 → router-id 1.1.1.1 / 2.2.2.2 / 3.3.3.3',
+    'R1/R2/R3：互联口与业务口执行 ospfv3 1 area 0',
+    'display ospfv3 peer：R1/R3 各 1 个邻居，R2 应有 2 个邻居',
+    'display ipv6 routing-table：R3 应出现 R1 的业务网段 2001:db8:1::/64（标记 O）——它从未直连该网段',
+    'PC1：ping6 2001:db8:3::10 应通',
   ],
   checks: [
     { label: 'R1 建立 OSPFv3 邻居', kind: { type: 'ospfv3Neighbors', dev: 'R1', min: 1 } },
-    { label: 'R2 建立 OSPFv3 邻居', kind: { type: 'ospfv3Neighbors', dev: 'R2', min: 1 } },
-    { label: 'PC1 → PC2 跨路由器 ping6 连通', kind: { type: 'ping6', from: 'PC1', to: '2001:db8:2::10' } },
+    { label: 'R2 同时维持两个邻居（泛洪中继）', kind: { type: 'ospfv3Neighbors', dev: 'R2', min: 2 } },
+    { label: 'R3 建立 OSPFv3 邻居', kind: { type: 'ospfv3Neighbors', dev: 'R3', min: 1 } },
+    { label: 'PC1 → PC2 跨三台路由器 ping6 连通', kind: { type: 'ping6', from: 'PC1', to: '2001:db8:3::10' } },
   ],
   build: (sim) => {
     const pc1 = sim.add_device('Host', 'Ios');
     const r1 = sim.add_device('Router', 'Vrp');
     const r2 = sim.add_device('Router', 'Vrp');
+    const r3 = sim.add_device('Router', 'Vrp');
     const pc2 = sim.add_device('Host', 'Ios');
     sim.rename_device(pc1, 'PC1');
     sim.rename_device(r1, 'R1');
     sim.rename_device(r2, 'R2');
+    sim.rename_device(r3, 'R3');
     sim.rename_device(pc2, 'PC2');
     sim.add_link(pc1, r1); // R1 p0
     sim.add_link(r1, r2); // R1 p1 / R2 p0
-    sim.add_link(r2, pc2); // R2 p1
+    sim.add_link(r2, r3); // R2 p1 / R3 p0
+    sim.add_link(r3, pc2); // R3 p1
     sim.set_host_v6(pc1, '2001:db8:1::10', 64, '2001:db8:1::1');
-    sim.set_host_v6(pc2, '2001:db8:2::10', 64, '2001:db8:2::1');
-    setPosition(pc1, { x: 40, y: 100 });
-    setPosition(r1, { x: 260, y: 100 });
-    setPosition(r2, { x: 500, y: 100 });
-    setPosition(pc2, { x: 720, y: 100 });
+    sim.set_host_v6(pc2, '2001:db8:3::10', 64, '2001:db8:3::1');
+    setPosition(pc1, { x: 40, y: 120 });
+    setPosition(r1, { x: 230, y: 120 });
+    setPosition(r2, { x: 430, y: 60 });
+    setPosition(r3, { x: 630, y: 120 });
+    setPosition(pc2, { x: 820, y: 120 });
   },
 };
 

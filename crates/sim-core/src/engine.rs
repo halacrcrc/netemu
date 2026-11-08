@@ -5002,7 +5002,9 @@ impl Engine {
         }
     }
 
-    fn ospfv3_build_packet(&self, dev: DevId) -> Ospfv3Packet {
+    /// 构建 OSPFv3 Update：本机直连前缀 + 学到的路由（水平分割——不向"学到该路由的口"发回）。
+    /// 这让 LSA 风格的前缀信息能穿越中间路由器（三台链式时 R3 也能学到 R1 的网段）。
+    fn ospfv3_build_packet(&self, dev: DevId, exclude_port: Option<PortId>) -> Ospfv3Packet {
         let mut pkt = Ospfv3Packet {
             router_id: self.ospfv3_router_id(dev),
             area: 0,
@@ -5010,23 +5012,47 @@ impl Engine {
             prefixes: [None; 8],
             count: 0,
         };
+        let push = |pkt: &mut Ospfv3Packet, ip: Ipv6Addr, len: u8| {
+            if pkt.count < 8 {
+                pkt.prefixes[pkt.count as usize] = Some((ip, len));
+                pkt.count += 1;
+            }
+        };
         let ports = self.ospfv3_enabled_ports(dev);
-        for (i, (_, ip, len)) in ports.iter().take(8).enumerate() {
-            pkt.prefixes[i] = Some((*ip, *len));
-            pkt.count += 1;
+        for (_, ip, len) in &ports {
+            push(&mut pkt, *ip, *len);
+        }
+        // learned 路由随 Update 泛洪；水平分割：来源口与发送口相同则跳过
+        let source_port_of = |nexthop: Ipv6Addr| -> Option<PortId> {
+            self.ospfv3
+                .get(&dev)
+                .and_then(|rt| rt.neighbors.values().find(|nb| nb.ip == nexthop))
+                .map(|nb| nb.port)
+        };
+        if let Some(d) = self.net.device(dev) {
+            if let DeviceState::Router(rs) = &d.state {
+                for r in &rs.ospfv3_routes6 {
+                    if Some(r.src) != Some(RouteSrc::Ospf) {
+                        continue;
+                    }
+                    if exclude_port == source_port_of(r.nexthop) {
+                        continue;
+                    }
+                    push(&mut pkt, r.dst, r.len);
+                }
+            }
         }
         pkt
     }
 
     fn ospfv3_send_update(&mut self, dev: DevId) {
-        let base = self.ospfv3_build_packet(dev);
         let ports = self.ospfv3_enabled_ports(dev);
         for (port, ip, _) in ports {
             let Some(d) = self.net.device(dev) else {
                 return;
             };
             let Some(p) = d.port(port) else { continue };
-            let mut pkt = base;
+            let mut pkt = self.ospfv3_build_packet(dev, Some(port));
             pkt.src = ip;
             let frame = EthernetFrame {
                 dst: BROADCAST_MAC,

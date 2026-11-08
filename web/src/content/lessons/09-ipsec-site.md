@@ -31,4 +31,4 @@ ipsec tunnel T1 local 10.0.0.1 remote 10.0.0.2
 
 ## 动手
 
-打开实验十一：R1/R2 分别配置 T1，两端子网互为镜像。`display ipsec tunnel` / `show ipsec tunnel` 应看到保护子网；PC1 ping 192.168.2.10 应通。抓包选中 R1–R2 链路，能看到外层是 10.0.0.x 的 IPsec 报文，内层才是 192.168.1.x 的原始 ICMP。
+打开实验十一：R1—ISP—R2 跨公网组网，R1/R2 分别配置 T1，两端子网互为镜像。`display ipsec tunnel` / `show ipsec tunnel` 应看到保护子网；PC1 ping 192.168.2.10 应通。抓包选中 ISP–R2 链路，能看到外层是 10.0.x.x 的封装报文，内层 192.168.1.x 的原始 ICMP 完全不可见——ISP 上也没有任何内网路由。

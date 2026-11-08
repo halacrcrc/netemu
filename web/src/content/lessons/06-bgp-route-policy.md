@@ -51,4 +51,4 @@ router bgp 65002
 
 ## 动手
 
-打开实验七：R2 用 ACL 精确匹配 172.16.9.0/24，再用 route-policy 在 import 方向拒绝它。`display bgp routing-table` / `show ip bgp` 应只看到 192.168.1.0/24；PC2 ping 受控服务器失败，而 ping PC1 正常——策略只影响它该影响的那一条。
+打开实验七：R1—R2—R3 三 AS 链式，R2 用 ACL 精确匹配 172.16.9.0/24，再用 route-policy 在 import 方向拒绝它。`display bgp routing-table` / `show ip bgp` 里 R2 和 R3 都应只有 192.168.1.0/24 而没有受控网段——策略不只影响 R2 自己，还沿 BGP 传递到了下游 AS；PC2 ping 受控服务器失败，而 ping PC1 正常。

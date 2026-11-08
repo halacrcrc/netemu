@@ -41,4 +41,4 @@ interface g0/0
 
 ## 动手
 
-打开实验二十一：R1/R2 配置 IPv6 地址与 OSPFv3，`display ospfv3 peer` 应看到对方 Router ID；`display ipv6 routing-table` 出现对端网段，PC1 能 ping6 PC2。再把 R2 的 `ospfv3 1 area 0` 删掉，观察邻居与路由如何消失。
+打开实验二十一：R1/R2/R3 三台链式配置 IPv6 地址与 OSPFv3。`display ospfv3 peer` 中 R2 应有两个邻居；`display ipv6 routing-table` 里 R3 出现它从未直连的 2001:db8:1::/64（LSA 泛洪穿越了 R2），PC1 能 ping6 PC2。再把 R2 的 `ospfv3 1 area 0` 删掉，观察泛洪如何中断、R1/R3 如何互相失联。
