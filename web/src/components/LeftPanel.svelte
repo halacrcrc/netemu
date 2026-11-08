@@ -254,6 +254,23 @@
   // ---------- M1 实验 ----------
   let activeLab = $state<LabDef | null>(null);
 
+  /** 实验内所有网络设备一键轮换方言：华为 → 思科 → 华三 → 华为（Host 命令三方言一致，不动）。 */
+  function rotateDialect() {
+    const sim = getSim();
+    const order = ['Vrp', 'Ios', 'Comware'] as const;
+    const first = app.devices.find((d) => d.kind !== 'Host');
+    const cur = (first?.dialect ?? 'Vrp') as (typeof order)[number];
+    const next = order[(order.indexOf(cur) + 1) % order.length];
+    for (const d of app.devices) {
+      if (d.kind !== 'Host') sim.set_dialect(d.id, next);
+    }
+    refreshFromSim();
+  }
+  function dialectLabel(): string {
+    const cur = app.devices.find((d) => d.kind !== 'Host')?.dialect ?? 'Vrp';
+    return cur === 'Ios' ? '思科 IOS' : cur === 'Comware' ? '华三 Comware' : '华为 VRP';
+  }
+
   function startLab(lab: LabDef) {
     applyLab(lab);
     activeLab = lab;
@@ -471,6 +488,7 @@
             {/each}
           </div>
         {/if}
+        <button onclick={rotateDialect}>🌐 {t('left.rotateDialect')}（{dialectLabel()}）</button>
         <button onclick={() => startLab(activeLab!)}>{t('left.resetLab')}</button>
         <button class="danger" onclick={exitLab}>{t('left.exitLab')}</button>
       {:else}
