@@ -608,7 +608,10 @@ impl Engine {
         }
         // 0c. VXLAN：VTEP 解封装（仅本机 VTEP 地址）；Underlay 路由器按外层 IPv4 转发
         if let L3::Vxlan(vx) = frame.payload {
-            let fwd = VxlanPacket { ttl: vx.ttl.saturating_sub(1), ..vx };
+            let fwd = VxlanPacket {
+                ttl: vx.ttl.saturating_sub(1),
+                ..vx
+            };
             if !self.encap_fwd_over_underlay(dev_id, in_port, vx.dst, vx.ttl, L3::Vxlan(fwd)) {
                 self.vxlan_on_frame(dev_id, in_port, vx);
             }
@@ -1107,7 +1110,10 @@ impl Engine {
             L3::Capwap(pkt) => self.capwap_ingress(dev_id, pkt),
             L3::Vxlan(vx) => {
                 // VXLAN 外层在 Underlay 路由器上按外层 IPv4 转发（广播 MAC 逐跳约定）
-                let fwd = VxlanPacket { ttl: vx.ttl.saturating_sub(1), ..vx };
+                let fwd = VxlanPacket {
+                    ttl: vx.ttl.saturating_sub(1),
+                    ..vx
+                };
                 self.encap_fwd_over_underlay(dev_id, port, vx.dst, vx.ttl, L3::Vxlan(fwd));
             }
             L3::Evpn(e) => {
@@ -2908,7 +2914,8 @@ impl Engine {
                 continue;
             };
             // 经静态路由的 peer：路由表项本身无 VLAN，按下一跳所在的直连网段解析出发送 VLAN
-            let out_vlan = out_vlan.or_else(|| self.net.lookup_route(dev, nh).and_then(|(_, _, v)| v));
+            let out_vlan =
+                out_vlan.or_else(|| self.net.lookup_route(dev, nh).and_then(|(_, _, v)| v));
             let src_mac = out_vlan.map(svi_mac).unwrap_or_else(|| {
                 self.net
                     .device(dev)
@@ -3099,7 +3106,8 @@ impl Engine {
                 continue;
             };
             // 经静态路由的 peer：按下一跳所在的直连网段解析通告 VLAN
-            let out_vlan = out_vlan.or_else(|| self.net.lookup_route(dev, nh).and_then(|(_, _, v)| v));
+            let out_vlan =
+                out_vlan.or_else(|| self.net.lookup_route(dev, nh).and_then(|(_, _, v)| v));
             let src_mac = out_vlan.map(svi_mac).unwrap_or([0; 6]);
             for (vni, vlan) in &mappings {
                 let pkt = EvpnPacket {
