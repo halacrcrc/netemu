@@ -413,19 +413,20 @@ export const LABS_EN: Record<string, LabEn> = {
   'srv6-be': {
     title: 'Lab 22 · SRv6 BE Forwarding',
     brief:
-      'Two routers share an IPv6 underlay and each has a Locator and local SID. The ingress encapsulates traffic to the remote business subnet toward the remote SID, and the egress decapsulates and delivers it — SRv6 BE.',
+      'PE1—P—PE2 form an IPv6 underlay backbone, each edge attached to a business subnet. Configure a Locator and local SID on the PEs and encapsulate traffic toward the remote SID; packets hop across the backbone and the egress PE decapsulates and delivers them. Note the P router runs plain IPv6 forwarding with no SRv6 at all — that is the essence of SRv6 BE.',
     tasks: [
-      'R1: g0/0/0 2001:db8:1::1/64; g0/0/1 2001:db8:12::1/64; R2: g0/0/0 2001:db8:12::2/64; g0/0/1 2001:db8:2::1/64',
-      'R1: srv6 locator 2001:db8:100::/64; srv6 sid 2001:db8:100::1',
-      'R2: srv6 locator 2001:db8:200::/64; srv6 sid 2001:db8:200::1',
-      'R1: srv6 route 2001:db8:2::/64 sid 2001:db8:200::1; R2: srv6 route 2001:db8:1::/64 sid 2001:db8:100::1',
-      'R1: ipv6 route-static 2001:db8:200:: 64 2001:db8:12::2; R2: ipv6 route-static 2001:db8:100:: 64 2001:db8:12::1',
+      'Interface addresses (all undo shutdown): PE1 g0/0/0 2001:db8:1::1/64, g0/0/1 2001:db8:12::1/64; P g0/0/0 2001:db8:12::2/64, g0/0/1 2001:db8:23::1/64; PE2 g0/0/0 2001:db8:23::2/64, g0/0/1 2001:db8:2::1/64',
+      'PE1: srv6 locator 2001:db8:100::/64; srv6 sid 2001:db8:100::1. PE2: srv6 locator 2001:db8:200::/64; srv6 sid 2001:db8:200::1',
+      'SRv6 routes: PE1 srv6 route 2001:db8:2::/64 sid 2001:db8:200::1; PE2 srv6 route 2001:db8:1::/64 sid 2001:db8:100::1',
+      'Underlay static routes (simulate full IGP reachability): PE1 ipv6 route-static 2001:db8:200:: 64 2001:db8:12::2 and 2001:db8:23:: 64 2001:db8:12::2; P 2001:db8:200:: 64 2001:db8:23::2 and 2001:db8:100:: 64 2001:db8:12::1; PE2 ipv6 route-static 2001:db8:100:: 64 2001:db8:23::1 and 2001:db8:12:: 64 2001:db8:23::1',
+      'Do not configure any srv6 command on P — it only forwards IPv6. Capture the PE1—P link to watch encapsulated SRv6 packets hop across the backbone',
       'display srv6 should show the locator, local SID, and routes; PC1 ping6 2001:db8:2::10 should succeed',
     ],
     checkLabels: [
-      'R1 has an SRv6 route to the remote business subnet',
-      'R2 has the return SRv6 route',
-      'PC1 -> PC2 succeeds through SRv6',
+      'PE1 has an SRv6 route to the remote business subnet',
+      'PE2 has the return SRv6 route',
+      'Underlay IPv6 reachable (PE1 -> P)',
+      'PC1 -> PC2 succeeds through SRv6 across the backbone',
     ],
   },
   'f5-ltm': {

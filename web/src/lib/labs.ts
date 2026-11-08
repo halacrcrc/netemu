@@ -1411,38 +1411,43 @@ export const lab22: LabDef = {
   id: 'srv6-be',
   title: '实验二十二 · SRv6 BE 跨网段转发',
   brief:
-    '两台路由器用 IPv6 Underlay 互联，各自配置 Locator 与本地 SID。入口把去往对端业务网段的报文封装到远端 SID，出口解封装后交付——这就是 SRv6 BE。',
+    'PE1—P—PE2 三台路由器组成 IPv6 骨干（Underlay），两端各接业务网段。PE 上配置 Locator 与本地 SID，把去往对端业务网段的报文封装到远端 SID，报文逐跳穿过骨干，出口 PE 解封装后交付。注意中间的 P 只跑普通 IPv6 转发——不配任何 SRv6，这正是 SRv6 BE 的精髓。',
   tasks: [
-    'R1：g0/0/0 2001:db8:1::1/64；g0/0/1 2001:db8:12::1/64；R2：g0/0/0 2001:db8:12::2/64；g0/0/1 2001:db8:2::1/64',
-    'R1：srv6 locator 2001:db8:100::/64；srv6 sid 2001:db8:100::1',
-    'R2：srv6 locator 2001:db8:200::/64；srv6 sid 2001:db8:200::1',
-    'R1：srv6 route 2001:db8:2::/64 sid 2001:db8:200::1；R2：srv6 route 2001:db8:1::/64 sid 2001:db8:100::1',
-    'R1：ipv6 route-static 2001:db8:200:: 64 2001:db8:12::2；R2：ipv6 route-static 2001:db8:100:: 64 2001:db8:12::1',
+    '接口地址（全部 undo shutdown）：PE1 g0/0/0 2001:db8:1::1/64、g0/0/1 2001:db8:12::1/64；P g0/0/0 2001:db8:12::2/64、g0/0/1 2001:db8:23::1/64；PE2 g0/0/0 2001:db8:23::2/64、g0/0/1 2001:db8:2::1/64',
+    'PE1：srv6 locator 2001:db8:100::/64；srv6 sid 2001:db8:100::1。PE2：srv6 locator 2001:db8:200::/64；srv6 sid 2001:db8:200::1',
+    'SRv6 路由：PE1 srv6 route 2001:db8:2::/64 sid 2001:db8:200::1；PE2 srv6 route 2001:db8:1::/64 sid 2001:db8:100::1',
+    'Underlay 静态路由（模拟 IGP 全网贯通）：PE1 ipv6 route-static 2001:db8:200:: 64 2001:db8:12::2 与 2001:db8:23:: 64 2001:db8:12::2；P 2001:db8:200:: 64 2001:db8:23::2 与 2001:db8:100:: 64 2001:db8:12::1；PE2 ipv6 route-static 2001:db8:100:: 64 2001:db8:23::1 与 2001:db8:12:: 64 2001:db8:23::1',
+    'P 上不要配置任何 srv6 命令——它只做 IPv6 转发。选中 PE1—P 链路抓包，能看到封装后的 SRv6 报文逐跳前进',
     'display srv6 应看到 Locator、本地 SID 与路由；PC1 ping6 2001:db8:2::10 应通',
   ],
   checks: [
-    { label: 'R1 配置去往业务网段的 SRv6 路由', kind: { type: 'srv6Route', dev: 'R1', dst: '2001:db8:2::/64' } },
-    { label: 'R2 配置回程 SRv6 路由', kind: { type: 'srv6Route', dev: 'R2', dst: '2001:db8:1::/64' } },
-    { label: 'PC1 → PC2 经 SRv6 连通', kind: { type: 'ping6', from: 'PC1', to: '2001:db8:2::10' } },
+    { label: 'PE1 配置去往业务网段的 SRv6 路由', kind: { type: 'srv6Route', dev: 'PE1', dst: '2001:db8:2::/64' } },
+    { label: 'PE2 配置回程 SRv6 路由', kind: { type: 'srv6Route', dev: 'PE2', dst: '2001:db8:1::/64' } },
+    { label: 'Underlay IPv6 贯通（PE1 → P）', kind: { type: 'ping6', from: 'PE1', to: '2001:db8:23::1' } },
+    { label: 'PC1 → PC2 经 SRv6 穿过骨干连通', kind: { type: 'ping6', from: 'PC1', to: '2001:db8:2::10' } },
   ],
   build: (sim) => {
     const pc1 = sim.add_device('Host', 'Ios');
-    const r1 = sim.add_device('Router', 'Vrp');
-    const r2 = sim.add_device('Router', 'Vrp');
+    const pe1 = sim.add_device('Router', 'Vrp');
+    const p = sim.add_device('Router', 'Vrp');
+    const pe2 = sim.add_device('Router', 'Vrp');
     const pc2 = sim.add_device('Host', 'Ios');
     sim.rename_device(pc1, 'PC1');
-    sim.rename_device(r1, 'R1');
-    sim.rename_device(r2, 'R2');
+    sim.rename_device(pe1, 'PE1');
+    sim.rename_device(p, 'P');
+    sim.rename_device(pe2, 'PE2');
     sim.rename_device(pc2, 'PC2');
-    sim.add_link(pc1, r1);
-    sim.add_link(r1, r2);
-    sim.add_link(r2, pc2);
+    sim.add_link(pc1, pe1);
+    sim.add_link(pe1, p);
+    sim.add_link(p, pe2);
+    sim.add_link(pe2, pc2);
     sim.set_host_v6(pc1, '2001:db8:1::10', 64, '2001:db8:1::1');
     sim.set_host_v6(pc2, '2001:db8:2::10', 64, '2001:db8:2::1');
-    setPosition(pc1, { x: 40, y: 100 });
-    setPosition(r1, { x: 260, y: 100 });
-    setPosition(r2, { x: 500, y: 100 });
-    setPosition(pc2, { x: 720, y: 100 });
+    setPosition(pc1, { x: 40, y: 120 });
+    setPosition(pe1, { x: 230, y: 120 });
+    setPosition(p, { x: 430, y: 60 });
+    setPosition(pe2, { x: 630, y: 120 });
+    setPosition(pc2, { x: 820, y: 120 });
   },
 };
 

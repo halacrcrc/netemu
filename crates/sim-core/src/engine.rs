@@ -5279,13 +5279,26 @@ impl Engine {
     }
 
     /// 本机在该端口上的 IPv6 地址。
-    fn my_ipv6_on(&self, dev: DevId, port: PortId, addr: &Ipv6Addr) -> bool {
-        self.net
-            .device(dev)
-            .and_then(|d| d.port(port))
-            .and_then(|p| p.ipv6)
-            .map(|ip| ip == *addr)
-            .unwrap_or(false)
+    /// 地址是否为本机任一接口（端口 v6 地址，路由器含本地 SRv6 SID/Locator 内地址）。
+    /// 真实路由器上目的为任一本机地址的报文都应上送，而非按转发表从其他口发回给自己。
+    fn my_ipv6_any(&self, dev: DevId, addr: &Ipv6Addr) -> bool {
+        let Some(d) = self.net.device(dev) else {
+            return false;
+        };
+        if d.ports.iter().any(|p| p.ipv6 == Some(*addr)) {
+            return true;
+        }
+        match &d.state {
+            DeviceState::Router(rs) => {
+                rs.srv6.sids.contains(addr)
+                    || rs
+                        .srv6
+                        .locator
+                        .map(|(net, len)| ipv6_in_prefix(addr, &net, len))
+                        .unwrap_or(false)
+            }
+            _ => false,
+        }
     }
 
     fn ndp_lookup(&self, dev: DevId, port: PortId, ip: Ipv6Addr) -> Option<NdpEntry> {
@@ -5433,7 +5446,7 @@ impl Engine {
                 if pkt.src != [0u8; 16] && pkt.src != target {
                     self.ndp_learn(dev, port, pkt.src, frame.src);
                 }
-                if self.my_ipv6_on(dev, port, &target) {
+                if self.my_ipv6_any(dev, &target) {
                     let na = Ipv6Packet {
                         src: target,
                         dst: pkt.src,
@@ -5454,7 +5467,7 @@ impl Engine {
                 self.ndp_learn(dev, port, target, frame.src);
             }
             Ipv6Icmp::EchoRequest { id, seq } => {
-                if self.my_ipv6_on(dev, port, &pkt.dst) {
+                if self.my_ipv6_any(dev, &pkt.dst) {
                     let reply = Ipv6Packet {
                         src: pkt.dst,
                         dst: pkt.src,
@@ -5472,7 +5485,7 @@ impl Engine {
                 }
             }
             Ipv6Icmp::EchoReply { id, .. } => {
-                if self.my_ipv6_on(dev, port, &pkt.dst) {
+                if self.my_ipv6_any(dev, &pkt.dst) {
                     let matched = {
                         let Some(d) = self.net.device_mut(dev) else {
                             return;
@@ -5498,7 +5511,7 @@ impl Engine {
         if matches!(
             pkt.icmp,
             Ipv6Icmp::EchoRequest { .. } | Ipv6Icmp::EchoReply { .. }
-        ) && !self.my_ipv6_on(dev, port, &pkt.dst)
+        ) && !self.my_ipv6_any(dev, &pkt.dst)
         {
             let is_router = matches!(
                 d_kind(&self.net, dev),
