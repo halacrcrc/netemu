@@ -210,6 +210,8 @@
   .body {
     padding: 12px 16px 24px;
     max-width: 720px;
+    width: 100%;
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -254,8 +256,9 @@
   }
   .q-text {
     padding: 8px 12px 4px;
-    font-size: 15px;
-    line-height: 1.6;
+    font-size: 16.5px;
+    font-weight: 600;
+    line-height: 1.7;
   }
   .options {
     display: flex;
@@ -268,8 +271,9 @@
     display: flex;
     gap: 8px;
     align-items: baseline;
-    padding: 9px 12px;
-    line-height: 1.5;
+    padding: 10px 12px;
+    font-size: 14px;
+    line-height: 1.6;
   }
   .opt .key {
     font-family: Consolas, monospace;
@@ -294,7 +298,7 @@
     margin: 0 12px 12px;
     border-top: 1px solid var(--border);
     padding-top: 10px;
-    font-size: 13px;
+    font-size: 13.5px;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -302,7 +306,7 @@
   .explain p {
     margin: 0;
     color: var(--text-dim);
-    line-height: 1.6;
+    line-height: 1.75;
   }
   .explain button {
     align-self: flex-start;

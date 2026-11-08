@@ -273,7 +273,8 @@
   .body-input {
     width: 100%;
     resize: vertical;
-    line-height: 1.6;
+    font-size: 14px;
+    line-height: 1.7;
     background: var(--bg-panel-2);
     color: var(--text);
     border: 1px solid var(--border);
@@ -287,6 +288,10 @@
   }
   .preview {
     border-top: 1px solid var(--border);
+  }
+  /* 预览阅读列与课程一致：中文约 40 字/行 */
+  .preview .md {
+    max-width: 42em;
   }
   .token-input {
     width: 100%;

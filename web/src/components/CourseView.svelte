@@ -145,7 +145,7 @@
   .lessons {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
     padding: 10px;
   }
   .level-head {
@@ -190,7 +190,7 @@
   .reader {
     flex: 1;
     min-width: 0;
-    padding: 12px;
+    padding: 16px;
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -198,6 +198,8 @@
     max-height: 100%;
   }
   .lesson-card .pad {
+    /* 阅读列限宽：中文约 40 字/行，长文不拉满屏 */
+    max-width: 42em;
     padding: 20px 26px 24px;
   }
   .lesson-title {
@@ -205,6 +207,8 @@
     padding-bottom: 10px;
     border-bottom: 1px solid var(--border);
     font-size: 22px;
+    line-height: 1.4;
+    letter-spacing: 0.01em;
   }
   .lab-open {
     margin-top: 18px;
@@ -219,12 +223,12 @@
   .cmd-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: 12.5px;
   }
   .cmd-table th,
   .cmd-table td {
     border: 1px solid var(--border);
-    padding: 6px 8px;
+    padding: 7px 9px;
     text-align: left;
     white-space: nowrap;
   }
