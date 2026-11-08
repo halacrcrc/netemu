@@ -56,6 +56,8 @@ DHCP 不实现通用 UDP/IP 栈，报文直接作为 `L3::Dhcp` 载荷（目的�
 
 三厂商命令对照表不是手写表格，而是 `cmdmap.ts` 数据 + wasm `verify_command`（对每条命令在对应方言/模式下跑一次纯解析）。表与模拟器永远一致，解析不过的条目直接标 ⚠ 暴露。教训：命令树构建器 `.run().kid()` 链式语义中 run 返回 Self——`.run(x).kid(y)` 会把 y 挂到 run 所在节点；含参数链必须写成 `.kid(param.run(x).kid(y))`。此类错误靠对照表的 ⚠ + parse 探针定位。
 
+**配置查看命令同源渲染**（M9n）：`show running-config`（IOS）与 `display current-configuration`（VRP/Comware）由 `config_render.rs` 从 `DevSummary`（完整配置快照）实时生成配置文本，与 show 各视图同源——不做单独的“配置缓冲区”状态跟踪；接口名必须走 `ifname::canonical`（方言/设备类型规则：IOS 全 0 起、VRP 路由器 0 起而交换机 1 起、Comware 1/0 起），L3 设备不渲染 switchport 段。
+
 ### D13（M3a 补充）Markdown 零依赖渲染
 
 课程/笔记的 Markdown 用自研 ~90 行渲染器（标题/列表/代码块/加粗/行内代码，HTML 先转义），不引 marked 等外部依赖——内容为自控/用户自写，子集可控，且规避离线安装问题。
