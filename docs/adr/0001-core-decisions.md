@@ -176,11 +176,25 @@ F5 LTM：新增 `DeviceKind::LoadBalancer`（复用 RouterState），Device 增�
 
 **同 VLAN 隔离**：`Port` 增加 `isolate_group: Option<u16>` 与 `mux_role: Option<MuxRole>`（Principal/Separate/Group(u16)）。数据面在二层转发时检查同 VLAN 的源/目的端口：principal 与所有端口互通；separate 两两隔离且与 group 隔离；group 仅同组互通；同 `isolate_group` 的端口不能互通（思科 `switchport protected` 用 group 0 表达）。命令 `mux-vlan principal|separate|group N`、`port-isolate enable group N`。不做 MUX VLAN 的跨 VLAN primary/subordinate 二层桥接（各 subordinate VLAN 仍需三层网关），也不做 PVLAN 的 trunk 承载与 VACL。
 
-**OSPFv3**：新增 `Ospfv3Packet`（Router ID/Area/源 IPv6/前缀数组）与独立 `Ospfv3Runtime`；接口 `ospfv3 1 area 0` 启用后周期发送本机前缀，邻居学习前缀并安装 `Route6`（`RouteSrc::Ospf`）。`lookup_route6` 将 OSPFv3 路由排在静态之后、直连之前。简化：不做完整 LSA 泛洪、DR/BDR、区域间汇总、LSA 老化与认证（认证交给 IPv6 IPsec）；仅支持直连邻居的前缀学习。
+**OSPFv3**：新增 `Ospfv3Packet`（Router ID/Area/源 IPv6/前缀数组）与独立 `Ospfv3Runtime`；接口 `ospfv3 1 area 0` 启用后周期发送本机前缀，邻居学习前缀并安装 `Route6`（`RouteSrc::Ospf`）。`lookup_route6` 将 OSPFv3 路由排在静态之后、直连之前。简化：不做完整 LSA 泛洪、DR/BDR、区域间汇总、LSA 老化与认证（认证交给 IPv6 IPsec）；前缀学习经 D33 增强后可穿越中间路由器（带水平分割的泛洪），仍无 DR/BDR 与区域间汇总。
 
 **SRv6 BE**：`RouterState.srv6 { locator, sids, routes }`；命令 `srv6 locator`、`srv6 sid`、`srv6 route ... sid`。入口匹配业务前缀后封装 `Srv6Packet`（外层 IPv6 目的=SID，内层原始 IPv6），Underlay 用 `lookup_route6` 转发；目的 SID 属于本机 locator/SID 时解封装并按内层 IPv6 转发。不做 SRH、多段 Segment List、SRv6 Policy/TE、TI-LFA、切片与头压缩；BE 外层用广播 MAC 发送（同 IPsec 教学模型），依赖 Underlay 路由可达 SID。
 
 **拓扑与 STP**：前端 `add_device`/`add_link`/`remove_link` 后调用 `Engine::topology_changed()` 重算 STP 并启动 hello 定时器；`lab_checks::run_checks` 先推进 45s 虚拟时间，等 STP 从 Listening/Learning 进入 Forwarding，避免判分时端口仍在 Learning 被误判为不通。
+
+### D33（M9 补充）多节点组网的封装帧 Underlay 转发与 OSPFv3 泛洪
+
+**动机**：SRv6/VXLAN/EVPN/IPsec 等实验升级为多节点组网（PE1—P—PE2、R1—ISP—R2、DSW1—SPINE—DSW2）后，暴露出引擎三个“两台直连拓扑掩盖了”的缺陷。
+
+**IPv6 本机交付**：`ipv6_on_frame` 的本机交付判定从“入口端口地址”（`my_ipv6_on`）扩为 `my_ipv6_any`——本机任一端口的 IPv6 地址，路由器上含本地 SRv6 SID 与 Locator 内地址。此前路由器收到目的为自身其他接口地址的包会按转发表回环转发（Direct 命中自己口），ND 无应答而丢弃，ping6 路由器跨接口地址必失败。
+
+**OSPFv3 泛洪**：Update 携带 learned 路由（`ospfv3_routes6`），带水平分割——不向学到该路由的接口发回（来源口由邻居表按 next-hop 反查）。此前泛洪只走一跳，三台链式时端点永远学不到对端网段。包内前缀上限 8 条。
+
+**封装帧 Underlay 转发**：新增 `encap_fwd_over_underlay`——非 VTEP 路由器收到 `L3::Vxlan`/`L3::Evpn` 帧时按外层单播 IPv4 查表转发（广播 MAC 逐跳约定，VXLAN TTL 递减，出口≠入口）；此前路由器入口对这两类载荷直接丢弃（注释写明“仅交换机 VTEP 处理”），VTEP 隔着路由器无法互通。`l3_ingress` 与 `switch_ingress` 两路入口都接该 helper。
+
+**封装帧发送 VLAN 解析**：`vxlan_encap`/`evpn_send` 的 peer 若经静态路由可达，路由表项无 VLAN（`out_vlan=None`），会落到 SVI 伪端口 `transmit_frame(port=0)` 从错误口发出——直连拓扑（peer 在直连段）从未暴露。修复：按下一跳所在直连网段二次解析出发送 VLAN（`lookup_route(nh)`），再走 `flood_in_vlan_except`。
+
+**拓扑升级原则**：判分新增项只用于表达新增的学习点（如“Underlay 贯通”“过滤传导到下游”），不改引擎既有判分语义；任务文案必须与模拟器的 CLI 行为一致（VRP 接口 `quit` 落回系统视图、静态路由用前缀长度格式）。
 
 ## 后果
 
