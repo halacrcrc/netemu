@@ -290,4 +290,5 @@ export const CMDMAP: CmdRow[] = [
   { feature: '限制登录协议为 SSH', topic: 'mgmt', ios: 'transport input ssh', vrp: 'protocol inbound ssh', comware: 'protocol inbound ssh', mode: 'Line' },
   { feature: '创建本地用户', topic: 'mgmt', ios: 'username admin secret cisco123', vrp: 'local-user admin', comware: 'local-user admin', mode: 'Config' },
   { feature: 'SSH 登录对端', topic: 'mgmt', ios: 'ssh 10.0.0.2', vrp: 'ssh 10.0.0.2', comware: 'ssh 10.0.0.2', mode: 'Exec' },
+  { feature: '查看当前配置', topic: 'basics', ios: 'show running-config', vrp: 'display current-configuration', comware: 'display current-configuration', mode: 'Exec' },
 ];

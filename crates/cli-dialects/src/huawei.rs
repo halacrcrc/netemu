@@ -98,6 +98,7 @@ fn undo_branch() -> CNode {
 
 fn display_branch() -> CNode {
     CNode::lit("display", "Display information")
+        .kid(CNode::lit("current-configuration", "Current configuration").run(cmd::show_running_config))
         .kid(
             CNode::lit("ip", "IP information")
                 .kid(CNode::lit("interface", "Interface status").kid(

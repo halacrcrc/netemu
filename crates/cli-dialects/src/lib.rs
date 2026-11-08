@@ -6,6 +6,7 @@
 //! 3. 报错风格与 show 输出格式（见 show）
 //! 4. 模式体系（IOS 多一层特权模式）
 
+pub mod config_render;
 pub mod huawei;
 pub mod ifname;
 pub mod ios;
@@ -3215,6 +3216,21 @@ pub mod cmd {
 
     pub fn show_brief(c: &mut Ctx) -> Result<String, CliError> {
         Ok(show::int_brief(c.eng, c.dev, c.dialect))
+    }
+
+    /// `show running-config` / `display current-configuration`：从 DevSummary 实时渲染（ADR D12）。
+    pub fn show_running_config(c: &mut Ctx) -> Result<String, CliError> {
+        if c.device_kind() == DeviceKind::Host {
+            return Err(CliError::Custom(match c.dialect {
+                Dialect::Ios => "% Invalid input detected".into(),
+                _ => "Command is not available on hosts".into(),
+            }));
+        }
+        let summary = c.eng.net.summary();
+        let Some(d) = summary.devices.into_iter().find(|x| x.id == c.dev) else {
+            return Ok(String::new());
+        };
+        Ok(config_render::render(&d, c.dialect))
     }
 
     pub fn show_route(c: &mut Ctx) -> Result<String, CliError> {
