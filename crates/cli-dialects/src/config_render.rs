@@ -55,7 +55,11 @@ fn port_lines_ios(d: &DevSummary, out: &mut Vec<String>) {
         ));
         if let Some(ip) = &p.ip {
             let mask = sim_packets::mask_from_prefix(p.prefix);
-            out.push(format!(" ip address {} {}", ip, sim_packets::ipv4_str(mask)));
+            out.push(format!(
+                " ip address {} {}",
+                ip,
+                sim_packets::ipv4_str(mask)
+            ));
         }
         if let Some(v6) = &p.ipv6 {
             out.push(format!(" ipv6 address {}/{}", v6, p.prefix6));
@@ -166,7 +170,10 @@ pub fn render(d: &DevSummary, dialect: Dialect) -> String {
     for s in &d.svis {
         match dialect {
             Dialect::Ios => {
-                out.push(format!("interface {}", ifname::svi_canonical(Dialect::Ios, s.vlan)));
+                out.push(format!(
+                    "interface {}",
+                    ifname::svi_canonical(Dialect::Ios, s.vlan)
+                ));
                 out.push(format!(" ip address {} {}", s.ip, s.prefix));
                 if !s.admin_up {
                     out.push(" shutdown".into());
@@ -174,7 +181,10 @@ pub fn render(d: &DevSummary, dialect: Dialect) -> String {
                 out.push(" exit".into());
             }
             _ => {
-                out.push(format!("interface {}", ifname::svi_canonical(dialect, s.vlan)));
+                out.push(format!(
+                    "interface {}",
+                    ifname::svi_canonical(dialect, s.vlan)
+                ));
                 out.push(format!(" ip address {} {}", s.ip, s.prefix));
                 if !s.admin_up {
                     out.push(" shutdown".into());
@@ -193,7 +203,10 @@ pub fn render(d: &DevSummary, dialect: Dialect) -> String {
     for r in &d.static_routes6 {
         match dialect {
             Dialect::Ios => out.push(format!("ipv6 route {}/{} {}", r.dst, r.len, r.nexthop)),
-            _ => out.push(format!("ipv6 route-static {} {} {}", r.dst, r.len, r.nexthop)),
+            _ => out.push(format!(
+                "ipv6 route-static {} {} {}",
+                r.dst, r.len, r.nexthop
+            )),
         }
     }
     // OSPF（v4）
@@ -255,9 +268,10 @@ pub fn render(d: &DevSummary, dialect: Dialect) -> String {
     // NAT
     for idx in &d.nat_inside {
         match dialect {
-            Dialect::Ios => {
-                out.push(format!("interface GigabitEthernet0/0/{} nat inside", idx + 1))
-            }
+            Dialect::Ios => out.push(format!(
+                "interface GigabitEthernet0/0/{} nat inside",
+                idx + 1
+            )),
             _ => out.push(format!(
                 "interface GigabitEthernet0/0/{} nat inbound",
                 idx + 1
@@ -266,9 +280,10 @@ pub fn render(d: &DevSummary, dialect: Dialect) -> String {
     }
     for idx in &d.nat_outside {
         match dialect {
-            Dialect::Ios => {
-                out.push(format!("interface GigabitEthernet0/0/{} nat outside", idx + 1))
-            }
+            Dialect::Ios => out.push(format!(
+                "interface GigabitEthernet0/0/{} nat outside",
+                idx + 1
+            )),
             _ => out.push(format!(
                 "interface GigabitEthernet0/0/{} nat outbound",
                 idx + 1
@@ -372,7 +387,10 @@ pub fn render(d: &DevSummary, dialect: Dialect) -> String {
     if let Some(m) = &d.mlag {
         out.push(format!("mlag domain {}", m.domain));
         for p in &m.peer_links {
-            out.push(format!("interface GigabitEthernet0/0/{} mlag peer-link", p + 1));
+            out.push(format!(
+                "interface GigabitEthernet0/0/{} mlag peer-link",
+                p + 1
+            ));
         }
     }
     if let Some(st) = &d.stack {

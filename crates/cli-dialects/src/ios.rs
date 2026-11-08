@@ -98,7 +98,10 @@ fn h_shutdown(c: &mut Ctx) -> Result<String, CliError> {
 
 fn show_branch() -> CNode {
     CNode::lit("show", "Show running system information")
-        .kid(CNode::lit("running-config", "Current operating configuration").run(cmd::show_running_config))
+        .kid(
+            CNode::lit("running-config", "Current operating configuration")
+                .run(cmd::show_running_config),
+        )
         .kid(CNode::lit("startup-config", "Startup configuration").run(cmd::show_running_config))
         .kid(
             CNode::lit("ip", "IP information")
