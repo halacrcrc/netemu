@@ -1127,40 +1127,46 @@ export const lab15: LabDef = {
   id: 'vxlan-dc',
   title: '实验十五 · VXLAN 数据中心跨 DC 二层互通',
   brief:
-    '两台数据中心交换机作为 VTEP，通过 VXLAN 把本地 VLAN10 映射到 VNI 10000，在 L3 Underlay 上实现跨 DC 的二层延伸。H1/H2 同网段但位于不同机房，仍可直接互通。',
+    '两台数据中心交换机作为 VTEP，之间隔着一台只跑 IPv4 转发的 SPINE 路由器（L3 Underlay）。VXLAN 把本地 VLAN10 映射到 VNI 10000，封装报文跨过 IP 骨干到达对端 VTEP 后解封装——H1/H2 同网段但位于不同机房，仍可直接互通。',
   tasks: [
-    'DSW1：vlan batch 10 100；G0/0/1 接 H1 access VLAN10；G0/0/2 接 DSW2 access VLAN100',
-    'DSW1：interface vlanif 100 → ip address 10.0.0.1 24 → undo shutdown',
-    'DSW1：vxlan local 10.0.0.1 → vxlan vni 10000 vlan 10 → vxlan peer 10.0.0.2',
-    'DSW2：vlan batch 10 100；G0/0/1 接 DSW1 access VLAN100；G0/0/2 接 H2 access VLAN10',
-    'DSW2：interface vlanif 100 → ip address 10.0.0.2 24 → undo shutdown',
-    'DSW2：vxlan local 10.0.0.2 → vxlan vni 10000 vlan 10 → vxlan peer 10.0.0.1',
-    'display vxlan 应看到 VNI 10000 <-> VLAN10 与对端 VTEP；H1 ping 192.168.10.20 应通',
-    '（抓包可见 VXLAN 外层报文，内层为原始以太帧）',
+    'DSW1：vlan batch 10 100；G0/0/1 接 H1 access VLAN10；G0/0/2 接 SPINE access VLAN100',
+    'DSW1：interface vlanif 100 → ip address 10.0.0.1 24 → undo shutdown；ip route-static 10.0.1.0 24 10.0.0.2',
+    'DSW1：vxlan local 10.0.0.1 → vxlan vni 10000 vlan 10 → vxlan peer 10.0.1.2',
+    'SPINE：G0/0/0 10.0.0.2/24、G0/0/1 10.0.1.1/24，均 undo shutdown——只做 IPv4 转发，不要配置任何 VXLAN',
+    'DSW2：vlan batch 10 100；G0/0/1 接 SPINE access VLAN100；G0/0/2 接 H2 access VLAN10',
+    'DSW2：interface vlanif 100 → ip address 10.0.1.2 24 → undo shutdown；ip route-static 10.0.0.0 24 10.0.1.1',
+    'DSW2：vxlan local 10.0.1.2 → vxlan vni 10000 vlan 10 → vxlan peer 10.0.0.1',
+    'ping 10.0.1.2（从 DSW1）应通——Underlay 已跨 SPINE 贯通；H1 ping 192.168.10.20 应通',
+    '抓包 DSW1—SPINE 链路：VXLAN 外层报文（10.0.0.1 → 10.0.1.2），内层是原始以太帧',
   ],
   checks: [
     { label: 'DSW1 配置 VNI 10000 ↔ VLAN10', kind: { type: 'vxlanVni', dev: 'DSW1', vlan: 10, vni: 10000 } },
     { label: 'DSW2 配置 VNI 10000 ↔ VLAN10', kind: { type: 'vxlanVni', dev: 'DSW2', vlan: 10, vni: 10000 } },
+    { label: 'Underlay 跨 SPINE 贯通（DSW1 → DSW2 的 VTEP 地址）', kind: { type: 'ping', from: 'DSW1', to: '10.0.1.2' } },
     { label: 'H1 → H2 跨 DC 二层互通', kind: { type: 'ping', from: 'H1', to: '192.168.10.20' } },
   ],
   build: (sim) => {
     const h1 = sim.add_device('Host', 'Ios');
     const d1 = sim.add_device('Switch', 'Vrp');
+    const spine = sim.add_device('Router', 'Vrp');
     const d2 = sim.add_device('Switch', 'Vrp');
     const h2 = sim.add_device('Host', 'Ios');
     sim.rename_device(h1, 'H1');
     sim.rename_device(d1, 'DSW1');
+    sim.rename_device(spine, 'SPINE');
     sim.rename_device(d2, 'DSW2');
     sim.rename_device(h2, 'H2');
     sim.add_link(h1, d1); // DSW1 p0
-    sim.add_link(d1, d2); // DSW1 p1 / DSW2 p0
+    sim.add_link(d1, spine); // DSW1 p1 / SPINE p0
+    sim.add_link(spine, d2); // SPINE p1 / DSW2 p0
     sim.add_link(d2, h2); // DSW2 p1
     sim.set_host_config(h1, '192.168.10.10', 24, '');
     sim.set_host_config(h2, '192.168.10.20', 24, '');
-    setPosition(h1, { x: 60, y: 90 });
-    setPosition(d1, { x: 270, y: 90 });
-    setPosition(d2, { x: 500, y: 90 });
-    setPosition(h2, { x: 710, y: 90 });
+    setPosition(h1, { x: 50, y: 130 });
+    setPosition(d1, { x: 230, y: 130 });
+    setPosition(spine, { x: 430, y: 60 });
+    setPosition(d2, { x: 630, y: 130 });
+    setPosition(h2, { x: 810, y: 130 });
   },
 };
 
@@ -1260,38 +1266,43 @@ export const lab18: LabDef = {
   id: 'evpn-dc',
   title: '实验十八 · EVPN 控制面（自动发现 VTEP）',
   brief:
-    '两台 VTEP 不再手工指定 vxlan peer，而是通过 EVPN 路由通告（简化 Type-3）互相学习远端 VTEP 与 VNI，数据面自动建立 VXLAN 隧道。',
+    '与实验十五同构的 SPINE Underlay 上，两台 VTEP 不再手工指定 vxlan peer，而是通过 EVPN 路由通告（简化 Type-3）跨过 SPINE 互相学习远端 VTEP 与 VNI，数据面自动建立 VXLAN 隧道——控制面自动化的价值在多节点组网里才真正体现。',
   tasks: [
-    'DSW1/DSW2：按实验十五配置 VLAN10/100、Underlay SVI 10.0.0.1/2、VXLAN local 与 VNI 10000 ↔ VLAN10',
-    'DSW1：evpn enable → evpn peer 10.0.0.2（不要再配静态 vxlan peer）',
+    'DSW1/DSW2：按实验十五的新拓扑配置（VLAN10/100、Underlay SVI 10.0.0.1 与 10.0.1.2、到对端 VTEP 段的静态路由、VXLAN local 与 VNI 10000 ↔ VLAN10）',
+    'SPINE：G0/0/0 10.0.0.2/24、G0/0/1 10.0.1.1/24——只做 IPv4 转发；EVPN 通告与 VXLAN 数据面都会穿过它',
+    'DSW1：evpn enable → evpn peer 10.0.1.2（不要再配静态 vxlan peer）',
     'DSW2：evpn enable → evpn peer 10.0.0.1',
-    'display evpn：应看到对端 VTEP 与 VNI 10000 路由（由 EVPN 自动学习）',
+    'display evpn：应看到对端 VTEP（10.0.1.2 / 10.0.0.1）与 VNI 10000 路由（由 EVPN 自动学习，通告跨过 SPINE）',
     'display vxlan：Peers 中应自动出现远端 VTEP',
     'H1 ping 192.168.10.20 应通（数据面自动使用学习到的 VTEP）',
   ],
   checks: [
-    { label: 'DSW1 学到 DSW2 的 EVPN 路由', kind: { type: 'evpnRoute', dev: 'DSW1', vtep: '10.0.0.2', vni: 10000 } },
+    { label: 'DSW1 学到 DSW2 的 EVPN 路由', kind: { type: 'evpnRoute', dev: 'DSW1', vtep: '10.0.1.2', vni: 10000 } },
     { label: 'DSW2 学到 DSW1 的 EVPN 路由', kind: { type: 'evpnRoute', dev: 'DSW2', vtep: '10.0.0.1', vni: 10000 } },
     { label: 'H1 → H2 经 EVPN 自动 VTEP 连通', kind: { type: 'ping', from: 'H1', to: '192.168.10.20' } },
   ],
   build: (sim) => {
     const h1 = sim.add_device('Host', 'Ios');
     const d1 = sim.add_device('Switch', 'Vrp');
+    const spine = sim.add_device('Router', 'Vrp');
     const d2 = sim.add_device('Switch', 'Vrp');
     const h2 = sim.add_device('Host', 'Ios');
     sim.rename_device(h1, 'H1');
     sim.rename_device(d1, 'DSW1');
+    sim.rename_device(spine, 'SPINE');
     sim.rename_device(d2, 'DSW2');
     sim.rename_device(h2, 'H2');
     sim.add_link(h1, d1);
-    sim.add_link(d1, d2);
+    sim.add_link(d1, spine); // DSW1 p1 / SPINE p0
+    sim.add_link(spine, d2); // SPINE p1 / DSW2 p0
     sim.add_link(d2, h2);
     sim.set_host_config(h1, '192.168.10.10', 24, '');
     sim.set_host_config(h2, '192.168.10.20', 24, '');
-    setPosition(h1, { x: 60, y: 90 });
-    setPosition(d1, { x: 270, y: 90 });
-    setPosition(d2, { x: 500, y: 90 });
-    setPosition(h2, { x: 710, y: 90 });
+    setPosition(h1, { x: 50, y: 130 });
+    setPosition(d1, { x: 230, y: 130 });
+    setPosition(spine, { x: 430, y: 60 });
+    setPosition(d2, { x: 630, y: 130 });
+    setPosition(h2, { x: 810, y: 130 });
   },
 };
 

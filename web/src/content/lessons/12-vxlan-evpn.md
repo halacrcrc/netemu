@@ -40,4 +40,4 @@ evpn peer 10.0.0.2
 
 ## 动手
 
-先打开实验十五：手工指定 peer，H1 与 H2 同网段、跨 DC 直接 ping 通；抓包能看到外层 10.0.0.x、内层原始以太帧。再打开实验十八：去掉静态 peer，改用 `evpn enable` + `evpn peer`，等 2 秒通告后 `display evpn` / `display vxlan` 应自动出现远端 VTEP，H1 仍能 ping 通 H2。
+先打开实验十五：VTEP 之间隔着一台 SPINE 路由器，手工指定 peer 并配 Underlay 静态路由后，H1 与 H2 同网段、跨 DC 直接 ping 通；抓包能看到外层 10.0.x.x、内层原始以太帧。再打开实验十八：去掉静态 peer，改用 `evpn enable` + `evpn peer`，EVPN 通告跨过 SPINE，等 2 秒后 `display evpn` / `display vxlan` 应自动出现远端 VTEP，H1 仍能 ping 通 H2。

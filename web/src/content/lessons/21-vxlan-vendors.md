@@ -60,4 +60,4 @@ evpn peer 10.0.0.2
 
 ## 动手
 
-先打开实验十五：静态 peer 让 H1/H2 跨 DC 二层互通；再打开实验十八：改用 EVPN，等 2 秒通告后 `display evpn` / `display vxlan` 自动出现远端 VTEP。抓包对比：外层 10.0.0.x + UDP 4789，内层是原始以太帧。
+先打开实验十五：VTEP 跨过 SPINE 组成 Underlay，静态 peer 让 H1/H2 跨 DC 二层互通；再打开实验十八：改用 EVPN，通告跨过 SPINE，等 2 秒后 `display evpn` / `display vxlan` 自动出现远端 VTEP。抓包对比：外层 10.0.x.x 封装报文，内层是原始以太帧。

@@ -305,41 +305,26 @@ export const LABS_EN: Record<string, LabEn> = {
 'vxlan-dc': {
     title: 'Lab 15 · VXLAN Data Center Cross-DC Layer 2',
     brief:
-      'Two data-center switches act as VTEPs and map local VLAN10 to VNI 10000 over an L3 underlay, extending Layer 2 across data centers. H1 and H2 are in the same subnet but different sites and can still reach each other directly.',
+      'Two data-center switches act as VTEPs with an IPv4-forwarding SPINE router between them (the L3 underlay). VXLAN maps local VLAN10 to VNI 10000; encapsulated packets cross the IP backbone and are decapsulated at the remote VTEP — H1 and H2 are in the same subnet but different sites and can still reach each other directly.',
     tasks: [
-      'DSW1: vlan batch 10 100; G0/0/1 to H1 access VLAN10; G0/0/2 to DSW2 access VLAN100',
-      'DSW1: interface vlanif 100 -> ip address 10.0.0.1 24 -> undo shutdown',
-      'DSW1: vxlan local 10.0.0.1 -> vxlan vni 10000 vlan 10 -> vxlan peer 10.0.0.2',
-      'DSW2: vlan batch 10 100; G0/0/1 to DSW1 access VLAN100; G0/0/2 to H2 access VLAN10',
-      'DSW2: interface vlanif 100 -> ip address 10.0.0.2 24 -> undo shutdown',
-      'DSW2: vxlan local 10.0.0.2 -> vxlan vni 10000 vlan 10 -> vxlan peer 10.0.0.1',
-      'display vxlan should show VNI 10000 <-> VLAN10 and the peer VTEP; H1 ping 192.168.10.20 should succeed',
-      '(Packet capture shows the VXLAN outer frame with the original Ethernet frame inside)',
+      'DSW1: vlan batch 10 100; G0/0/1 to H1 access VLAN10; G0/0/2 to SPINE access VLAN100',
+      'DSW1: interface vlanif 100 -> ip address 10.0.0.1 24 -> undo shutdown; ip route-static 10.0.1.0 24 10.0.0.2',
+      'DSW1: vxlan local 10.0.0.1 -> vxlan vni 10000 vlan 10 -> vxlan peer 10.0.1.2',
+      'SPINE: G0/0/0 10.0.0.2/24, G0/0/1 10.0.1.1/24, both undo shutdown — plain IPv4 forwarding only, never configure VXLAN on it',
+      'DSW2: vlan batch 10 100; G0/0/1 to SPINE access VLAN100; G0/0/2 to H2 access VLAN10',
+      'DSW2: interface vlanif 100 -> ip address 10.0.1.2 24 -> undo shutdown; ip route-static 10.0.0.0 24 10.0.1.1',
+      'DSW2: vxlan local 10.0.1.2 -> vxlan vni 10000 vlan 10 -> vxlan peer 10.0.0.1',
+      'ping 10.0.1.2 (from DSW1) should succeed — the underlay now crosses the SPINE; H1 ping 192.168.10.20 should succeed',
+      'Capture the DSW1—SPINE link: VXLAN outer packets (10.0.0.1 -> 10.0.1.2) with the original Ethernet frame inside',
     ],
     checkLabels: [
       'DSW1 maps VNI 10000 to VLAN10',
       'DSW2 maps VNI 10000 to VLAN10',
+      'Underlay reachable across the SPINE (DSW1 -> DSW2 VTEP address)',
       'H1 -> H2 cross-DC Layer 2 reachable',
     ],
   },
-'stack-irf': {
-    title: 'Lab 16 · Stacking / IRF (One Logical Switch)',
-    brief:
-      'Two switches share a stack domain and become one logical switch: member links are treated as internal fabric and are not blocked by STP, so PCs under different members communicate in the same VLAN.',
-    tasks: [
-      'SW1: stack domain 10 -> stack member 1 -> stack priority 200',
-      'SW2: stack domain 10 -> stack member 2 -> stack priority 100',
-      'SW1/SW2: vlan batch 10; PC-facing ports access VLAN10',
-      'SW1/SW2: interconnect ports as trunk allowing vlan 10',
-      'display stack should show domain 10, both members, and SW1 as Master',
-      'PC1 ping 192.168.10.12 should succeed (Layer 2 across stack members)',
-    ],
-    checkLabels: [
-      'SW1 is member 1 of stack domain 10',
-      'SW2 is member 2 of stack domain 10',
-      'PC1 -> PC2 reachable across stack members',
-    ],
-  },
+
   'mlag-dc': {
     title: 'Lab 17 · M-LAG Cross-Device Link Aggregation',
     brief:
@@ -364,95 +349,21 @@ export const LABS_EN: Record<string, LabEn> = {
 'evpn-dc': {
     title: 'Lab 18 · EVPN Control Plane (Automatic VTEP Discovery)',
     brief:
-      'The two VTEPs no longer use static vxlan peers; they advertise EVPN routes (simplified Type-3) to learn each other’s VTEP and VNI, and the data plane automatically builds the VXLAN tunnel.',
+      'On the same SPINE underlay as Lab 15, the two VTEPs no longer point at each other statically — they learn the remote VTEP and VNI through EVPN route advertisements (simplified Type-3) that cross the SPINE, and the data plane builds the VXLAN tunnel automatically. The value of a control plane only shows in multi-node topologies.',
     tasks: [
-      'DSW1/DSW2: configure VLAN10/100, underlay SVI 10.0.0.1/2, VXLAN local and VNI 10000 <-> VLAN10 as in Lab 15',
-      'DSW1: evpn enable -> evpn peer 10.0.0.2 (do not configure a static vxlan peer)',
+      'DSW1/DSW2: configure as in the new Lab 15 topology (VLAN10/100, underlay SVIs 10.0.0.1 and 10.0.1.2, static routes to the peer VTEP segment, vxlan local and VNI 10000 <-> VLAN10)',
+      'SPINE: G0/0/0 10.0.0.2/24, G0/0/1 10.0.1.1/24 — plain IPv4 forwarding only; both EVPN advertisements and VXLAN data packets cross it',
+      'DSW1: evpn enable -> evpn peer 10.0.1.2 (do not configure a static vxlan peer)',
       'DSW2: evpn enable -> evpn peer 10.0.0.1',
-      'display evpn should show the remote VTEP and VNI 10000 route learned through EVPN',
-      'display vxlan: the remote VTEP should appear automatically in Peers',
-      'H1 ping 192.168.10.20 should succeed (data plane uses the learned VTEP)',
+      'display evpn: should show the peer VTEP (10.0.1.2 / 10.0.0.1) and VNI 10000 route (learned via EVPN across the SPINE)',
+      'display vxlan: the remote VTEP should appear in Peers automatically',
+      'H1 ping 192.168.10.20 should succeed (the data plane uses the learned VTEP automatically)',
     ],
     checkLabels: [
-      'DSW1 learned an EVPN route from DSW2',
-      'DSW2 learned an EVPN route from DSW1',
-      'H1 -> H2 reachable through EVPN-discovered VTEPs',
+      'DSW1 learned the DSW2 EVPN route',
+      'DSW2 learned the DSW1 EVPN route',
+      'H1 -> H2 reachable via the EVPN-learned VTEP',
     ],
   },
-  'port-isolation': {
-    title: 'Lab 20 · MUX VLAN and Port Isolation',
-    brief:
-      'Isolate ports inside one VLAN: PC1 (separate) cannot reach PC2 (group), but both can reach PC3 (principal). This is the core behavior of MUX VLAN / private VLAN.',
-    tasks: [
-      'SW1: vlan batch 10; G0/0/1 to PC1, G0/0/2 to PC2, G0/0/3 to PC3, all access VLAN10',
-      'SW1: G0/0/1 -> mux-vlan separate; G0/0/2 -> mux-vlan group 1; G0/0/3 -> mux-vlan principal',
-      '(Optional) run port-isolate enable group 1 on PC1/PC2 ports and observe the same isolation',
-      'Check port roles with display mux-vlan / display port-isolate',
-      'PC1 -> PC2 should fail; PC1 -> PC3 and PC2 -> PC3 should succeed',
-    ],
-    checkLabels: [
-      'G0/0/1 is a separate port',
-      'G0/0/2 is a group 1 port',
-      'G0/0/3 is a principal port',
-      'PC1 -> PC2 is isolated',
-      'PC1 -> PC3 (principal) is reachable',
-    ],
-  },
-  ospfv3: {
-    title: 'Lab 21 · OSPFv3 Dynamic Routing',
-    brief:
-      'Three routers form a chain with a business subnet at each end. R1 and R3 are not directly connected — R3 learns the R1 subnet through OSPFv3 LSA flooding across the middle, and R2 maintains two neighbors at once. With OSPFv3 enabled, PC1 and PC2 can ping6 across all three routers.',
-    tasks: [
-      'Interface addresses (all undo shutdown): R1 g0/0/0 2001:db8:1::1/64, g0/0/1 2001:db8:12::1/64; R2 g0/0/0 2001:db8:12::2/64, g0/0/1 2001:db8:23::1/64; R3 g0/0/0 2001:db8:23::2/64, g0/0/1 2001:db8:3::1/64',
-      'R1/R2/R3: ospfv3 1 -> router-id 1.1.1.1 / 2.2.2.2 / 3.3.3.3',
-      'R1/R2/R3: run ospfv3 1 area 0 on the interconnect and service interfaces',
-      'display ospfv3 peer: R1/R3 each 1 neighbor, R2 should have 2 neighbors',
-      'display ipv6 routing-table: R3 should show the far subnet 2001:db8:1::/64 marked O — it was never directly connected',
-      'PC1: ping6 2001:db8:3::10 should succeed',
-    ],
-    checkLabels: [
-      'R1 forms an OSPFv3 neighbor',
-      'R2 keeps two neighbors (flooding relay)',
-      'R3 forms an OSPFv3 neighbor',
-      'PC1 -> PC2 ping6 across three routers succeeds',
-    ],
-  },
-  'srv6-be': {
-    title: 'Lab 22 · SRv6 BE Forwarding',
-    brief:
-      'PE1—P—PE2 form an IPv6 underlay backbone, each edge attached to a business subnet. Configure a Locator and local SID on the PEs and encapsulate traffic toward the remote SID; packets hop across the backbone and the egress PE decapsulates and delivers them. Note the P router runs plain IPv6 forwarding with no SRv6 at all — that is the essence of SRv6 BE.',
-    tasks: [
-      'Interface addresses (all undo shutdown): PE1 g0/0/0 2001:db8:1::1/64, g0/0/1 2001:db8:12::1/64; P g0/0/0 2001:db8:12::2/64, g0/0/1 2001:db8:23::1/64; PE2 g0/0/0 2001:db8:23::2/64, g0/0/1 2001:db8:2::1/64',
-      'PE1: srv6 locator 2001:db8:100::/64; srv6 sid 2001:db8:100::1. PE2: srv6 locator 2001:db8:200::/64; srv6 sid 2001:db8:200::1',
-      'SRv6 routes: PE1 srv6 route 2001:db8:2::/64 sid 2001:db8:200::1; PE2 srv6 route 2001:db8:1::/64 sid 2001:db8:100::1',
-      'Underlay static routes (simulate full IGP reachability): PE1 ipv6 route-static 2001:db8:200:: 64 2001:db8:12::2 and 2001:db8:23:: 64 2001:db8:12::2; P 2001:db8:200:: 64 2001:db8:23::2 and 2001:db8:100:: 64 2001:db8:12::1; PE2 ipv6 route-static 2001:db8:100:: 64 2001:db8:23::1 and 2001:db8:12:: 64 2001:db8:23::1',
-      'Do not configure any srv6 command on P — it only forwards IPv6. Capture the PE1—P link to watch encapsulated SRv6 packets hop across the backbone',
-      'display srv6 should show the locator, local SID, and routes; PC1 ping6 2001:db8:2::10 should succeed',
-    ],
-    checkLabels: [
-      'PE1 has an SRv6 route to the remote business subnet',
-      'PE2 has the return SRv6 route',
-      'Underlay IPv6 reachable (PE1 -> P)',
-      'PC1 -> PC2 succeeds through SRv6 across the backbone',
-    ],
-  },
-  'f5-ltm': {
-    title: 'Lab 19 · F5 LTM Load Balancing',
-    brief:
-      'The F5 load balancer exposes VIP 10.0.0.100:80 to clients with a two-member backend pool. Client TCP connections to the VIP are load-balanced round-robin with destination and return source translation.',
-    tasks: [
-      'LB1: G0/0/0 client side 10.0.0.1/24; G0/0/1 to SRV1 10.0.1.1/24; G0/0/2 to SRV2 10.0.2.1/24, all undo shutdown',
-      'LB1: ltm pool WEB member 10.0.1.10 80',
-      'LB1: ltm pool WEB member 10.0.2.11 80',
-      'LB1: ltm virtual VS vip 10.0.0.100 80 pool WEB',
-      'display ltm should show VS -> WEB and both pool members',
-      'PC1: run tcp 10.0.0.100 80 twice; both should report a successful connection',
-      'display ltm: two sessions should appear, pointing to different members (round-robin)',
-    ],
-    checkLabels: [
-      'LB1 virtual server VS = 10.0.0.100:80',
-      'PC1 first connection to the VIP succeeds',
-      'PC1 second connection to the VIP succeeds',
-    ],
-  },
+
 };

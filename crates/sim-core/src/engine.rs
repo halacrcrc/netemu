@@ -606,14 +606,19 @@ impl Engine {
                 }
             }
         }
-        // 0c. VXLAN：VTEP 解封装（仅本机 VTEP 地址）
+        // 0c. VXLAN：VTEP 解封装（仅本机 VTEP 地址）；Underlay 路由器按外层 IPv4 转发
         if let L3::Vxlan(vx) = frame.payload {
-            self.vxlan_on_frame(dev_id, in_port, vx);
+            let fwd = VxlanPacket { ttl: vx.ttl.saturating_sub(1), ..vx };
+            if !self.encap_fwd_over_underlay(dev_id, in_port, vx.dst, vx.ttl, L3::Vxlan(fwd)) {
+                self.vxlan_on_frame(dev_id, in_port, vx);
+            }
             return;
         }
-        // 0d. EVPN：控制面路由
+        // 0d. EVPN：VTEP 控制面；Underlay 路由器按外层单播转发
         if let L3::Evpn(e) = frame.payload {
-            self.evpn_on_packet(dev_id, e);
+            if !self.encap_fwd_over_underlay(dev_id, in_port, e.dst, DEFAULT_TTL, L3::Evpn(e)) {
+                self.evpn_on_packet(dev_id, e);
+            }
             return;
         }
         // 0a. LACP：先于 VLAN/STP 处理（聚合协商与端口状态无关）
@@ -1100,8 +1105,15 @@ impl Engine {
             L3::Tcp(tcp) => self.tcp_ingress(dev_id, port, tcp),
             L3::Ipsec(pkt) => self.ipsec_ingress(dev_id, port, pkt),
             L3::Capwap(pkt) => self.capwap_ingress(dev_id, pkt),
-            L3::Vxlan(_) => {}  // 仅交换机 VTEP 处理
-            L3::Evpn(_) => {}   // EVPN 仅交换机处理
+            L3::Vxlan(vx) => {
+                // VXLAN 外层在 Underlay 路由器上按外层 IPv4 转发（广播 MAC 逐跳约定）
+                let fwd = VxlanPacket { ttl: vx.ttl.saturating_sub(1), ..vx };
+                self.encap_fwd_over_underlay(dev_id, port, vx.dst, vx.ttl, L3::Vxlan(fwd));
+            }
+            L3::Evpn(e) => {
+                // EVPN 通告跨 Underlay 路由器转发
+                self.encap_fwd_over_underlay(dev_id, port, e.dst, DEFAULT_TTL, L3::Evpn(e));
+            }
             L3::Bpdu(_) => {}   // 主机/路由器不处理 802.1D BPDU
             L3::Lacp(_) => {}   // 主机/路由器不做链路聚合
             L3::Ospf(_) => {}   // OSPF 已在入口处理
@@ -2892,9 +2904,11 @@ impl Engine {
             _ => return,
         };
         for peer in peers {
-            let Some((port, _, out_vlan)) = self.net.lookup_route(dev, peer) else {
+            let Some((port, nh, out_vlan)) = self.net.lookup_route(dev, peer) else {
                 continue;
             };
+            // 经静态路由的 peer：路由表项本身无 VLAN，按下一跳所在的直连网段解析出发送 VLAN
+            let out_vlan = out_vlan.or_else(|| self.net.lookup_route(dev, nh).and_then(|(_, _, v)| v));
             let src_mac = out_vlan.map(svi_mac).unwrap_or_else(|| {
                 self.net
                     .device(dev)
@@ -2925,6 +2939,51 @@ impl Engine {
                 None => {}
             }
         }
+    }
+
+    /// Underlay 路由器转发 VXLAN/EVPN 封装帧（与 IPsec/TCP 相同的广播 MAC 逐跳约定）：
+    /// 按外层单播 v4 查表转发，出口≠入口，VXLAN TTL 递减。
+    /// 返回 true 表示已处理（转发或丢弃）；false 表示留给本机 VTEP 解封装。
+    fn encap_fwd_over_underlay(
+        &mut self,
+        dev: DevId,
+        in_port: PortId,
+        dst: Ipv4Addr,
+        ttl: u8,
+        payload: L3,
+    ) -> bool {
+        if !matches!(
+            d_kind(&self.net, dev),
+            DeviceKind::Router | DeviceKind::Firewall
+        ) {
+            return false;
+        }
+        if ttl <= 1 {
+            self.dropped += 1;
+            return true;
+        }
+        let Some((out_port, _, _)) = self.net.lookup_route(dev, dst) else {
+            self.dropped += 1;
+            return true;
+        };
+        if out_port == in_port {
+            return true;
+        }
+        let Some(d) = self.net.device(dev) else {
+            return true;
+        };
+        let Some(p) = d.port(out_port) else {
+            return true;
+        };
+        let frame = EthernetFrame {
+            dst: BROADCAST_MAC,
+            src: p.mac,
+            vlan: None,
+            ethertype: ETHERTYPE_IPV4,
+            payload,
+        };
+        self.transmit_frame(dev, out_port, frame);
+        true
     }
 
     fn vxlan_on_frame(&mut self, dev: DevId, in_port: PortId, vx: VxlanPacket) {
@@ -3036,9 +3095,11 @@ impl Engine {
             return;
         }
         for peer in peers {
-            let Some((_, _, out_vlan)) = self.net.lookup_route(dev, peer) else {
+            let Some((_, nh, out_vlan)) = self.net.lookup_route(dev, peer) else {
                 continue;
             };
+            // 经静态路由的 peer：按下一跳所在的直连网段解析通告 VLAN
+            let out_vlan = out_vlan.or_else(|| self.net.lookup_route(dev, nh).and_then(|(_, _, v)| v));
             let src_mac = out_vlan.map(svi_mac).unwrap_or([0; 6]);
             for (vni, vlan) in &mappings {
                 let pkt = EvpnPacket {
