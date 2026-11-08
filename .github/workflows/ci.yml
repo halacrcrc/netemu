@@ -26,19 +26,12 @@ jobs:
       - name: 单元与场景测试
         run: cargo test --workspace
 
-      # wasm-pack 二进制缓存：release CDN 偶发 504，命中缓存即跳过下载
-      - name: 缓存 wasm-pack
-        id: wpcache
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/bin/wasm-pack
-          key: wasm-pack-v0.15.1-linux-x64
-
-      - name: 安装 wasm-pack（缓存未命中时）
-        if: steps.wpcache.outputs.cache-hit != 'true'
-        uses: jetli/wasm-pack-action@v0.4.0
-        with:
-          version: v0.15.1
+      # wasm-pack 随仓库分发（v0.15.1 linux musl 静态二进制）：GitHub release CDN 偶发 504 时不再阻塞
+      - name: 安装 wasm-pack（仓库内置二进制）
+        run: |
+          cp .github/bin/wasm-pack-linux-x64 /usr/local/bin/wasm-pack
+          chmod +x /usr/local/bin/wasm-pack
+          wasm-pack --version
 
       - name: 构建 WASM
         run: wasm-pack build crates/sim-wasm --target web --out-name net_sim --out-dir ../../web/src/wasm
