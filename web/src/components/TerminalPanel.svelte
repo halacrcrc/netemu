@@ -253,15 +253,16 @@
         <span class="x" role="button" tabindex="-1" onclick={(e) => { e.stopPropagation(); closeTerminal(dev); }}>×</span>
       </button>
     {/each}
-    {#if !app.tabs.length}
-      <span class="empty">{t('term.empty')}</span>
-    {/if}
   </div>
   <div class="term-body" bind:this={bodyEl}></div>
+  {#if !app.tabs.length}
+    <div class="term-empty">{t('term.empty')}</div>
+  {/if}
 </div>
 
 <style>
   .terminal-panel {
+    position: relative;
     height: 260px;
     display: flex;
     flex-direction: column;
@@ -294,10 +295,16 @@
     opacity: 1;
     color: var(--bad);
   }
-  .empty {
+  /* 空态：提示居中，留白是有意的 */
+  .term-empty {
+    position: absolute;
+    inset: 32px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-dim);
-    font-size: 12px;
-    padding: 4px;
+    font-size: 13px;
+    pointer-events: none;
   }
   .term-body {
     flex: 1;

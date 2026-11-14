@@ -1,5 +1,5 @@
 // 极简 Markdown 渲染器：覆盖课程与笔记所需的子集。
-// 支持：##/###/#### 标题、- 无序列表、1. 有序列表、``` 代码块、**加粗**、`行内代码`、段落。
+// 支持：#/##/###/#### 标题（单 # 与 ## 同级渲染）、- 无序列表、1. 有序列表、``` 代码块、**加粗**、`行内代码`、段落。
 // 所有 HTML 先转义，内容为本地/用户自写，安全可控。
 
 function esc(s: string): string {
@@ -62,12 +62,12 @@ export function renderMarkdown(src: string): string {
       continue;
     }
     const line = raw.trimEnd();
-    // 标题
-    const h = /^(#{2,4})\s+(.*)$/.exec(line);
+    // 标题（单 # 是笔记常用的一级标题，视觉上与课程小节 ## 同层级）
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
     if (h) {
       closePara();
       closeList();
-      const level = h[1].length;
+      const level = Math.min(4, Math.max(2, h[1].length));
       out.push(`<h${level} class="md-h${level}">${inline(h[2])}</h${level}>`);
       continue;
     }

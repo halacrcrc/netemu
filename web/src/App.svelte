@@ -41,22 +41,24 @@
         {t('nav.notes')}
       </span>
     </nav>
-    <button
-      class="theme-toggle"
-      onclick={toggleLang}
-      title={t('lang.toggle')}
-      aria-label={t('lang.toggle')}
-    >
-      {i18n.lang === 'zh' ? 'EN' : '中'}
-    </button>
-    <button
-      class="theme-toggle"
-      onclick={toggleTheme}
-      title={theme.name === 'dark' ? t('theme.title.light') : t('theme.title.dark')}
-      aria-label={theme.name === 'dark' ? t('theme.title.light') : t('theme.title.dark')}
-    >
-      {theme.name === 'dark' ? '☀︎' : '☾'}
-    </button>
+    <div class="header-actions">
+      <button
+        class="theme-toggle"
+        onclick={toggleLang}
+        title={t('lang.toggle')}
+        aria-label={t('lang.toggle')}
+      >
+        {i18n.lang === 'zh' ? 'EN' : '中'}
+      </button>
+      <button
+        class="theme-toggle"
+        onclick={toggleTheme}
+        title={theme.name === 'dark' ? t('theme.title.light') : t('theme.title.dark')}
+        aria-label={theme.name === 'dark' ? t('theme.title.light') : t('theme.title.dark')}
+      >
+        {theme.name === 'dark' ? '☀︎' : '☾'}
+      </button>
+    </div>
   </header>
   {#if app.viewName === 'lab'}
     <div class="main">
@@ -87,12 +89,16 @@
     align-items: center;
     gap: 24px;
     padding: 0 16px;
-    height: 46px;
+    height: 48px;
     border-bottom: var(--header-border);
     background: var(--bg-panel);
   }
-  .theme-toggle {
+  .header-actions {
     margin-left: auto;
+    display: flex;
+    gap: 8px;
+  }
+  .theme-toggle {
     width: 32px;
     padding: 4px 0;
     font-size: 15px;

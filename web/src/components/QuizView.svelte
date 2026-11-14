@@ -168,7 +168,8 @@
         <div class="pad">
           {#each TOPICS as topic (topic.id)}
             {@const st = topicStats(topic.id)}
-            {@const pct = st.attempted ? Math.round((st.correct / st.attempted) * 100) : 0}
+            <!-- 条宽 = 正确数/总题数（真实覆盖进度）；正确率见练习入口卡片 -->
+            {@const pct = st.total ? Math.round((st.correct / st.total) * 100) : 0}
             <div class="topic-row">
               <span class="tname">{topicName(topic)}</span>
               <div class="bar">
@@ -341,7 +342,7 @@
   .stat .num {
     font-size: 24px;
     font-weight: 700;
-    color: var(--accent);
+    color: var(--text);
   }
   .stat .of {
     font-size: 13px;
@@ -359,7 +360,8 @@
     margin-bottom: 8px;
   }
   .tname {
-    width: 72px;
+    width: 104px;
+    flex-shrink: 0;
     font-size: 13px;
   }
   .bar {

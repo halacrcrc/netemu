@@ -99,6 +99,33 @@
 
 * {
   box-sizing: border-box;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 滚动条：跟随主题 ramp，细轨安静（含 xterm viewport） ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--text-dim);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 html,
@@ -126,7 +153,7 @@ button {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 5px 10px;
+  padding: 6px 12px;
   cursor: pointer;
   font-size: 13px;
   transition:
@@ -170,7 +197,7 @@ select {
   background: var(--bg-panel-2);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 5px;
+  border-radius: 6px;
   padding: 4px 8px;
   font-size: 13px;
 }
@@ -195,6 +222,11 @@ select:focus {
   font-weight: 600;
   border-bottom: 1px solid var(--border);
   letter-spacing: 0.05em;
+}
+
+/* 面板内容区内边距（组件可用局部规则覆盖，如课程阅读列 20px 26px） */
+.pad {
+  padding: 12px;
 }
 
 .mono {

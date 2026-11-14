@@ -488,7 +488,7 @@
             {/each}
           </div>
         {/if}
-        <button onclick={rotateDialect}>🌐 {t('left.rotateDialect')}（{dialectLabel()}）</button>
+        <button onclick={rotateDialect}>{t('left.rotateDialect')}（{dialectLabel()}）</button>
         <button onclick={() => startLab(activeLab!)}>{t('left.resetLab')}</button>
         <button class="danger" onclick={exitLab}>{t('left.exitLab')}</button>
       {:else}
@@ -555,12 +555,13 @@
   .left-panel {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 10px;    overflow-y: auto;
+    gap: 12px;
+    padding: 12px;
+    overflow-y: auto;
     height: 100%;
   }
   .pad {
-    padding: 10px 12px;
+    padding: 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;

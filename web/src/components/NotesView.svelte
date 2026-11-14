@@ -187,7 +187,7 @@
       <div class="panel"><div class="pad hint">{t('notes.selectHint')}</div></div>
     {/if}
 
-    <div class="panel">
+    <div class="panel sync-card">
       <h3>{t('notes.syncTitle')}</h3>
       <div class="pad">
         <div class="hint">{t('notes.syncHint')}</div>
@@ -227,6 +227,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    padding-top: 0;
   }
   .note-item {
     text-align: left;
@@ -253,6 +254,16 @@
     gap: 12px;
     overflow-y: auto;
     max-height: 100%;
+  }
+  /* 阅读列限宽：与课程一致，中文约 40 字/行；写作列同宽 */
+  .editor .panel .pad {
+    max-width: 42em;
+    padding: 20px 26px 24px;
+  }
+  .sync-card .pad {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
   .note-title {
     margin: 0;
